@@ -1,5 +1,8 @@
+ARG NODE_IMAGE=public.ecr.aws/docker/library/node:22-alpine
+ARG PYTHON_IMAGE=public.ecr.aws/docker/library/python:3.11-slim-bookworm
+
 # Stage 1: Build the Vue application
-FROM node:22-alpine AS frontend-builder
+FROM ${NODE_IMAGE} AS frontend-builder
 WORKDIR /web-ui
 COPY web-ui/package*.json ./
 RUN npm ci
@@ -7,7 +10,7 @@ COPY web-ui/ .
 RUN npm run build
 
 # Stage 2: Build the python environment with dependencies
-FROM python:3.11-slim-bookworm AS builder
+FROM ${PYTHON_IMAGE} AS builder
 
 # 设置环境变量以防止交互式提示
 ENV DEBIAN_FRONTEND=noninteractive \
@@ -20,7 +23,7 @@ COPY requirements-runtime.txt .
 RUN pip install --no-cache-dir -i https://pypi.tuna.tsinghua.edu.cn/simple -r requirements-runtime.txt
 
 # Stage 3: Create the final, lean image
-FROM python:3.11-slim-bookworm
+FROM ${PYTHON_IMAGE}
 
 WORKDIR /app
 ENV DEBIAN_FRONTEND=noninteractive \
