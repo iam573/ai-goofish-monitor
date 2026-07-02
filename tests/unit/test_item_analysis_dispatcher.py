@@ -129,3 +129,65 @@ def test_item_analysis_dispatcher_supports_keyword_mode_without_ai():
     asyncio.run(run())
     assert saved_records[0]["ai_analysis"]["analysis_source"] == "keyword"
     assert saved_records[0]["ai_analysis"]["is_recommended"] is True
+
+
+def test_item_analysis_dispatcher_exclude_keywords_override_keyword_recommendation():
+    saved_records = []
+    notifications = []
+
+    async def seller_loader(user_id: str):
+        return {"卖家标签": "个人闲置"}
+
+    async def image_downloader(product_id: str, image_urls: list[str], task_name: str):
+        raise AssertionError("命中忽略关键词不应下载图片")
+
+    async def ai_analyzer(record: dict, image_paths: list[str], prompt_text: str):
+        raise AssertionError("命中忽略关键词不应调用 AI")
+
+    async def notifier(item_data: dict, reason: str):
+        notifications.append((item_data["商品ID"], reason))
+
+    async def saver(record: dict, keyword: str):
+        saved_records.append(record)
+        return True
+
+    async def run():
+        dispatcher = ItemAnalysisDispatcher(
+            concurrency=1,
+            skip_ai_analysis=False,
+            seller_loader=seller_loader,
+            image_downloader=image_downloader,
+            ai_analyzer=ai_analyzer,
+            notifier=notifier,
+            saver=saver,
+        )
+        dispatcher.submit(
+            ItemAnalysisJob(
+                keyword="demo",
+                task_name="Demo",
+                decision_mode="keyword",
+                analyze_images=False,
+                prompt_text="",
+                keyword_rules=("a7m4",),
+                exclude_keyword_rules=("维修",),
+                final_record={
+                    "商品信息": {
+                        "商品ID": "1",
+                        "商品标题": "Sony A7M4 维修过 便宜出",
+                    },
+                    "卖家信息": {},
+                },
+                seller_id="seller-1",
+                zhima_credit_text="优秀",
+                registration_duration_text="来闲鱼1年",
+            )
+        )
+        await dispatcher.join()
+
+    asyncio.run(run())
+    analysis = saved_records[0]["ai_analysis"]
+    assert analysis["analysis_source"] == "keyword"
+    assert analysis["is_recommended"] is False
+    assert analysis["matched_exclude_keywords"] == ["维修"]
+    assert analysis["filter_source"] == "exclude_keyword_rules"
+    assert notifications == []

@@ -1,4 +1,4 @@
-from src.keyword_rule_engine import build_search_text, evaluate_keyword_rules
+from src.keyword_rule_engine import build_search_text, evaluate_keyword_rules, match_keywords
 
 
 def _sample_record():
@@ -62,3 +62,8 @@ def test_keyword_rules_still_match_full_alphanumeric_token():
     result = evaluate_keyword_rules(["q1r5"], "富士 q1r5 旗舰相机")
     assert result["is_recommended"] is True
     assert result["keyword_hit_count"] == 1
+
+
+def test_match_keywords_uses_same_ascii_token_rules_for_filters():
+    assert match_keywords(["q1"], "富士 q1r5 旗舰相机") == []
+    assert match_keywords(["q1r5"], "富士 q1r5 旗舰相机") == ["q1r5"]

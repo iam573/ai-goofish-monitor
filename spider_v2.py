@@ -69,11 +69,11 @@ async def main():
             normalized.append(text)
         return normalized
 
-    def flatten_legacy_groups(groups):
+    def flatten_legacy_groups(groups, field_name="include_keywords"):
         merged = []
         for group in groups or []:
             if isinstance(group, dict):
-                merged.extend(normalize_keywords(group.get("include_keywords")))
+                merged.extend(normalize_keywords(group.get(field_name)))
         return normalize_keywords(merged)
 
     def has_bound_account(tasks: list) -> bool:
@@ -107,6 +107,14 @@ async def main():
             task["keyword_rules"] = flatten_legacy_groups(task.get("keyword_rule_groups") or [])
         else:
             task["keyword_rules"] = normalize_keywords(keyword_rules)
+        exclude_keyword_rules = task.get("exclude_keyword_rules")
+        if exclude_keyword_rules is None and task.get("keyword_rule_groups") is not None:
+            task["exclude_keyword_rules"] = flatten_legacy_groups(
+                task.get("keyword_rule_groups") or [],
+                "exclude_keywords",
+            )
+        else:
+            task["exclude_keyword_rules"] = normalize_keywords(exclude_keyword_rules)
 
         if decision_mode == "keyword":
             task["ai_prompt_text"] = ""

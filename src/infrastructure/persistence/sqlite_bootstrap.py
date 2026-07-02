@@ -75,6 +75,12 @@ def _import_tasks_if_needed(conn, legacy_config_file: str | None) -> None:
     for index, raw_task in enumerate(tasks):
         if not isinstance(raw_task, dict):
             continue
+        keyword_rules = _task_keyword_values(raw_task, "keyword_rules", "include_keywords")
+        exclude_keyword_rules = _task_keyword_values(
+            raw_task,
+            "exclude_keyword_rules",
+            "exclude_keywords",
+        )
         conn.execute(
             """
             INSERT INTO tasks (
@@ -82,8 +88,9 @@ def _import_tasks_if_needed(conn, legacy_config_file: str | None) -> None:
                 max_pages, personal_only, min_price, max_price, cron,
                 ai_prompt_base_file, ai_prompt_criteria_file, account_state_file,
                 account_strategy, free_shipping, new_publish_option, region,
-                decision_mode, keyword_rules_json, is_running
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                decision_mode, keyword_rules_json, exclude_keyword_rules_json,
+                is_running
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 index,
@@ -105,7 +112,8 @@ def _import_tasks_if_needed(conn, legacy_config_file: str | None) -> None:
                 raw_task.get("new_publish_option"),
                 raw_task.get("region"),
                 raw_task.get("decision_mode", "ai"),
-                json.dumps(raw_task.get("keyword_rules") or [], ensure_ascii=False),
+                json.dumps(keyword_rules, ensure_ascii=False),
+                json.dumps(exclude_keyword_rules, ensure_ascii=False),
                 _as_int(raw_task.get("is_running", False)),
             ),
         )
@@ -259,6 +267,42 @@ def _as_int(value) -> int:
     if value is None:
         return 0
     return 1 if str(value).strip().lower() in {"1", "true", "yes", "on"} else 0
+
+
+def _normalize_keyword_values(value) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        raw_values = value.replace("\n", ",").split(",")
+    elif isinstance(value, (list, tuple, set)):
+        raw_values = list(value)
+    else:
+        raw_values = [value]
+
+    normalized: list[str] = []
+    seen = set()
+    for item in raw_values:
+        text = str(item).strip()
+        if not text:
+            continue
+        key = text.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        normalized.append(text)
+    return normalized
+
+
+def _task_keyword_values(raw_task: dict, field_name: str, legacy_group_field: str) -> list[str]:
+    if field_name in raw_task:
+        return _normalize_keyword_values(raw_task.get(field_name))
+    if field_name == "exclude_keyword_rules" and "exclude_keywords" in raw_task:
+        return _normalize_keyword_values(raw_task.get("exclude_keywords"))
+    merged: list[str] = []
+    for group in raw_task.get("keyword_rule_groups") or []:
+        if isinstance(group, dict):
+            merged.extend(_normalize_keyword_values(group.get(legacy_group_field)))
+    return _normalize_keyword_values(merged)
 
 
 def _parse_price(value):

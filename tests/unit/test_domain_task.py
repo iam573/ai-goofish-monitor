@@ -74,6 +74,7 @@ def test_legacy_keyword_groups_are_flattened_to_keyword_rules():
     )
 
     assert task.keyword_rules == ["a7m4", "验货宝", "全画幅"]
+    assert task.exclude_keyword_rules == ["瑕疵", "拆修"]
 
 
 def test_generate_request_accepts_legacy_group_payload():
@@ -85,6 +86,30 @@ def test_generate_request_accepts_legacy_group_payload():
         keyword_rule_groups=[{"include_keywords": ["a7m4", "验货宝"], "exclude_keywords": ["瑕疵"]}],
     )
     assert req.keyword_rules == ["a7m4", "验货宝"]
+    assert req.exclude_keyword_rules == ["瑕疵"]
+
+
+def test_exclude_keyword_rules_are_normalized():
+    task = Task(
+        id=1,
+        task_name="Sony A7M4",
+        enabled=True,
+        keyword="sony a7m4",
+        description="body",
+        max_pages=2,
+        personal_only=True,
+        min_price=None,
+        max_price=None,
+        cron=None,
+        ai_prompt_base_file="prompts/base_prompt.txt",
+        ai_prompt_criteria_file="prompts/sony_a7m4_criteria.txt",
+        decision_mode="keyword",
+        keyword_rules=["a7m4"],
+        exclude_keyword_rules="维修, 维修\n翻新",
+        is_running=False,
+    )
+
+    assert task.exclude_keyword_rules == ["维修", "翻新"]
 
 
 def test_generate_request_enables_image_analysis_by_default():

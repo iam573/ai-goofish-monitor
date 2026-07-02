@@ -8,7 +8,7 @@ import os
 from dataclasses import dataclass
 from typing import Awaitable, Callable, Optional
 
-from src.keyword_rule_engine import build_search_text, evaluate_keyword_rules
+from src.keyword_rule_engine import build_search_text, evaluate_keyword_rules, match_keywords
 
 
 SellerLoader = Callable[[str], Awaitable[dict]]
@@ -30,6 +30,7 @@ class ItemAnalysisJob:
     seller_id: Optional[str]
     zhima_credit_text: Optional[str]
     registration_duration_text: str
+    exclude_keyword_rules: tuple[str, ...] = ()
 
 
 class ItemAnalysisDispatcher:
@@ -91,11 +92,36 @@ class ItemAnalysisDispatcher:
         return merged
 
     async def _build_analysis_result(self, job: ItemAnalysisJob, record: dict) -> dict:
+        exclude_result = self._build_exclude_keyword_result(job, record)
+        if exclude_result is not None:
+            return exclude_result
         if job.decision_mode == "keyword":
             return self._build_keyword_result(job, record)
         if self._skip_ai_analysis:
             return self._build_skip_ai_result()
         return await self._run_ai_analysis(job, record)
+
+    def _build_exclude_keyword_result(
+        self,
+        job: ItemAnalysisJob,
+        record: dict,
+    ) -> dict | None:
+        matched_keywords = match_keywords(
+            job.exclude_keyword_rules,
+            build_search_text(record),
+        )
+        if not matched_keywords:
+            return None
+        return {
+            "analysis_source": "keyword" if job.decision_mode == "keyword" else "ai",
+            "is_recommended": False,
+            "reason": f"命中忽略关键词：{', '.join(matched_keywords)}，已忽略。",
+            "matched_keywords": [],
+            "keyword_hit_count": 0,
+            "matched_exclude_keywords": matched_keywords,
+            "exclude_keyword_hit_count": len(matched_keywords),
+            "filter_source": "exclude_keyword_rules",
+        }
 
     def _build_keyword_result(self, job: ItemAnalysisJob, record: dict) -> dict:
         search_text = build_search_text(record)

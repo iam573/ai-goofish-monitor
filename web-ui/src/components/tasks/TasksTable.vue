@@ -216,6 +216,9 @@ const emit = defineEmits<{
 
                 <div v-if="isKeywordMode(task)" class="rounded-lg border border-blue-100 bg-blue-50 px-3 py-2 text-xs font-semibold text-blue-700">
                   {{ t('tasks.table.keywordStrategies', { count: task.keyword_rules?.length || 0 }) }}
+                  <span v-if="task.exclude_keyword_rules?.length" class="ml-1 text-rose-600">
+                    / {{ t('tasks.table.excludeKeywordStrategies', { count: task.exclude_keyword_rules.length }) }}
+                  </span>
                 </div>
                 <div v-else class="flex flex-wrap items-center gap-2">
                   <div class="rounded-lg border border-emerald-100 bg-emerald-50 px-3 py-2 text-xs font-mono font-semibold text-emerald-700">
@@ -406,6 +409,9 @@ const emit = defineEmits<{
               <div class="inline-flex flex-col items-center gap-2">
                 <div v-if="isKeywordMode(task)" class="bg-blue-50/30 p-2 rounded-xl border border-blue-100/50">
                   <div class="text-xs font-black text-blue-600">{{ t('tasks.table.keywordStrategies', { count: task.keyword_rules?.length || 0 }) }}</div>
+                  <div v-if="task.exclude_keyword_rules?.length" class="text-[9px] font-bold text-rose-500 uppercase mt-0.5 tracking-tighter">
+                    {{ t('tasks.table.excludeKeywordStrategies', { count: task.exclude_keyword_rules.length }) }}
+                  </div>
                   <div class="text-[9px] font-bold text-blue-400/70 uppercase mt-0.5 tracking-tighter">OR Logic</div>
                 </div>
                 <div v-else class="flex flex-col items-center gap-1.5">

@@ -49,18 +49,21 @@ def _normalize_keyword_values(value) -> List[str]:
     return normalized
 
 
-def _extract_keywords_from_legacy_groups(groups) -> List[str]:
+def _extract_keywords_from_legacy_groups(
+    groups,
+    field_name: str = "include_keywords",
+) -> List[str]:
     if not groups:
         return []
 
     merged: List[str] = []
     for group in groups:
-        include_keywords = []
+        keywords = []
         if isinstance(group, dict):
-            include_keywords = group.get("include_keywords") or []
+            keywords = group.get(field_name) or []
         else:
-            include_keywords = getattr(group, "include_keywords", []) or []
-        merged.extend(_normalize_keyword_values(include_keywords))
+            keywords = getattr(group, field_name, []) or []
+        merged.extend(_normalize_keyword_values(keywords))
     return _normalize_keyword_values(merged)
 
 
@@ -78,6 +81,19 @@ def _normalize_payload_keywords(payload: Any) -> Any:
     elif "keyword_rule_groups" in values:
         values["keyword_rules"] = _extract_keywords_from_legacy_groups(
             values.get("keyword_rule_groups")
+        )
+    if "exclude_keyword_rules" in values:
+        values["exclude_keyword_rules"] = _normalize_keyword_values(
+            values.get("exclude_keyword_rules")
+        )
+    elif "exclude_keywords" in values:
+        values["exclude_keyword_rules"] = _normalize_keyword_values(
+            values.get("exclude_keywords")
+        )
+    elif "keyword_rule_groups" in values:
+        values["exclude_keyword_rules"] = _extract_keywords_from_legacy_groups(
+            values.get("keyword_rule_groups"),
+            "exclude_keywords",
         )
     return values
 
@@ -129,6 +145,7 @@ class Task(BaseModel):
     region: Optional[str] = None
     decision_mode: Literal["ai", "keyword"] = "ai"
     keyword_rules: List[str] = Field(default_factory=list)
+    exclude_keyword_rules: List[str] = Field(default_factory=list)
     is_running: bool = False
 
     @model_validator(mode="before")
@@ -139,6 +156,11 @@ class Task(BaseModel):
     @field_validator("keyword_rules", mode="before")
     @classmethod
     def normalize_keyword_rules(cls, value):
+        return _normalize_keyword_values(value)
+
+    @field_validator("exclude_keyword_rules", mode="before")
+    @classmethod
+    def normalize_exclude_keyword_rules(cls, value):
         return _normalize_keyword_values(value)
 
     def can_start(self) -> bool:
@@ -179,6 +201,7 @@ class TaskCreate(BaseModel):
     region: Optional[str] = None
     decision_mode: Literal["ai", "keyword"] = "ai"
     keyword_rules: List[str] = Field(default_factory=list)
+    exclude_keyword_rules: List[str] = Field(default_factory=list)
 
     @model_validator(mode="before")
     @classmethod
@@ -208,6 +231,11 @@ class TaskCreate(BaseModel):
     @field_validator("keyword_rules", mode="before")
     @classmethod
     def normalize_keyword_rules(cls, value):
+        return _normalize_keyword_values(value)
+
+    @field_validator("exclude_keyword_rules", mode="before")
+    @classmethod
+    def normalize_exclude_keyword_rules(cls, value):
         return _normalize_keyword_values(value)
 
     @model_validator(mode="after")
@@ -246,6 +274,7 @@ class TaskUpdate(BaseModel):
     region: Optional[str] = None
     decision_mode: Optional[Literal["ai", "keyword"]] = None
     keyword_rules: Optional[List[str]] = None
+    exclude_keyword_rules: Optional[List[str]] = None
     is_running: Optional[bool] = None
 
     @model_validator(mode="before")
@@ -276,6 +305,11 @@ class TaskUpdate(BaseModel):
     @field_validator("keyword_rules", mode="before")
     @classmethod
     def normalize_keyword_rules(cls, value):
+        return _normalize_keyword_values(value)
+
+    @field_validator("exclude_keyword_rules", mode="before")
+    @classmethod
+    def normalize_exclude_keyword_rules(cls, value):
         return _normalize_keyword_values(value)
 
     @model_validator(mode="after")
@@ -310,6 +344,7 @@ class TaskGenerateRequest(BaseModel):
     region: Optional[str] = None
     decision_mode: Literal["ai", "keyword"] = "ai"
     keyword_rules: List[str] = Field(default_factory=list)
+    exclude_keyword_rules: List[str] = Field(default_factory=list)
 
     @model_validator(mode="before")
     @classmethod
@@ -344,6 +379,11 @@ class TaskGenerateRequest(BaseModel):
     @field_validator("keyword_rules", mode="before")
     @classmethod
     def normalize_keyword_rules(cls, value):
+        return _normalize_keyword_values(value)
+
+    @field_validator("exclude_keyword_rules", mode="before")
+    @classmethod
+    def normalize_exclude_keyword_rules(cls, value):
         return _normalize_keyword_values(value)
 
     @model_validator(mode="after")

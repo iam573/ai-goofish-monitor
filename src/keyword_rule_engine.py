@@ -69,6 +69,14 @@ def _keyword_matches(keyword: str, normalized_text: str) -> bool:
     return re.search(pattern, normalized_text) is not None
 
 
+def match_keywords(keywords: Iterable[str], search_text: str) -> List[str]:
+    normalized_text = normalize_text(search_text)
+    normalized_keywords = _normalize_keywords(keywords)
+    if not normalized_text or not normalized_keywords:
+        return []
+    return [kw for kw in normalized_keywords if _keyword_matches(kw, normalized_text)]
+
+
 def evaluate_keyword_rules(keywords: List[str], search_text: str) -> Dict[str, Any]:
     normalized_text = normalize_text(search_text)
     normalized_keywords = _normalize_keywords(keywords)
@@ -91,7 +99,7 @@ def evaluate_keyword_rules(keywords: List[str], search_text: str) -> Dict[str, A
             "keyword_hit_count": 0,
         }
 
-    matched_keywords = [kw for kw in normalized_keywords if _keyword_matches(kw, normalized_text)]
+    matched_keywords = match_keywords(normalized_keywords, normalized_text)
     hit_count = len(matched_keywords)
     is_recommended = hit_count > 0
 

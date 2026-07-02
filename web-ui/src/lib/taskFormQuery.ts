@@ -52,6 +52,7 @@ export function parseTaskFormDefaults(query: LocationQuery): TaskFormDefaults {
   const maxPrice = readString(query.maxPrice)
   const decisionMode = readString(query.decisionMode)
   const keywordRules = readKeywordRules(query.keywordRules)
+  const excludeKeywordRules = readKeywordRules(query.excludeKeywordRules)
   const maxPages = readNumber(query.maxPages)
   const freeShipping = readBoolean(query.freeShipping)
   const personalOnly = readBoolean(query.personalOnly)
@@ -71,6 +72,7 @@ export function parseTaskFormDefaults(query: LocationQuery): TaskFormDefaults {
   if (maxPrice !== undefined) defaults.max_price = maxPrice
   if (decisionMode === 'ai' || decisionMode === 'keyword') defaults.decision_mode = decisionMode
   if (keywordRules) defaults.keyword_rules = keywordRules
+  if (excludeKeywordRules) defaults.exclude_keyword_rules = excludeKeywordRules
   if (maxPages !== undefined) defaults.max_pages = maxPages
   if (freeShipping !== undefined) defaults.free_shipping = freeShipping
   if (personalOnly !== undefined) defaults.personal_only = personalOnly

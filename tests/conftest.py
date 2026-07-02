@@ -51,6 +51,7 @@ def sample_task_payload():
         "ai_prompt_criteria_file": "prompts/sony_a7m4_criteria.txt",
         "decision_mode": "ai",
         "keyword_rules": [],
+        "exclude_keyword_rules": [],
     }
 
 
