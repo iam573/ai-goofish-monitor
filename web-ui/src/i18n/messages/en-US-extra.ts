@@ -215,7 +215,7 @@ const enUSExtra = {
     description: 'Configure, test, and clear each channel independently. Sensitive fields are never echoed back; leaving them blank preserves the current value.',
     noActiveChannels: 'No notification channel configured yet',
     enabledChannels: 'Enabled: {channels}',
-    supportedVariables: 'Supported variables: title / content / price / reason / desktop_link / mobile_link',
+    supportedVariables: 'Supported variables: title / keyword / content / price / reason / desktop_link / mobile_link',
     globalBehavior: 'Global Behavior',
     globalBehaviorDescription: 'Control how item links are rendered across all channels.',
     preferMobileLink: 'Prefer mobile links',

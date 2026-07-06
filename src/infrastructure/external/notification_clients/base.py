@@ -12,6 +12,7 @@ from src.utils import convert_goofish_link
 @dataclass(frozen=True)
 class NotificationMessage:
     title: str
+    keyword: str
     price: str
     reason: str
     desktop_link: str
@@ -52,6 +53,12 @@ class NotificationClient(ABC):
     def _build_message(self, product_data: Dict, reason: str) -> NotificationMessage:
         """格式化消息内容"""
         title = product_data.get('商品标题', 'N/A')
+        keyword = (
+            product_data.get("搜索关键字")
+            or product_data.get("keyword")
+            or product_data.get("关键词")
+            or ""
+        )
         price = product_data.get('当前售价', 'N/A')
         desktop_link = product_data.get('商品链接', '#')
         mobile_link = None
@@ -71,7 +78,7 @@ class NotificationClient(ABC):
 
         short_title = title[:30]
         suffix = "..." if len(title) > 30 else ""
-        notification_title = f"🚨 新推荐! {short_title}{suffix}"
+        notification_title = f"{short_title}{suffix}"
 
         main_image = product_data.get('商品主图链接')
         if not main_image:
@@ -81,6 +88,7 @@ class NotificationClient(ABC):
 
         return NotificationMessage(
             title=title,
+            keyword=keyword,
             price=price,
             reason=reason,
             desktop_link=desktop_link,

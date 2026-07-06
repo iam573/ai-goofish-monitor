@@ -215,7 +215,7 @@ const zhCNExtra = {
     description: '按渠道单独配置、测试和清空。敏感字段不会回显，留空表示保留现有值。',
     noActiveChannels: '尚未配置可用通知渠道',
     enabledChannels: '已启用：{channels}',
-    supportedVariables: '支持变量：title / content / price / reason / desktop_link / mobile_link',
+    supportedVariables: '支持变量：title / keyword / content / price / reason / desktop_link / mobile_link',
     globalBehavior: '全局行为',
     globalBehaviorDescription: '统一控制所有渠道中的商品链接展示方式。',
     preferMobileLink: '优先附带手机端链接',

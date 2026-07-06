@@ -55,8 +55,8 @@ def test_webhook_client_renders_json_templates(monkeypatch):
         webhook_method="POST",
         webhook_headers='{"Authorization":"Bearer token"}',
         webhook_content_type="JSON",
-        webhook_query_parameters='{"task":"{{title}}"}',
-        webhook_body='{"message":"{{content}}","link":"{{desktop_link}}"}',
+        webhook_query_parameters='{"task":"{{title}}","keyword":"{{keyword}}"}',
+        webhook_body='{"message":"{{content}}","keyword":"{{keyword}}","link":"{{desktop_link}}"}',
         pcurl_to_mobile=False,
     )
 
@@ -64,6 +64,7 @@ def test_webhook_client_renders_json_templates(monkeypatch):
         client.send(
             {
                 "商品标题": "Sony A7M4",
+                "搜索关键字": "sony a7m4",
                 "当前售价": "9999",
                 "商品链接": "https://www.goofish.com/item/123",
             },
@@ -71,8 +72,10 @@ def test_webhook_client_renders_json_templates(monkeypatch):
         )
     )
 
-    assert "task=%F0%9F%9A%A8+%E6%96%B0%E6%8E%A8%E8%8D%90%21+Sony+A7M4" in captured["url"]
+    assert "task=Sony+A7M4" in captured["url"]
+    assert "keyword=sony+a7m4" in captured["url"]
     assert captured["headers"]["Authorization"] == "Bearer token"
     assert captured["json"]["message"].startswith("价格: 9999")
+    assert captured["json"]["keyword"] == "sony a7m4"
     assert captured["json"]["link"] == "https://www.goofish.com/item/123"
     assert captured["data"] is None

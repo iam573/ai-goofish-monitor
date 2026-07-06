@@ -80,6 +80,7 @@ def test_item_analysis_dispatcher_uses_bounded_concurrency():
 
 def test_item_analysis_dispatcher_supports_keyword_mode_without_ai():
     saved_records = []
+    notifications = []
 
     async def seller_loader(user_id: str):
         return {"卖家标签": "个人闲置"}
@@ -91,7 +92,7 @@ def test_item_analysis_dispatcher_supports_keyword_mode_without_ai():
         raise AssertionError("关键词模式不应调用 AI")
 
     async def notifier(item_data: dict, reason: str):
-        return None
+        notifications.append((item_data["搜索关键字"], reason))
 
     async def saver(record: dict, keyword: str):
         saved_records.append(record)
@@ -129,6 +130,7 @@ def test_item_analysis_dispatcher_supports_keyword_mode_without_ai():
     asyncio.run(run())
     assert saved_records[0]["ai_analysis"]["analysis_source"] == "keyword"
     assert saved_records[0]["ai_analysis"]["is_recommended"] is True
+    assert notifications[0][0] == "demo"
 
 
 def test_item_analysis_dispatcher_exclude_keywords_override_keyword_recommendation():

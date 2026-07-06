@@ -134,6 +134,7 @@ class WebhookClient(NotificationClient):
     def _replace_placeholders(self, value: str, message: NotificationMessage) -> str:
         replacements = {
             "title": message.notification_title,
+            "keyword": message.keyword,
             "content": message.content,
             "price": message.price,
             "reason": message.reason,

@@ -38,8 +38,6 @@ class TelegramClient(NotificationClient):
 
         message = self._build_message(product_data, reason)
         telegram_message = [
-            "🚨 <b>新推荐!</b>",
-            "",
             f"<b>{message.title[:50]}{'...' if len(message.title) > 50 else ''}</b>",
             "",
             f"💰 价格: {message.price}",

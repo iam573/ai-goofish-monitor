@@ -77,7 +77,7 @@ class ItemAnalysisDispatcher:
         record["ai_analysis"] = await self._build_analysis_result(job, record)
         if await self._saver(record, job.keyword):
             self.completed_count += 1
-        await self._notify_if_recommended(item_data, record["ai_analysis"])
+        await self._notify_if_recommended(job, item_data, record["ai_analysis"])
 
     async def _load_seller_info(self, job: ItemAnalysisJob) -> dict:
         seller_info = {}
@@ -190,10 +190,17 @@ class ItemAnalysisDispatcher:
             except Exception as exc:
                 print(f"   [图片] 删除图片文件时出错: {exc}")
 
-    async def _notify_if_recommended(self, item_data: dict, analysis_result: dict) -> None:
+    async def _notify_if_recommended(
+        self,
+        job: ItemAnalysisJob,
+        item_data: dict,
+        analysis_result: dict,
+    ) -> None:
         if not analysis_result.get("is_recommended"):
             return
         try:
-            await self._notifier(item_data, analysis_result.get("reason", "无"))
+            notification_item = copy.deepcopy(item_data)
+            notification_item.setdefault("搜索关键字", job.keyword)
+            await self._notifier(notification_item, analysis_result.get("reason", "无"))
         except Exception as exc:
             print(f"   [通知] 发送推荐通知失败: {exc}")
