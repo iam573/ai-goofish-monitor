@@ -1,9 +1,11 @@
 import asyncio
 
+import pytest
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 
 from src.services.search_pagination import advance_search_page
 from src.services.search_pagination import is_search_results_response
+from src.services.search_pagination import wait_for_search_response_after_action
 
 
 class FakeRequest:
@@ -83,12 +85,37 @@ class FakePage:
         return FakeResponseContext(self._outcomes.pop(0))
 
 
+class FakeInitialSearchPage:
+    def __init__(self, outcomes: list[object]):
+        self._outcomes = list(outcomes)
+        self.waits: list[tuple[str, int]] = []
+
+    async def wait_for_event(self, event: str, *, predicate, timeout: int):
+        self.waits.append((event, timeout))
+        await asyncio.sleep(0)
+        if not self._outcomes:
+            raise AssertionError("missing fake response outcome")
+        outcome = self._outcomes.pop(0)
+        if isinstance(outcome, Exception):
+            raise outcome
+        assert predicate(outcome) is True
+        return outcome
+
+
 async def _noop_random_sleep(_min_seconds: float, _max_seconds: float) -> None:
     return None
 
 
 async def _noop_sleep(_seconds: float) -> None:
     return None
+
+
+async def _recording_action(calls: list[str]) -> None:
+    calls.append("action")
+
+
+async def _failing_action() -> None:
+    raise RuntimeError("navigation failed")
 
 
 def test_advance_search_page_stops_when_no_next_button() -> None:
@@ -201,6 +228,15 @@ def test_is_search_results_response_matches_exact_search_api() -> None:
     assert is_search_results_response(response) is True
 
 
+def test_is_search_results_response_matches_search_api_version_changes() -> None:
+    response = FakeResponse(
+        url="https://h5api.m.goofish.com/h5/mtop.taobao.idlemtopsearch.pc.search/2.0/?foo=bar",
+        method="GET",
+    )
+
+    assert is_search_results_response(response) is True
+
+
 def test_is_search_results_response_rejects_search_shade_api() -> None:
     response = FakeResponse(
         url="https://h5api.m.goofish.com/h5/mtop.taobao.idlemtopsearch.pc.search.shade/1.0/?foo=bar",
@@ -210,10 +246,119 @@ def test_is_search_results_response_rejects_search_shade_api() -> None:
     assert is_search_results_response(response) is False
 
 
-def test_is_search_results_response_rejects_non_post_request() -> None:
+def test_is_search_results_response_rejects_non_search_request_method() -> None:
     response = FakeResponse(
         url="https://h5api.m.goofish.com/h5/mtop.taobao.idlemtopsearch.pc.search/1.0/?foo=bar",
-        method="GET",
+        method="OPTIONS",
     )
 
     assert is_search_results_response(response) is False
+
+
+def test_wait_for_search_response_after_action_returns_response() -> None:
+    response = FakeResponse(
+        url="https://h5api.m.goofish.com/h5/mtop.taobao.idlemtopsearch.pc.search/1.0/?foo=bar",
+        method="POST",
+    )
+    page = FakeInitialSearchPage([response])
+    calls: list[str] = []
+
+    result = asyncio.run(
+        wait_for_search_response_after_action(
+            page=page,
+            action=lambda: _recording_action(calls),
+            logger=lambda _message: None,
+            retry_sleep=_noop_sleep,
+        )
+    )
+
+    assert result is response
+    assert calls == ["action"]
+    assert page.waits == [("response", 30000)]
+
+
+def test_wait_for_search_response_after_action_retries_timeout() -> None:
+    response = FakeResponse(
+        url="https://h5api.m.goofish.com/h5/mtop.taobao.idlemtopsearch.pc.search/1.0/?foo=bar",
+        method="POST",
+    )
+    page = FakeInitialSearchPage(
+        [
+            PlaywrightTimeoutError("initial timeout"),
+            response,
+        ]
+    )
+    calls: list[str] = []
+    logs: list[str] = []
+
+    result = asyncio.run(
+        wait_for_search_response_after_action(
+            page=page,
+            action=lambda: _recording_action(calls),
+            logger=logs.append,
+            retry_sleep=_noop_sleep,
+        )
+    )
+
+    assert result is response
+    assert calls == ["action", "action"]
+    assert logs == ["等待初始搜索接口响应超时，5秒后重试导航..."]
+
+
+def test_wait_for_search_response_after_action_returns_none_after_timeouts() -> None:
+    page = FakeInitialSearchPage(
+        [
+            PlaywrightTimeoutError("initial timeout"),
+            PlaywrightTimeoutError("initial timeout"),
+        ]
+    )
+    calls: list[str] = []
+    logs: list[str] = []
+
+    result = asyncio.run(
+        wait_for_search_response_after_action(
+            page=page,
+            action=lambda: _recording_action(calls),
+            logger=logs.append,
+            retry_sleep=_noop_sleep,
+        )
+    )
+
+    assert result is None
+    assert calls == ["action", "action"]
+    assert logs == [
+        "等待初始搜索接口响应超时，5秒后重试导航...",
+        "等待初始搜索接口响应超时，继续检查页面是否已加载。",
+    ]
+
+
+def test_wait_for_search_response_after_action_aborts_wait_after_action() -> None:
+    page = FakeInitialSearchPage([])
+    calls: list[str] = []
+
+    result = asyncio.run(
+        wait_for_search_response_after_action(
+            page=page,
+            action=lambda: _recording_action(calls),
+            logger=lambda _message: None,
+            retry_sleep=_noop_sleep,
+            should_abort_wait=lambda: True,
+        )
+    )
+
+    assert result is None
+    assert calls == ["action"]
+
+
+def test_wait_for_search_response_after_action_keeps_action_error() -> None:
+    page = FakeInitialSearchPage([PlaywrightTimeoutError("initial timeout")])
+
+    with pytest.raises(RuntimeError, match="navigation failed"):
+        asyncio.run(
+            wait_for_search_response_after_action(
+                page=page,
+                action=_failing_action,
+                logger=lambda _message: None,
+                retry_sleep=_noop_sleep,
+            )
+        )

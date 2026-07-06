@@ -25,3 +25,22 @@ def test_resolve_browser_channel_uses_msedge_locally_when_requested(monkeypatch)
     scraper = _load_scraper(monkeypatch, login_is_edge=True, running_in_docker=False)
 
     assert scraper._resolve_browser_channel() == "msedge"
+
+
+def test_build_extra_headers_filters_navigation_and_browser_managed_headers(monkeypatch):
+    scraper = _load_scraper(monkeypatch, login_is_edge=False, running_in_docker=False)
+
+    assert scraper._build_extra_headers(
+        {
+            "Accept": "*/*",
+            "Accept-Encoding": "gzip, deflate, br, zstd",
+            "Accept-Language": "en,zh-CN;q=0.9",
+            "Cookie": "redacted",
+            "Referer": "https://www.goofish.com/",
+            "Sec-Fetch-Dest": "empty",
+            "Sec-Fetch-Mode": "cors",
+            "sec-ch-ua": '"Google Chrome";v="149"',
+            "User-Agent": "Mozilla/5.0",
+            "X-Custom-Trace": "keep-me",
+        }
+    ) == {"X-Custom-Trace": "keep-me"}

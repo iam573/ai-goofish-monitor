@@ -11,7 +11,12 @@ NEXT_PAGE_SELECTOR = (
     ":has([class*='search-pagination-arrow-right'])"
     ":not([disabled])"
 )
-SEARCH_RESULTS_API_FRAGMENT = "/h5/mtop.taobao.idlemtopsearch.pc.search/1.0/"
+SEARCH_RESULTS_API_MARKER = "idlemtopsearch.pc.search"
+SEARCH_RESULTS_SHADE_API_MARKER = "idlemtopsearch.pc.search.shade"
+SEARCH_RESULTS_METHODS = {"GET", "POST"}
+INITIAL_SEARCH_REQUEST_TIMEOUT_MS = 30_000
+INITIAL_SEARCH_RETRY_COUNT = 2
+INITIAL_SEARCH_RETRY_DELAY_SECONDS = 5
 PAGE_REQUEST_TIMEOUT_MS = 20_000
 PAGE_CLICK_TIMEOUT_MS = 10_000
 PAGE_RETRY_DELAY_SECONDS = 5
@@ -29,12 +34,83 @@ class PageAdvanceResult:
 
 def is_search_results_response(
     response: Any,
-    api_url_fragment: str = SEARCH_RESULTS_API_FRAGMENT,
+    api_url_marker: str = SEARCH_RESULTS_API_MARKER,
+    shade_api_url_marker: str = SEARCH_RESULTS_SHADE_API_MARKER,
 ) -> bool:
     request = getattr(response, "request", None)
     request_method = getattr(request, "method", None)
-    response_url = getattr(response, "url", "")
-    return api_url_fragment in response_url and request_method == "POST"
+    response_url = getattr(response, "url", "").lower()
+    normalized_method = str(request_method or "").upper()
+    return (
+        api_url_marker in response_url
+        and shade_api_url_marker not in response_url
+        and normalized_method in SEARCH_RESULTS_METHODS
+    )
+
+
+async def _cancel_response_wait(response_task: asyncio.Task) -> None:
+    if response_task.done():
+        try:
+            await response_task
+        except (asyncio.CancelledError, PlaywrightTimeoutError):
+            pass
+        except Exception:
+            pass
+        return
+
+    response_task.cancel()
+    try:
+        await response_task
+    except (asyncio.CancelledError, PlaywrightTimeoutError):
+        pass
+    except Exception:
+        pass
+
+
+async def wait_for_search_response_after_action(
+    *,
+    page: Any,
+    action: Callable[[], Awaitable[None]],
+    logger: Callable[[str], None] = log_time,
+    retry_sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+    timeout: int = INITIAL_SEARCH_REQUEST_TIMEOUT_MS,
+    max_retries: int = INITIAL_SEARCH_RETRY_COUNT,
+    retry_delay_seconds: float = INITIAL_SEARCH_RETRY_DELAY_SECONDS,
+    should_abort_wait: Optional[Callable[[], bool]] = None,
+) -> Optional[Any]:
+    for retry_index in range(max_retries):
+        response_task = asyncio.create_task(
+            page.wait_for_event(
+                "response",
+                predicate=is_search_results_response,
+                timeout=timeout,
+            )
+        )
+        try:
+            await action()
+        except Exception:
+            await _cancel_response_wait(response_task)
+            raise
+
+        if should_abort_wait is not None and should_abort_wait():
+            await _cancel_response_wait(response_task)
+            return None
+
+        try:
+            return await response_task
+        except PlaywrightTimeoutError:
+            if retry_index < max_retries - 1:
+                logger(
+                    "等待初始搜索接口响应超时，"
+                    f"{retry_delay_seconds:g}秒后重试导航..."
+                )
+                await retry_sleep(retry_delay_seconds)
+                continue
+
+            logger("等待初始搜索接口响应超时，继续检查页面是否已加载。")
+            return None
+
+    return None
 
 
 async def advance_search_page(
