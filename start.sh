@@ -3,6 +3,14 @@
 # 闲鱼监控系统本地启动脚本
 # 功能：清理旧构建、安装依赖、构建前端、启动服务
 
+if [ -z "${BASH_VERSION:-}" ] || [ "$(basename "${BASH:-$0}")" = "sh" ]; then
+    if command -v bash >/dev/null 2>&1; then
+        exec bash "$0" "$@"
+    fi
+    echo "错误: 需要使用 bash 运行此脚本"
+    exit 1
+fi
+
 set -e  # 遇到错误立即退出
 
 # 颜色输出
@@ -11,22 +19,26 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
 
+log() {
+    printf '%b\n' "$*"
+}
+
 # 获取脚本所在目录
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
-echo -e "${GREEN}========================================${NC}"
-echo -e "${GREEN}闲鱼监控系统 - 本地启动脚本${NC}"
-echo -e "${GREEN}========================================${NC}"
+log "${GREEN}========================================${NC}"
+log "${GREEN}闲鱼监控系统 - 本地启动脚本${NC}"
+log "${GREEN}========================================${NC}"
 
 # 0. 环境与依赖检查
-echo -e "\n${YELLOW}[1/6] 检查环境与依赖...${NC}"
+log "\n${YELLOW}[1/6] 检查环境与依赖...${NC}"
 
 OS_FAMILY="unknown"
 LINUX_ID=""
 LINUX_LIKE=""
-PYTHON_CMD="python3"
-PIP_CMD="python3 -m pip"
+PYTHON_CMD="${PYTHON_CMD:-}"
+VENV_DIR="${VENV_DIR:-.venv}"
 
 if [ -f /etc/os-release ]; then
     . /etc/os-release
@@ -53,17 +65,102 @@ case "$(uname -s 2>/dev/null || echo unknown)" in
         ;;
 esac
 
+if [ "$OS_FAMILY" = "windows" ]; then
+    VENV_PYTHON="$VENV_DIR/Scripts/python.exe"
+else
+    VENV_PYTHON="$VENV_DIR/bin/python"
+fi
+
 MISSING_ITEMS=()
 
-if ! command -v python3 >/dev/null 2>&1; then
-    MISSING_ITEMS+=("python3(>=3.10)")
+python_is_310_plus() {
+    "$1" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)' >/dev/null 2>&1
+}
+
+resolve_python_cmd() {
+    local candidate
+    local resolved
+    local candidates=(
+        python3.12
+        python3.11
+        python3.10
+        python3.13
+        python3.14
+        /opt/homebrew/bin/python3.12
+        /opt/homebrew/bin/python3.11
+        /opt/homebrew/bin/python3.10
+        /opt/homebrew/bin/python3.13
+        /opt/homebrew/bin/python3.14
+        /opt/homebrew/bin/python3
+        /usr/local/bin/python3.12
+        /usr/local/bin/python3.11
+        /usr/local/bin/python3.10
+        /usr/local/bin/python3.13
+        /usr/local/bin/python3.14
+        /usr/local/bin/python3
+        python3
+    )
+
+    if [ -n "$PYTHON_CMD" ] && python_is_310_plus "$PYTHON_CMD"; then
+        printf '%s\n' "$PYTHON_CMD"
+        return 0
+    fi
+
+    for candidate in "${candidates[@]}"; do
+        resolved=""
+        if [ -x "$candidate" ]; then
+            resolved="$candidate"
+        elif command -v "$candidate" >/dev/null 2>&1; then
+            resolved="$(command -v "$candidate")"
+        fi
+
+        if [ -n "$resolved" ] && python_is_310_plus "$resolved"; then
+            printf '%s\n' "$resolved"
+            return 0
+        fi
+    done
+
+    return 1
+}
+
+if [ -x "$VENV_PYTHON" ] && python_is_310_plus "$VENV_PYTHON"; then
+    PYTHON_CMD="$VENV_PYTHON"
 else
-    if ! python3 -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)' >/dev/null 2>&1; then
+    BASE_PYTHON_CMD=""
+    if ! BASE_PYTHON_CMD="$(resolve_python_cmd)"; then
+        PYTHON_CMD=""
         MISSING_ITEMS+=("python3(>=3.10)")
+    else
+        if [ -d "$VENV_DIR" ]; then
+            log "${YELLOW}检测到 $VENV_DIR 不是 Python 3.10+ 环境，正在重建...${NC}"
+            if ! "$BASE_PYTHON_CMD" -m venv --clear "$VENV_DIR"; then
+                PYTHON_CMD=""
+                MISSING_ITEMS+=("python3-venv")
+            fi
+        else
+            log "${YELLOW}正在创建 Python 虚拟环境: $VENV_DIR${NC}"
+            if ! "$BASE_PYTHON_CMD" -m venv "$VENV_DIR"; then
+                PYTHON_CMD=""
+                MISSING_ITEMS+=("python3-venv")
+            fi
+        fi
+
+        if [ -n "$BASE_PYTHON_CMD" ] && [ -x "$VENV_PYTHON" ] && python_is_310_plus "$VENV_PYTHON"; then
+            PYTHON_CMD="$VENV_PYTHON"
+        elif [ -n "$PYTHON_CMD" ]; then
+            PYTHON_CMD=""
+            MISSING_ITEMS+=("python3(>=3.10)")
+        fi
     fi
 fi
 
-if ! python3 -m pip --version >/dev/null 2>&1; then
+if [ -n "$PYTHON_CMD" ]; then
+    PYTHON_VERSION="$("$PYTHON_CMD" -c 'import sys; print(".".join(map(str, sys.version_info[:3])))')"
+    if ! "$PYTHON_CMD" -m pip --version >/dev/null 2>&1; then
+        MISSING_ITEMS+=("pip")
+    fi
+else
+    PYTHON_VERSION=""
     MISSING_ITEMS+=("pip")
 fi
 
@@ -73,10 +170,6 @@ fi
 
 if ! command -v npm >/dev/null 2>&1; then
     MISSING_ITEMS+=("npm")
-fi
-
-if ! python3 -m playwright --version >/dev/null 2>&1; then
-    MISSING_ITEMS+=("playwright")
 fi
 
 has_browser=false
@@ -253,7 +346,7 @@ EOF
 }
 
 if [ "${#MISSING_ITEMS[@]}" -ne 0 ]; then
-    echo -e "${RED}✗ 检测到缺失的环境/依赖:${NC}"
+    log "${RED}✗ 检测到缺失的环境/依赖:${NC}"
     for item in "${MISSING_ITEMS[@]}"; do
         echo "  - $item"
     done
@@ -284,32 +377,40 @@ if [ "${#MISSING_ITEMS[@]}" -ne 0 ]; then
     exit 1
 fi
 
-echo -e "${GREEN}✓ 环境与依赖检查通过${NC}"
+log "${GREEN}✓ 环境与依赖检查通过${NC}"
+echo "Python: $PYTHON_CMD ($PYTHON_VERSION)"
+echo "Venv: $VENV_DIR"
 
 # 1. 清理旧的 dist 目录
-echo -e "\n${YELLOW}[2/6] 清理旧的构建产物...${NC}"
+log "\n${YELLOW}[2/6] 清理旧的构建产物...${NC}"
 if [ -d "dist" ]; then
     rm -rf dist
-    echo -e "${GREEN}✓ 已删除旧的 dist 目录${NC}"
+    log "${GREEN}✓ 已删除旧的 dist 目录${NC}"
 else
-    echo -e "${GREEN}✓ dist 目录不存在，跳过清理${NC}"
+    log "${GREEN}✓ dist 目录不存在，跳过清理${NC}"
 fi
 
 # 2. 检查并安装 Python 依赖
-echo -e "\n${YELLOW}[3/6] 检查 Python 依赖...${NC}"
+log "\n${YELLOW}[3/6] 检查 Python 依赖...${NC}"
 if [ ! -f "requirements.txt" ]; then
-    echo -e "${RED}✗ 错误: requirements.txt 文件不存在${NC}"
+    log "${RED}✗ 错误: requirements.txt 文件不存在${NC}"
     exit 1
 fi
 
 echo "正在安装 Python 依赖..."
-python3 -m pip install -r requirements.txt --quiet
-echo -e "${GREEN}✓ Python 依赖安装完成${NC}"
+"$PYTHON_CMD" -m pip install -r requirements.txt --quiet
+if ! "$PYTHON_CMD" -m playwright --version >/dev/null 2>&1; then
+    log "${RED}✗ 错误: Playwright 安装失败，请检查 requirements.txt 与 pip 输出${NC}"
+    exit 1
+fi
+echo "正在安装/校验 Playwright Chromium..."
+"$PYTHON_CMD" -m playwright install chromium
+log "${GREEN}✓ Python 依赖安装完成${NC}"
 
 # 3. 构建前端
-echo -e "\n${YELLOW}[4/6] 构建前端项目...${NC}"
+log "\n${YELLOW}[4/6] 构建前端项目...${NC}"
 if [ ! -d "web-ui" ]; then
-    echo -e "${RED}✗ 错误: web-ui 目录不存在${NC}"
+    log "${RED}✗ 错误: web-ui 目录不存在${NC}"
     exit 1
 fi
 
@@ -327,22 +428,22 @@ npm run build
 cd "$SCRIPT_DIR"
 
 if [ ! -d "dist" ]; then
-    echo -e "${RED}✗ 错误: 前端构建失败，dist 目录未生成${NC}"
+    log "${RED}✗ 错误: 前端构建失败，dist 目录未生成${NC}"
     exit 1
 fi
 
-echo -e "${GREEN}✓ 前端构建完成，产物已输出到项目根目录 dist/${NC}"
+log "${GREEN}✓ 前端构建完成，产物已输出到项目根目录 dist/${NC}"
 
 # 4. 校验构建产物
-echo -e "\n${YELLOW}[5/6] 校验构建产物...${NC}"
-echo -e "${GREEN}✓ 已确认构建产物位于项目根目录 dist/${NC}"
+log "\n${YELLOW}[5/6] 校验构建产物...${NC}"
+log "${GREEN}✓ 已确认构建产物位于项目根目录 dist/${NC}"
 
 # 5. 启动后端服务
-echo -e "\n${YELLOW}[6/6] 启动后端服务...${NC}"
-echo -e "${GREEN}========================================${NC}"
-echo -e "${GREEN}服务启动中...${NC}"
-echo -e "${GREEN}访问地址: http://localhost:8000${NC}"
-echo -e "${GREEN}API 文档: http://localhost:8000/docs${NC}"
-echo -e "${GREEN}========================================${NC}\n"
+log "\n${YELLOW}[6/6] 启动后端服务...${NC}"
+log "${GREEN}========================================${NC}"
+log "${GREEN}服务启动中...${NC}"
+log "${GREEN}访问地址: http://localhost:8000${NC}"
+log "${GREEN}API 文档: http://localhost:8000/docs${NC}"
+log "${GREEN}========================================${NC}\n"
 
-python3 -m src.app
+"$PYTHON_CMD" -m src.app
