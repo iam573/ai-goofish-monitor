@@ -60,8 +60,8 @@ def test_process_service_marks_task_stopped_when_process_exits(monkeypatch, tmp_
         )
         monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
 
-        started = await service.start_task(0, "task-a")
-        assert started is True
+        result = await service.start_task(0, "task-a")
+        assert result.success is True
         assert events == [("started", 0)]
         assert service.is_running(0) is True
 
@@ -109,3 +109,23 @@ def test_process_service_adds_debug_limit_arg_when_env_enabled(monkeypatch):
         "--debug-limit",
         "1",
     ]
+
+
+def test_process_service_returns_detail_when_failure_guard_skips_start():
+    async def run_scenario():
+        service = ProcessService()
+        service.failure_guard.should_skip_start = lambda *args, **kwargs: SimpleNamespace(
+            skip=True,
+            should_notify=False,
+            reason="登录态失效",
+            consecutive_failures=3,
+            paused_until=None,
+        )
+
+        result = await service.start_task(0, "task-a")
+
+        assert result.success is False
+        assert "失败保护暂停" in result.detail
+        assert "登录态失效" in result.detail
+
+    asyncio.run(run_scenario())

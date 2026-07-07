@@ -60,6 +60,7 @@ class FakeProcessService:
         self.started = []
         self.stopped = []
         self.reindexed = []
+        self.start_result = True
         self._on_started = None
         self._on_stopped = None
 
@@ -69,9 +70,11 @@ class FakeProcessService:
 
     async def start_task(self, task_id: int, task_name: str) -> bool:
         self.started.append((task_id, task_name))
+        if not bool(getattr(self.start_result, "success", self.start_result)):
+            return self.start_result
         if self._on_started:
             await self._on_started(task_id)
-        return True
+        return self.start_result
 
     async def stop_task(self, task_id: int):
         self.stopped.append(task_id)

@@ -1,5 +1,6 @@
 import asyncio
 import time
+from types import SimpleNamespace
 
 
 def test_create_list_update_delete_task(api_client, api_context, sample_task_payload):
@@ -54,6 +55,22 @@ def test_start_stop_task_updates_status(api_client, api_context, sample_task_pay
     process_service = api_context["process_service"]
     assert process_service.started == [(0, sample_task_payload["task_name"])]
     assert process_service.stopped == [0]
+
+
+def test_start_task_returns_process_failure_detail(api_client, api_context, sample_task_payload):
+    response = api_client.post("/api/tasks/", json=sample_task_payload)
+    assert response.status_code == 200
+
+    process_service = api_context["process_service"]
+    process_service.start_result = SimpleNamespace(
+        success=False,
+        detail="任务已被失败保护暂停，请更新登录态/cookies 后重试。",
+    )
+
+    response = api_client.post("/api/tasks/start/0")
+
+    assert response.status_code == 500
+    assert response.json()["detail"] == "任务已被失败保护暂停，请更新登录态/cookies 后重试。"
 
 
 def test_generate_keyword_mode_task_without_ai_criteria(api_client):

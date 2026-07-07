@@ -74,8 +74,8 @@ const enUS = {
     logs: 'Logs',
     settings: 'Settings',
     systemStatus: 'System Status',
-    backendConnected: 'Realtime backend connected',
-    backendConnecting: 'Connecting to backend',
+    backendConnected: 'Realtime channel connected',
+    backendConnecting: 'Connecting realtime channel',
   },
   login: {
     title: 'Sign In',

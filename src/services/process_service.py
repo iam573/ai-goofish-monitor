@@ -8,6 +8,7 @@ import contextlib
 import os
 import signal
 import sys
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Awaitable, Callable, Dict, TextIO
 
@@ -20,6 +21,16 @@ from src.utils import build_task_log_path
 STOP_TIMEOUT_SECONDS = 20
 SPIDER_DEBUG_LIMIT_ENV = "SPIDER_DEBUG_LIMIT"
 LifecycleHook = Callable[[int], Awaitable[None] | None]
+
+
+@dataclass(frozen=True)
+class StartTaskResult:
+    success: bool
+    detail: str = ""
+    log_path: str | None = None
+
+    def __bool__(self) -> bool:
+        return self.success
 
 
 class ProcessService:
@@ -130,12 +141,28 @@ class ProcessService:
         self.task_names[task_id] = task_name
         self.exit_watchers[task_id] = asyncio.create_task(self._watch_process_exit(process))
 
-    async def start_task(self, task_id: int, task_name: str) -> bool:
+    def _format_skip_detail(self, task_name: str, decision) -> str:
+        paused_until = getattr(decision, "paused_until", None)
+        paused_text = (
+            paused_until.strftime("%Y-%m-%d %H:%M:%S")
+            if paused_until
+            else "未知时间"
+        )
+        consecutive = getattr(decision, "consecutive_failures", 0)
+        reason = getattr(decision, "reason", "") or "未知错误"
+        return (
+            f"任务 '{task_name}' 已被失败保护暂停，暂不启动。"
+            f"原因: {reason}；连续失败: {consecutive}/{self.failure_guard.threshold}；"
+            f"暂停到: {paused_text}。请更新登录态/cookies 后重试。"
+        )
+
+    async def start_task(self, task_id: int, task_name: str) -> StartTaskResult:
         """启动任务进程"""
         await self._drain_finished_process(task_id)
         if self.is_running(task_id):
-            print(f"任务 '{task_name}' (ID: {task_id}) 已在运行中")
-            return False
+            detail = f"任务 '{task_name}' (ID: {task_id}) 已在运行中"
+            print(detail)
+            return StartTaskResult(False, detail=detail)
 
         decision = self.failure_guard.should_skip_start(
             task_name,
@@ -143,7 +170,7 @@ class ProcessService:
         )
         if decision.skip:
             await self._notify_skip(task_name, decision)
-            return False
+            return StartTaskResult(False, detail=self._format_skip_detail(task_name, decision))
 
         log_file_path = ""
         log_file_handle = None
@@ -151,14 +178,20 @@ class ProcessService:
             log_file_path, log_file_handle = self._open_log_file(task_id, task_name)
             process = await self._spawn_process(task_name, log_file_handle)
         except Exception as exc:
+            detail = f"启动任务 '{task_name}' 失败: {type(exc).__name__}: {exc}"
+            if log_file_handle is not None:
+                with contextlib.suppress(Exception):
+                    timestamp = datetime.now().strftime(" %Y-%m-%d %H:%M:%S")
+                    log_file_handle.write(f"[{timestamp}] {detail}\n")
+                    log_file_handle.flush()
             self._close_log_handle(log_file_handle)
-            print(f"启动任务 '{task_name}' 失败: {exc}")
-            return False
+            print(detail)
+            return StartTaskResult(False, detail=detail, log_path=log_file_path or None)
 
         self._register_runtime(task_id, task_name, process, log_file_path, log_file_handle)
         print(f"启动任务 '{task_name}' (PID: {process.pid})")
         await self._invoke_hook(self._on_started, task_id)
-        return True
+        return StartTaskResult(True, log_path=log_file_path)
 
     async def _notify_skip(self, task_name: str, decision) -> None:
         print(

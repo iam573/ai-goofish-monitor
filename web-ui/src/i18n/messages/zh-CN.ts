@@ -74,8 +74,8 @@ const zhCN = {
     logs: '运行日志',
     settings: '系统设置',
     systemStatus: '系统状态',
-    backendConnected: '后端实时已连接',
-    backendConnecting: '后端连接中',
+    backendConnected: '实时通道已连接',
+    backendConnecting: '实时通道连接中',
   },
   login: {
     title: '系统登录',
