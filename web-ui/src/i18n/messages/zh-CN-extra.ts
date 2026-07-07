@@ -215,7 +215,7 @@ const zhCNExtra = {
     description: '按渠道单独配置、测试和清空。当前配置会在管理员页面直接显示，保存时只提交改动字段。',
     noActiveChannels: '尚未配置可用通知渠道',
     enabledChannels: '已启用：{channels}',
-    supportedVariables: '支持变量：title / keyword / content / price / reason / desktop_link / mobile_link',
+    supportedVariables: '支持变量：title=完整商品标题 / notification_title=短标题 / keyword / content / price / reason / desktop_link / mobile_link',
     globalBehavior: '全局行为',
     globalBehaviorDescription: '统一控制所有渠道中的商品链接展示方式。',
     preferMobileLink: '优先附带手机端链接',

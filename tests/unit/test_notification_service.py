@@ -56,7 +56,7 @@ def test_webhook_client_renders_json_templates(monkeypatch):
         webhook_headers='{"Authorization":"Bearer token"}',
         webhook_content_type="JSON",
         webhook_query_parameters='{"task":"{{title}}","keyword":"{{keyword}}"}',
-        webhook_body='{"message":"{{content}}","keyword":"{{keyword}}","link":"{{desktop_link}}"}',
+        webhook_body='{"message":"{{content}}","keyword":"{{keyword}}","short_title":"{{notification_title}}","link":"{{desktop_link}}"}',
         pcurl_to_mobile=False,
     )
 
@@ -77,5 +77,42 @@ def test_webhook_client_renders_json_templates(monkeypatch):
     assert captured["headers"]["Authorization"] == "Bearer token"
     assert captured["json"]["message"].startswith("价格: 9999")
     assert captured["json"]["keyword"] == "sony a7m4"
+    assert captured["json"]["short_title"] == "Sony A7M4"
     assert captured["json"]["link"] == "https://www.goofish.com/item/123"
     assert captured["data"] is None
+
+
+def test_webhook_title_placeholder_uses_full_item_title(monkeypatch):
+    captured = {}
+
+    class _FakeResponse:
+        def raise_for_status(self):
+            return None
+
+    def _fake_post(url, headers=None, json=None, data=None, timeout=None):
+        captured["json"] = json
+        return _FakeResponse()
+
+    monkeypatch.setattr("requests.post", _fake_post)
+
+    long_title = "Sony A7M4 全画幅相机 成色很好 快门很低 带包装和配件"
+    client = WebhookClient(
+        webhook_url="https://hooks.example.com/notify",
+        webhook_body='{"title":"{{title}}","short":"{{notification_title}}"}',
+        pcurl_to_mobile=False,
+    )
+
+    asyncio.run(
+        client.send(
+            {
+                "商品标题": long_title,
+                "当前售价": "9999",
+                "商品链接": "https://www.goofish.com/item/123",
+            },
+            "价格合适",
+        )
+    )
+
+    assert captured["json"]["title"] == long_title
+    assert captured["json"]["short"] != long_title
+    assert captured["json"]["short"].endswith("...")
