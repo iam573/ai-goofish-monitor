@@ -72,6 +72,13 @@ class LoginRequiredError(Exception):
     """Raised when Goofish redirects to the passport/mini_login flow."""
 
 
+IMMEDIATE_FAILURE_GUARD_MARKERS = (
+    "未找到可用的代理地址",
+    "未找到可用的登录状态文件",
+    "baxia-dialog",
+    "J_MIDDLEWARE_FRAME_WIDGET",
+    "FAIL_SYS_USER_VALIDATE",
+)
 FAILURE_GUARD = FailureGuard()
 EDGE_DOCKER_WARNING_PRINTED = False
 UNSAFE_EXTRA_HEADER_NAMES = {
@@ -129,6 +136,10 @@ def _format_failure_reason(reason: str, limit: int = 500) -> str:
     return cleaned[: limit - 3] + "..."
 
 
+def _should_pause_immediately(reason: str) -> bool:
+    return any(marker in reason for marker in IMMEDIATE_FAILURE_GUARD_MARKERS)
+
+
 async def _notify_task_failure(
     task_config: dict, reason: str, *, cookie_path: Optional[str]
 ) -> None:
@@ -136,14 +147,8 @@ async def _notify_task_failure(
     keyword = task_config.get("keyword", "")
     formatted_reason = _format_failure_reason(reason)
 
-    # Some failures are deterministic misconfiguration and should pause/notify immediately.
-    pause_immediately = any(
-        marker in formatted_reason
-        for marker in (
-            "未找到可用的代理地址",
-            "未找到可用的登录状态文件",
-        )
-    )
+    # Deterministic misconfiguration and risk-control verification need manual action.
+    pause_immediately = _should_pause_immediately(formatted_reason)
 
     guard_result = FAILURE_GUARD.record_failure(
         task_name,

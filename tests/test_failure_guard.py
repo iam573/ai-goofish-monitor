@@ -74,3 +74,38 @@ def test_failure_guard_auto_recovers_on_cookie_change(tmp_path):
         now=base + timedelta(minutes=1),
     )
     assert recovered.skip is False
+
+
+def test_failure_guard_can_pause_immediately_for_risk_control(tmp_path):
+    guard_path = tmp_path / "guard.json"
+    cookie_path = tmp_path / "xianyu_state.json"
+    cookie_path.write_text("{}", encoding="utf-8")
+
+    guard = FailureGuard(
+        path=str(guard_path),
+        threshold=3,
+        pause_seconds=3 * 24 * 60 * 60,
+        tz_name="Asia/Shanghai",
+    )
+    now = datetime(2026, 3, 4, 12, 0, 0)
+
+    result = guard.record_failure(
+        "task-a",
+        "baxia-dialog",
+        cookie_path=str(cookie_path),
+        min_failures_to_pause=1,
+        now=now,
+    )
+
+    assert result["consecutive_failures"] == 1
+    assert result["opened_circuit"] is True
+    assert result["should_notify"] is True
+    assert result["paused_until"] is not None
+
+    decision = guard.should_skip_start(
+        "task-a",
+        cookie_path=str(cookie_path),
+        now=now,
+    )
+    assert decision.skip is True
+    assert decision.reason == "baxia-dialog"
