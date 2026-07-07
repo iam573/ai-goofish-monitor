@@ -37,7 +37,6 @@ const mutableInitialValues = initialValues as Record<string, string | boolean | 
 const mutableForm = form as Record<string, string | boolean | null | undefined>
 const mutableClearedFields = clearedFields as Record<string, boolean>
 
-const secretFields = ['BARK_URL', 'GOTIFY_TOKEN', 'WX_BOT_URL', 'TELEGRAM_BOT_TOKEN', 'WEBHOOK_URL', 'WEBHOOK_HEADERS'] as const
 const channelFields: Record<ChannelKey, (keyof NotificationSettingsUpdate)[]> = {
   ntfy: ['NTFY_TOPIC_URL'],
   bark: ['BARK_URL'],
@@ -50,22 +49,21 @@ const channelFields: Record<ChannelKey, (keyof NotificationSettingsUpdate)[]> = 
 function syncFromSettings(settings: NotificationSettings) {
   initialValues.NTFY_TOPIC_URL = settings.NTFY_TOPIC_URL ?? ''
   initialValues.GOTIFY_URL = settings.GOTIFY_URL ?? ''
+  initialValues.GOTIFY_TOKEN = settings.GOTIFY_TOKEN ?? ''
+  initialValues.BARK_URL = settings.BARK_URL ?? ''
+  initialValues.WX_BOT_URL = settings.WX_BOT_URL ?? ''
+  initialValues.TELEGRAM_BOT_TOKEN = settings.TELEGRAM_BOT_TOKEN ?? ''
   initialValues.TELEGRAM_CHAT_ID = settings.TELEGRAM_CHAT_ID ?? ''
   initialValues.TELEGRAM_API_BASE_URL = settings.TELEGRAM_API_BASE_URL ?? 'https://api.telegram.org'
+  initialValues.WEBHOOK_URL = settings.WEBHOOK_URL ?? ''
   initialValues.WEBHOOK_METHOD = settings.WEBHOOK_METHOD ?? 'POST'
+  initialValues.WEBHOOK_HEADERS = settings.WEBHOOK_HEADERS ?? ''
   initialValues.WEBHOOK_CONTENT_TYPE = settings.WEBHOOK_CONTENT_TYPE ?? 'JSON'
   initialValues.WEBHOOK_QUERY_PARAMETERS = settings.WEBHOOK_QUERY_PARAMETERS ?? ''
   initialValues.WEBHOOK_BODY = settings.WEBHOOK_BODY ?? ''
   initialValues.PCURL_TO_MOBILE = settings.PCURL_TO_MOBILE ?? true
 
-  Object.assign(form, initialValues, {
-    BARK_URL: '',
-    GOTIFY_TOKEN: '',
-    WX_BOT_URL: '',
-    TELEGRAM_BOT_TOKEN: '',
-    WEBHOOK_URL: '',
-    WEBHOOK_HEADERS: '',
-  })
+  Object.assign(form, initialValues)
 
   secretConfigured.BARK_URL = !!settings.BARK_URL_SET
   secretConfigured.GOTIFY_TOKEN = !!settings.GOTIFY_TOKEN_SET
@@ -123,8 +121,10 @@ function buildScopedPayload(channel?: ChannelKey): NotificationSettingsUpdate {
     ? new Set<string>([...channelFields[channel].map((field) => field as string), 'PCURL_TO_MOBILE'])
     : null
   const textFields: (keyof NotificationSettingsUpdate)[] = [
-    'NTFY_TOPIC_URL', 'GOTIFY_URL', 'TELEGRAM_CHAT_ID', 'TELEGRAM_API_BASE_URL', 'WEBHOOK_METHOD',
-    'WEBHOOK_CONTENT_TYPE', 'WEBHOOK_QUERY_PARAMETERS', 'WEBHOOK_BODY',
+    'NTFY_TOPIC_URL', 'GOTIFY_URL', 'GOTIFY_TOKEN', 'BARK_URL', 'WX_BOT_URL',
+    'TELEGRAM_BOT_TOKEN', 'TELEGRAM_CHAT_ID', 'TELEGRAM_API_BASE_URL',
+    'WEBHOOK_URL', 'WEBHOOK_METHOD', 'WEBHOOK_HEADERS', 'WEBHOOK_CONTENT_TYPE',
+    'WEBHOOK_QUERY_PARAMETERS', 'WEBHOOK_BODY',
   ]
 
   for (const field of textFields) {
@@ -139,20 +139,6 @@ function buildScopedPayload(channel?: ChannelKey): NotificationSettingsUpdate {
     const initial = String(mutableInitialValues[field as string] ?? '').trim()
     if (current !== initial) {
       mutablePayload[field as string] = current || null
-    }
-  }
-
-  for (const field of secretFields) {
-    if (includedFields && !includedFields.has(field as string)) {
-      continue
-    }
-    if (mutableClearedFields[field as string]) {
-      mutablePayload[field as string] = null
-      continue
-    }
-    const value = String(mutableForm[field as string] ?? '').trim()
-    if (value) {
-      mutablePayload[field as string] = value
     }
   }
 

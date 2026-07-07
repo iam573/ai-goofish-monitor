@@ -107,7 +107,7 @@ def test_rotation_settings_include_account_rotation_fields(tmp_path, monkeypatch
     assert "ACCOUNT_STATE_DIR=accounts" in latest
 
 
-def test_notification_settings_redact_sensitive_values_and_expose_flags(tmp_path, monkeypatch):
+def test_notification_settings_echo_values_and_expose_flags(tmp_path, monkeypatch):
     _clear_settings_env(monkeypatch)
     env_file = tmp_path / ".env"
     env_file.write_text(
@@ -139,12 +139,12 @@ def test_notification_settings_redact_sensitive_values_and_expose_flags(tmp_path
     assert payload["GOTIFY_URL"] == "https://gotify.example.com"
     assert payload["TELEGRAM_CHAT_ID"] == "123456"
     assert payload["TELEGRAM_API_BASE_URL"] == "https://tg.example.com/proxy"
-    assert payload["BARK_URL"] == ""
-    assert payload["WX_BOT_URL"] == ""
-    assert payload["GOTIFY_TOKEN"] == ""
-    assert payload["TELEGRAM_BOT_TOKEN"] == ""
-    assert payload["WEBHOOK_URL"] == ""
-    assert payload["WEBHOOK_HEADERS"] == ""
+    assert payload["BARK_URL"] == "https://api.day.app/private-key/"
+    assert payload["WX_BOT_URL"] == "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=secret"
+    assert payload["GOTIFY_TOKEN"] == "secret-token"
+    assert payload["TELEGRAM_BOT_TOKEN"] == "telegram-secret"
+    assert payload["WEBHOOK_URL"] == "https://hooks.example.com/notify?token=secret"
+    assert payload["WEBHOOK_HEADERS"] == '{"Authorization":"Bearer secret"}'
     assert payload["BARK_URL_SET"] is True
     assert payload["WX_BOT_URL_SET"] is True
     assert payload["GOTIFY_TOKEN_SET"] is True
@@ -369,7 +369,7 @@ def test_notification_settings_fall_back_to_runtime_environment_when_env_file_mi
     assert payload["NTFY_TOPIC_URL"] == "https://ntfy.sh/runtime-topic"
     assert payload["TELEGRAM_CHAT_ID"] == "20001"
     assert payload["TELEGRAM_API_BASE_URL"] == "https://runtime-tg-proxy.example.com"
-    assert payload["BARK_URL"] == ""
+    assert payload["BARK_URL"] == "https://api.day.app/runtime-secret/"
     assert payload["BARK_URL_SET"] is True
     assert payload["TELEGRAM_BOT_TOKEN_SET"] is True
     assert sorted(payload["CONFIGURED_CHANNELS"]) == ["bark", "ntfy", "telegram"]

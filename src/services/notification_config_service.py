@@ -94,18 +94,18 @@ def build_notification_settings_response(
     response = {
         "NTFY_TOPIC_URL": notification_settings.ntfy_topic_url or "",
         "GOTIFY_URL": notification_settings.gotify_url or "",
-        "GOTIFY_TOKEN": "",
-        "BARK_URL": "",
-        "WX_BOT_URL": "",
-        "TELEGRAM_BOT_TOKEN": "",
+        "GOTIFY_TOKEN": notification_settings.gotify_token or "",
+        "BARK_URL": notification_settings.bark_url or "",
+        "WX_BOT_URL": notification_settings.wx_bot_url or "",
+        "TELEGRAM_BOT_TOKEN": notification_settings.telegram_bot_token or "",
         "TELEGRAM_CHAT_ID": notification_settings.telegram_chat_id or "",
         "TELEGRAM_API_BASE_URL": (
             notification_settings.telegram_api_base_url
             or DEFAULT_TELEGRAM_API_BASE_URL
         ),
-        "WEBHOOK_URL": "",
+        "WEBHOOK_URL": notification_settings.webhook_url or "",
         "WEBHOOK_METHOD": notification_settings.webhook_method,
-        "WEBHOOK_HEADERS": "",
+        "WEBHOOK_HEADERS": notification_settings.webhook_headers or "",
         "WEBHOOK_CONTENT_TYPE": notification_settings.webhook_content_type,
         "WEBHOOK_QUERY_PARAMETERS": notification_settings.webhook_query_parameters or "",
         "WEBHOOK_BODY": notification_settings.webhook_body or "",
