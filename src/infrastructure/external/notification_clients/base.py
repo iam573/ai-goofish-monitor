@@ -20,6 +20,7 @@ class NotificationMessage:
     notification_title: str
     content: str
     image_url: str | None
+    image_urls: list[str]
 
 
 class NotificationClient(ABC):
@@ -52,15 +53,15 @@ class NotificationClient(ABC):
 
     def _build_message(self, product_data: Dict, reason: str) -> NotificationMessage:
         """格式化消息内容"""
-        title = product_data.get('商品标题', 'N/A')
-        keyword = (
+        title = self._text_value(product_data.get('商品标题'), "N/A")
+        keyword = self._text_value(
             product_data.get("搜索关键字")
             or product_data.get("keyword")
             or product_data.get("关键词")
-            or ""
+            or "",
         )
-        price = product_data.get('当前售价', 'N/A')
-        desktop_link = product_data.get('商品链接', '#')
+        price = self._text_value(product_data.get('当前售价'), "N/A")
+        desktop_link = self._text_value(product_data.get('商品链接'), "#")
         mobile_link = None
 
         if self._pcurl_to_mobile and desktop_link and desktop_link != "#":
@@ -80,11 +81,17 @@ class NotificationClient(ABC):
         suffix = "..." if len(title) > 30 else ""
         notification_title = f"{short_title}{suffix}"
 
+        image_values = []
         main_image = product_data.get('商品主图链接')
-        if not main_image:
-            image_list = product_data.get('商品图片列表', [])
-            if image_list:
-                main_image = image_list[0]
+        if main_image:
+            image_values.append(main_image)
+        image_list = product_data.get('商品图片列表', [])
+        if isinstance(image_list, list):
+            image_values.extend(image_list)
+        elif image_list:
+            image_values.append(image_list)
+        image_urls = self._normalize_image_urls(image_values)
+        main_image = image_urls[0] if image_urls else None
 
         return NotificationMessage(
             title=title,
@@ -96,4 +103,24 @@ class NotificationClient(ABC):
             notification_title=notification_title,
             content="\n".join(content_lines),
             image_url=main_image,
+            image_urls=image_urls,
         )
+
+    def _normalize_image_urls(self, values: list) -> list[str]:
+        urls: list[str] = []
+        seen: set[str] = set()
+        for value in values:
+            if not isinstance(value, str):
+                continue
+            url = value.strip()
+            if not url or url in seen:
+                continue
+            seen.add(url)
+            urls.append(url)
+        return urls
+
+    def _text_value(self, value, fallback: str = "") -> str:
+        if value is None:
+            return fallback
+        text = str(value).strip()
+        return text or fallback

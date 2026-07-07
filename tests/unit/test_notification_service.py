@@ -56,7 +56,7 @@ def test_webhook_client_renders_json_templates(monkeypatch):
         webhook_headers='{"Authorization":"Bearer token"}',
         webhook_content_type="JSON",
         webhook_query_parameters='{"task":"{{title}}","keyword":"{{keyword}}"}',
-        webhook_body='{"message":"{{content}}","keyword":"{{keyword}}","short_title":"{{notification_title}}","link":"{{desktop_link}}","image":"{{image_url}}"}',
+        webhook_body='{"message":"{{content}}","keyword":"{{keyword}}","short_title":"{{notification_title}}","link":"{{desktop_link}}","image":"{{image_url}}","images":"{{image_urls}}","gallery":"{{image_gallery}}","carousel":"{{image_carousel}}","card":"{{xianyu_card}}"}',
         pcurl_to_mobile=False,
     )
 
@@ -68,6 +68,11 @@ def test_webhook_client_renders_json_templates(monkeypatch):
                 "当前售价": "9999",
                 "商品链接": "https://www.goofish.com/item/123",
                 "商品主图链接": "https://img.example.com/item.jpg",
+                "商品图片列表": [
+                    "https://img.example.com/item.jpg",
+                    "https://img.example.com/item-2.jpg",
+                    "https://img.example.com/item-3.jpg",
+                ],
             },
             "价格合适",
         )
@@ -81,6 +86,20 @@ def test_webhook_client_renders_json_templates(monkeypatch):
     assert captured["json"]["short_title"] == "Sony A7M4"
     assert captured["json"]["link"] == "https://www.goofish.com/item/123"
     assert captured["json"]["image"] == "https://img.example.com/item.jpg"
+    assert captured["json"]["images"] == "\n".join([
+        "https://img.example.com/item.jpg",
+        "https://img.example.com/item-2.jpg",
+        "https://img.example.com/item-3.jpg",
+    ])
+    assert captured["json"]["gallery"].count("<img") == 3
+    assert "https://img.example.com/item-2.jpg" in captured["json"]["gallery"]
+    assert captured["json"]["carousel"].count("<img") == 3
+    assert "overflow-x:auto" in captured["json"]["carousel"]
+    assert "左右滑动查看 3 张图片" in captured["json"]["carousel"]
+    assert "描述不符包邮退" in captured["json"]["card"]
+    assert "¥ 9999" in captured["json"]["card"]
+    assert "overflow-x:auto" in captured["json"]["card"]
+    assert "📱 手机端打开" in captured["json"]["card"]
     assert captured["data"] is None
 
 

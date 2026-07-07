@@ -215,7 +215,7 @@ const enUSExtra = {
     description: 'Configure, test, and clear each channel independently. Current values are shown on the admin page, and saving submits only changed fields.',
     noActiveChannels: 'No notification channel configured yet',
     enabledChannels: 'Enabled: {channels}',
-    supportedVariables: 'Supported variables: title=full item title / notification_title=short title / keyword / content / price / reason / desktop_link / mobile_link / image_url=item image',
+    supportedVariables: 'Supported variables: title=full item title / notification_title=short title / keyword / content / price / reason / desktop_link / mobile_link / image_url=item image / image_urls=image list / image_gallery=image gallery HTML / image_carousel=large swipe gallery HTML / xianyu_card=Xianyu-style HTML card',
     globalBehavior: 'Global Behavior',
     globalBehaviorDescription: 'Control how item links are rendered across all channels.',
     preferMobileLink: 'Prefer mobile links',
