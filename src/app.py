@@ -31,6 +31,7 @@ from src.services.task_generation_service import TaskGenerationService
 from src.infrastructure.persistence.sqlite_bootstrap import bootstrap_sqlite_storage
 from src.infrastructure.persistence.sqlite_task_repository import SqliteTaskRepository
 from src.infrastructure.config.settings import settings as app_settings
+from src.domain.models.task import TaskUpdate
 
 
 # 全局服务实例
@@ -51,9 +52,36 @@ async def _sync_task_runtime_status(task_id: int, is_running: bool) -> None:
     )
 
 
+async def _disable_task_after_failure_guard(task_id: int, detail: str) -> None:
+    task_service = TaskService(SqliteTaskRepository())
+    task = await task_service.get_task(task_id)
+    if not task:
+        return
+    if not task.enabled and not task.is_running:
+        return
+    was_running = task.is_running
+
+    await task_service.update_task(
+        task_id,
+        TaskUpdate(enabled=False, is_running=False),
+    )
+    tasks_list = await task_service.get_all_tasks()
+    await scheduler_service.reload_jobs(tasks_list)
+    await websocket.broadcast_message(
+        "tasks_updated",
+        {"id": task_id, "enabled": False, "reason": detail},
+    )
+    if was_running:
+        await websocket.broadcast_message(
+            "task_status_changed",
+            {"id": task_id, "is_running": False},
+        )
+
+
 process_service.set_lifecycle_hooks(
     on_started=lambda task_id: _sync_task_runtime_status(task_id, True),
     on_stopped=lambda task_id: _sync_task_runtime_status(task_id, False),
+    on_paused=_disable_task_after_failure_guard,
 )
 
 # 设置全局 ProcessService 实例供依赖注入使用

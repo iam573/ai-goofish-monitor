@@ -21,6 +21,7 @@ from src.utils import build_task_log_path
 STOP_TIMEOUT_SECONDS = 20
 SPIDER_DEBUG_LIMIT_ENV = "SPIDER_DEBUG_LIMIT"
 LifecycleHook = Callable[[int], Awaitable[None] | None]
+PauseHook = Callable[[int, str], Awaitable[None] | None]
 
 
 @dataclass(frozen=True)
@@ -45,20 +46,30 @@ class ProcessService:
         self.failure_guard = FailureGuard()
         self._on_started: LifecycleHook | None = None
         self._on_stopped: LifecycleHook | None = None
+        self._on_paused: PauseHook | None = None
 
     def set_lifecycle_hooks(
         self,
         *,
         on_started: LifecycleHook | None = None,
         on_stopped: LifecycleHook | None = None,
+        on_paused: PauseHook | None = None,
     ) -> None:
         self._on_started = on_started
         self._on_stopped = on_stopped
+        self._on_paused = on_paused
 
     async def _invoke_hook(self, hook: LifecycleHook | None, task_id: int) -> None:
         if hook is None:
             return
         result = hook(task_id)
+        if asyncio.iscoroutine(result):
+            await result
+
+    async def _invoke_pause_hook(self, task_id: int, detail: str) -> None:
+        if self._on_paused is None:
+            return
+        result = self._on_paused(task_id, detail)
         if asyncio.iscoroutine(result):
             await result
 
@@ -151,10 +162,18 @@ class ProcessService:
         consecutive = getattr(decision, "consecutive_failures", 0)
         reason = getattr(decision, "reason", "") or "未知错误"
         return (
-            f"任务 '{task_name}' 已被失败保护暂停，暂不启动。"
+            f"任务 '{task_name}' 已被失败保护暂停并自动禁用，暂不启动。"
             f"原因: {reason}；连续失败: {consecutive}/{self.failure_guard.threshold}；"
-            f"暂停到: {paused_text}。请更新登录态/cookies 后重试。"
+            f"暂停到: {paused_text}。请更新登录态/cookies 后手动重新启用任务。"
         )
+
+    async def _disable_paused_task(self, task_id: int, detail: str) -> None:
+        if self._on_paused is None:
+            return
+        try:
+            await self._invoke_pause_hook(task_id, detail)
+        except Exception as exc:
+            print(f"自动禁用失败保护任务 (ID: {task_id}) 时出错: {exc}")
 
     async def start_task(self, task_id: int, task_name: str) -> StartTaskResult:
         """启动任务进程"""
@@ -170,7 +189,9 @@ class ProcessService:
         )
         if decision.skip:
             await self._notify_skip(task_name, decision)
-            return StartTaskResult(False, detail=self._format_skip_detail(task_name, decision))
+            detail = self._format_skip_detail(task_name, decision)
+            await self._disable_paused_task(task_id, detail)
+            return StartTaskResult(False, detail=detail)
 
         log_file_path = ""
         log_file_handle = None
@@ -211,7 +232,7 @@ class ProcessService:
                 f"原因: {decision.reason}\n"
                 f"连续失败: {decision.consecutive_failures}/{self.failure_guard.threshold}\n"
                 f"暂停到: {decision.paused_until.strftime('%Y-%m-%d %H:%M:%S') if decision.paused_until else 'N/A'}\n"
-                "修复方法: 更新登录态/cookies文件后会自动恢复。",
+                "已自动禁用任务。修复方法: 更新登录态/cookies 文件后，在任务管理中重新启用任务。",
             )
         except Exception as exc:
             print(f"发送任务暂停通知失败: {exc}")
@@ -221,8 +242,21 @@ class ProcessService:
         task_id = self._find_task_id_by_process(process)
         if task_id is None:
             return
+        task_name = self.task_names.get(task_id, f"任务ID {task_id}")
         self._cleanup_runtime(task_id, process)
         await self._invoke_hook(self._on_stopped, task_id)
+        await self._disable_if_failure_guard_paused(task_id, task_name)
+
+    async def _disable_if_failure_guard_paused(self, task_id: int, task_name: str) -> None:
+        decision = self.failure_guard.should_skip_start(
+            task_name,
+            cookie_path=self._resolve_cookie_path(task_name),
+        )
+        if not decision.skip:
+            return
+        detail = self._format_skip_detail(task_name, decision)
+        print(f"[FailureGuard] {detail}")
+        await self._disable_paused_task(task_id, detail)
 
     def _find_task_id_by_process(self, process: asyncio.subprocess.Process) -> int | None:
         for task_id, current_process in self.processes.items():

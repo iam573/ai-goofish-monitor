@@ -173,7 +173,7 @@ async def _notify_task_failure(
         f"\n任务: {task_name}"
         f"\n关键词: {keyword or 'N/A'}"
         f"\n已自动暂停重试，暂停到: {paused_until_str}"
-        f"\n修复后(更新登录态/cookies文件)将自动恢复。"
+        f"\n如果由 Web 服务调度，该任务会自动禁用；更新登录态/cookies 文件后，请在任务管理中重新启用任务。"
     )
 
     try:
@@ -1247,7 +1247,7 @@ async def scrape_xianyu(task_config: dict, debug_limit: int = 0):
                     f"原因: {decision.reason}\n"
                     f"连续失败: {decision.consecutive_failures}/{FAILURE_GUARD.threshold}\n"
                     f"暂停到: {decision.paused_until.strftime('%Y-%m-%d %H:%M:%S') if decision.paused_until else 'N/A'}\n"
-                    "修复方法: 更新登录态/cookies文件后会自动恢复。",
+                    "修复方法: 更新登录态/cookies 文件后，在任务管理中重新启用任务。",
                 )
             except Exception as e:
                 print(f"发送任务暂停通知失败: {e}")

@@ -114,6 +114,7 @@ def test_process_service_adds_debug_limit_arg_when_env_enabled(monkeypatch):
 def test_process_service_returns_detail_when_failure_guard_skips_start():
     async def run_scenario():
         service = ProcessService()
+        disabled = []
         service.failure_guard.should_skip_start = lambda *args, **kwargs: SimpleNamespace(
             skip=True,
             should_notify=False,
@@ -122,10 +123,76 @@ def test_process_service_returns_detail_when_failure_guard_skips_start():
             paused_until=None,
         )
 
+        async def on_paused(task_id: int, detail: str):
+            disabled.append((task_id, detail))
+
+        service.set_lifecycle_hooks(on_paused=on_paused)
+
         result = await service.start_task(0, "task-a")
 
         assert result.success is False
         assert "失败保护暂停" in result.detail
+        assert "自动禁用" in result.detail
         assert "登录态失效" in result.detail
+        assert disabled == [(0, result.detail)]
+
+    asyncio.run(run_scenario())
+
+
+def test_process_service_disables_task_when_process_exit_opens_failure_guard(monkeypatch, tmp_path):
+    fake_process = FakeProcess(pid=4322)
+    disabled = []
+
+    async def run_scenario():
+        service = ProcessService()
+        service._resolve_cookie_path = lambda _task_name: None
+        decisions = [
+            SimpleNamespace(
+                skip=False,
+                should_notify=False,
+                reason="not_paused",
+                consecutive_failures=2,
+                paused_until=None,
+            ),
+            SimpleNamespace(
+                skip=True,
+                should_notify=False,
+                reason="TimeoutError: Timeout 30000ms exceeded",
+                consecutive_failures=3,
+                paused_until=None,
+            ),
+        ]
+
+        def should_skip_start(*_args, **_kwargs):
+            return decisions.pop(0)
+
+        service.failure_guard.should_skip_start = should_skip_start
+        paused = asyncio.Event()
+
+        async def on_paused(task_id: int, detail: str):
+            disabled.append((task_id, detail))
+            paused.set()
+
+        service.set_lifecycle_hooks(on_paused=on_paused)
+
+        async def fake_create_subprocess_exec(*_args, **_kwargs):
+            return fake_process
+
+        monkeypatch.setattr(
+            "src.services.process_service.build_task_log_path",
+            lambda task_id, _task_name: str(tmp_path / f"task-{task_id}.log"),
+        )
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+
+        result = await service.start_task(5, "task-a")
+        assert result.success is True
+
+        fake_process.finish(0)
+        await asyncio.wait_for(paused.wait(), timeout=1)
+
+        assert len(disabled) == 1
+        assert disabled[0][0] == 5
+        assert "自动禁用" in disabled[0][1]
+        assert "TimeoutError" in disabled[0][1]
 
     asyncio.run(run_scenario())
