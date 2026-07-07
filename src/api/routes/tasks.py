@@ -142,6 +142,7 @@ async def update_task(
     task_id: int,
     task_update: TaskUpdate,
     service: TaskService = Depends(get_task_service),
+    process_service: ProcessService = Depends(get_process_service),
     scheduler_service: SchedulerService = Depends(get_scheduler_service),
 ):
     """更新任务"""
@@ -150,6 +151,7 @@ async def update_task(
         if not existing_task:
             raise HTTPException(status_code=404, detail="任务未找到")
         _validate_final_account_strategy(existing_task, task_update)
+        reenabling_task = task_update.enabled is True and not existing_task.enabled
 
         current_mode = getattr(existing_task, "decision_mode", "ai") or "ai"
         target_mode = task_update.decision_mode or current_mode
@@ -207,6 +209,9 @@ async def update_task(
                 print(traceback.format_exc())
                 raise HTTPException(status_code=500, detail=error_msg)
         task = await service.update_task(task_id, task_update)
+        if reenabling_task:
+            for task_name in {existing_task.task_name, task.task_name}:
+                process_service.reset_failure_guard(task_name)
         await _reload_scheduler_if_needed(service, scheduler_service)
         return {"message": "任务更新成功", "task": serialize_task(task, scheduler_service)}
     except ValueError as e:

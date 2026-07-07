@@ -60,6 +60,7 @@ class FakeProcessService:
         self.started = []
         self.stopped = []
         self.reindexed = []
+        self.reset_failure_guard_calls = []
         self.start_result = True
         self._on_started = None
         self._on_stopped = None
@@ -83,6 +84,9 @@ class FakeProcessService:
 
     def reindex_after_delete(self, deleted_task_id: int):
         self.reindexed.append(deleted_task_id)
+
+    def reset_failure_guard(self, task_name: str):
+        self.reset_failure_guard_calls.append(task_name)
 
 
 class FakeSchedulerService:

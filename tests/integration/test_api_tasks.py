@@ -73,6 +73,23 @@ def test_start_task_returns_process_failure_detail(api_client, api_context, samp
     assert response.json()["detail"] == "任务已被失败保护暂停，请更新登录态/cookies 后重试。"
 
 
+def test_reenabling_task_resets_failure_guard(api_client, api_context, sample_task_payload):
+    response = api_client.post("/api/tasks/", json=sample_task_payload)
+    assert response.status_code == 200
+
+    response = api_client.patch("/api/tasks/0", json={"enabled": False})
+    assert response.status_code == 200
+
+    process_service = api_context["process_service"]
+    assert process_service.reset_failure_guard_calls == []
+
+    response = api_client.patch("/api/tasks/0", json={"enabled": True})
+
+    assert response.status_code == 200
+    assert response.json()["task"]["enabled"] is True
+    assert process_service.reset_failure_guard_calls == [sample_task_payload["task_name"]]
+
+
 def test_generate_keyword_mode_task_without_ai_criteria(api_client):
     payload = {
         "task_name": "A7M4 关键词筛选",

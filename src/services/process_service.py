@@ -89,6 +89,11 @@ class ProcessService:
         process = self.processes.get(task_id)
         return process is not None and process.returncode is None
 
+    def reset_failure_guard(self, task_name: str) -> None:
+        """手动重新启用任务时清理失败保护状态，允许立即重试。"""
+        self.failure_guard.record_success(task_name)
+        print(f"[FailureGuard] 已清理任务 '{task_name}' 的失败保护状态")
+
     async def _drain_finished_process(self, task_id: int) -> None:
         process = self.processes.get(task_id)
         if process is None or process.returncode is None:
