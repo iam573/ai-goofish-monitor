@@ -141,6 +141,7 @@ class WebhookClient(NotificationClient):
             "reason": message.reason,
             "desktop_link": message.desktop_link,
             "mobile_link": message.mobile_link or message.desktop_link,
+            "image_url": message.image_url or "",
         }
         rendered = value
         for key, replacement in replacements.items():

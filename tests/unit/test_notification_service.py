@@ -56,7 +56,7 @@ def test_webhook_client_renders_json_templates(monkeypatch):
         webhook_headers='{"Authorization":"Bearer token"}',
         webhook_content_type="JSON",
         webhook_query_parameters='{"task":"{{title}}","keyword":"{{keyword}}"}',
-        webhook_body='{"message":"{{content}}","keyword":"{{keyword}}","short_title":"{{notification_title}}","link":"{{desktop_link}}"}',
+        webhook_body='{"message":"{{content}}","keyword":"{{keyword}}","short_title":"{{notification_title}}","link":"{{desktop_link}}","image":"{{image_url}}"}',
         pcurl_to_mobile=False,
     )
 
@@ -67,6 +67,7 @@ def test_webhook_client_renders_json_templates(monkeypatch):
                 "搜索关键字": "sony a7m4",
                 "当前售价": "9999",
                 "商品链接": "https://www.goofish.com/item/123",
+                "商品主图链接": "https://img.example.com/item.jpg",
             },
             "价格合适",
         )
@@ -79,6 +80,7 @@ def test_webhook_client_renders_json_templates(monkeypatch):
     assert captured["json"]["keyword"] == "sony a7m4"
     assert captured["json"]["short_title"] == "Sony A7M4"
     assert captured["json"]["link"] == "https://www.goofish.com/item/123"
+    assert captured["json"]["image"] == "https://img.example.com/item.jpg"
     assert captured["data"] is None
 
 
