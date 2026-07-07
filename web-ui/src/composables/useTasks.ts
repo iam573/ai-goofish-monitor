@@ -112,6 +112,7 @@ export function useTasks() {
         task.is_running = previous
       }
       if (e instanceof Error) error.value = e
+      await fetchTasks({ silent: true })
       throw e
     } finally {
       isLoading.value = false

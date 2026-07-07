@@ -245,6 +245,7 @@ const emit = defineEmits<{
               size="sm"
               class="flex-1 min-w-[120px]"
               :class="task.enabled ? '' : 'pointer-events-none opacity-50'"
+              :disabled="!task.enabled"
               :aria-label="`${t('tasks.table.start')} ${task.task_name}`"
               @click="emit('run-task', task.id)"
             >
@@ -475,6 +476,7 @@ const emit = defineEmits<{
                     variant="default"
                     class="h-8 px-3 rounded-lg shadow-sm transition-all active:scale-95 text-white border-none"
                     :class="task.enabled ? 'bg-primary hover:bg-primary/90' : 'bg-slate-200 text-slate-400 pointer-events-none opacity-50'"
+                    :disabled="!task.enabled"
                     :aria-label="`${t('tasks.table.start')} ${task.task_name}`"
                     @click="emit('run-task', task.id)"
                   >
