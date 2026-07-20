@@ -1,4 +1,8 @@
-from src.scraper import _filter_items_by_price_range, _format_price_bound_for_input
+from src.scraper import (
+    _filter_items_by_keyword_prefilter,
+    _filter_items_by_price_range,
+    _format_price_bound_for_input,
+)
 from src.services.price_history_service import parse_price_value
 
 
@@ -53,6 +57,52 @@ def test_filter_items_by_price_range_returns_original_items_without_bounds():
     filtered = _filter_items_by_price_range(items)
 
     assert filtered is items
+
+
+def test_keyword_prefilter_removes_keyword_mode_items_without_include_match():
+    items = [
+        {"商品标题": "Aqara 窗帘伴侣 E1", "卖家昵称": "个人卖家"},
+        {"商品标题": "普通窗帘挂钩", "卖家昵称": "个人卖家"},
+    ]
+
+    filtered = _filter_items_by_keyword_prefilter(
+        items,
+        decision_mode="keyword",
+        keyword_rules=["窗帘伴侣"],
+    )
+
+    assert [item["商品标题"] for item in filtered] == ["Aqara 窗帘伴侣 E1"]
+
+
+def test_keyword_prefilter_removes_excluded_items_before_detail_fetch():
+    items = [
+        {"商品标题": "窗帘伴侣 拆修过", "卖家昵称": "个人卖家"},
+        {"商品标题": "窗帘伴侣 几乎全新", "卖家昵称": "个人卖家"},
+    ]
+
+    filtered = _filter_items_by_keyword_prefilter(
+        items,
+        decision_mode="keyword",
+        keyword_rules=["窗帘伴侣"],
+        exclude_keyword_rules=["拆修"],
+    )
+
+    assert [item["商品标题"] for item in filtered] == ["窗帘伴侣 几乎全新"]
+
+
+def test_keyword_prefilter_keeps_ai_mode_items_without_include_match():
+    items = [
+        {"商品标题": "Aqara 窗帘伴侣 E1", "卖家昵称": "个人卖家"},
+        {"商品标题": "普通窗帘挂钩", "卖家昵称": "个人卖家"},
+    ]
+
+    filtered = _filter_items_by_keyword_prefilter(
+        items,
+        decision_mode="ai",
+        keyword_rules=["窗帘伴侣"],
+    )
+
+    assert filtered == items
 
 
 def test_parse_price_value_supports_common_display_variants():

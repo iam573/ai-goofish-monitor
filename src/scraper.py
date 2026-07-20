@@ -43,6 +43,7 @@ from src.utils import (
     safe_get,
     save_to_jsonl,
 )
+from src.keyword_rule_engine import build_search_text, match_keywords
 from src.rotation import RotationPool, load_state_files, parse_proxy_pool, RotationItem
 from src.failure_guard import FailureGuard
 from src.services.account_strategy_service import resolve_account_runtime_plan
@@ -250,6 +251,42 @@ def _filter_items_by_price_range(
         print(
             f"LOG: 本地价格兜底过滤移除 {skipped_count} 条超出范围的商品 "
             f"({min_text} - {max_text})。"
+        )
+    return filtered_items
+
+
+def _filter_items_by_keyword_prefilter(
+    items: list[dict],
+    *,
+    decision_mode: str,
+    keyword_rules=None,
+    exclude_keyword_rules=None,
+) -> list[dict]:
+    keyword_rules = tuple(keyword_rules or ())
+    exclude_keyword_rules = tuple(exclude_keyword_rules or ())
+    should_apply_include = decision_mode == "keyword" and bool(keyword_rules)
+    if not should_apply_include and not exclude_keyword_rules:
+        return items
+
+    filtered_items = []
+    excluded_count = 0
+    missed_count = 0
+    for item in items:
+        search_text = build_search_text({"商品信息": item, "卖家信息": {}})
+        matched_excludes = match_keywords(exclude_keyword_rules, search_text)
+        if matched_excludes:
+            excluded_count += 1
+            continue
+        if should_apply_include and not match_keywords(keyword_rules, search_text):
+            missed_count += 1
+            continue
+        filtered_items.append(item)
+
+    if excluded_count or missed_count:
+        print(
+            "LOG: 列表关键词预过滤移除 "
+            f"{excluded_count + missed_count} 条商品 "
+            f"(忽略关键词 {excluded_count} 条，未命中关键词 {missed_count} 条)。"
         )
     return filtered_items
 
@@ -1043,6 +1080,17 @@ async def scrape_xianyu(task_config: dict, debug_limit: int = 0):
                     )
                     if not basic_items:
                         log_time(f"第 {page_num} 页价格过滤后无可处理商品，继续下一页。")
+                        continue
+                    basic_items = _filter_items_by_keyword_prefilter(
+                        basic_items,
+                        decision_mode=decision_mode,
+                        keyword_rules=keyword_rules,
+                        exclude_keyword_rules=exclude_keyword_rules,
+                    )
+                    if not basic_items:
+                        log_time(
+                            f"第 {page_num} 页关键词预过滤后无可处理商品，继续下一页。"
+                        )
                         continue
                     historical_snapshots.extend(
                         record_market_snapshots(
