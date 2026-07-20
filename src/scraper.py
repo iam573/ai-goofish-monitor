@@ -53,6 +53,7 @@ from src.services.item_analysis_dispatcher import (
 from src.services.price_history_service import (
     build_market_reference,
     load_price_snapshots,
+    parse_price_value,
     record_market_snapshots,
 )
 from src.services.result_storage_service import load_processed_link_keys
@@ -202,6 +203,54 @@ def _as_int(value, default: int) -> int:
         return int(value)
     except (TypeError, ValueError):
         return default
+
+
+def _normalize_price_bound(value) -> Optional[float]:
+    if value is None:
+        return None
+    if isinstance(value, str) and not value.strip():
+        return None
+    return parse_price_value(value)
+
+
+def _format_price_bound_for_input(value) -> Optional[str]:
+    bound = _normalize_price_bound(value)
+    if bound is None:
+        return None
+    return f"{bound:g}"
+
+
+def _filter_items_by_price_range(
+    items: list[dict], min_price=None, max_price=None
+) -> list[dict]:
+    min_bound = _normalize_price_bound(min_price)
+    max_bound = _normalize_price_bound(max_price)
+    if min_bound is None and max_bound is None:
+        return items
+
+    filtered_items = []
+    skipped_count = 0
+    for item in items:
+        price_value = parse_price_value(item.get("当前售价"))
+        if price_value is None:
+            filtered_items.append(item)
+            continue
+        if min_bound is not None and price_value < min_bound:
+            skipped_count += 1
+            continue
+        if max_bound is not None and price_value > max_bound:
+            skipped_count += 1
+            continue
+        filtered_items.append(item)
+
+    if skipped_count:
+        min_text = "不限" if min_bound is None else f"¥{min_bound:g}"
+        max_text = "不限" if max_bound is None else f"¥{max_bound:g}"
+        print(
+            f"LOG: 本地价格兜底过滤移除 {skipped_count} 条超出范围的商品 "
+            f"({min_text} - {max_text})。"
+        )
+    return filtered_items
 
 
 def _get_rotation_settings(task_config: dict) -> dict:
@@ -916,22 +965,24 @@ async def scrape_xianyu(task_config: dict, debug_limit: int = 0):
                     except Exception as e:
                         print(f"LOG: 应用区域筛选 '{region_filter}' 失败: {e}")
 
-                if min_price or max_price:
+                min_price_input = _format_price_bound_for_input(min_price)
+                max_price_input = _format_price_bound_for_input(max_price)
+                if min_price_input or max_price_input:
                     price_container = page.locator(
                         'div[class*="search-price-input-container"]'
                     ).first
                     if await price_container.is_visible():
-                        if min_price:
+                        if min_price_input:
                             await price_container.get_by_placeholder("¥").first.fill(
-                                min_price
+                                min_price_input
                             )
                             # --- 修改: 将固定等待改为随机等待 ---
                             await random_sleep(1, 2.5)  # 原来是 asyncio.sleep(5)
-                        if max_price:
+                        if max_price_input:
                             await (
                                 price_container.get_by_placeholder("¥")
                                 .nth(1)
-                                .fill(max_price)
+                                .fill(max_price_input)
                             )
                             # --- 修改: 将固定等待改为随机等待 ---
                             await random_sleep(1, 2.5)  # 原来是 asyncio.sleep(5)
@@ -976,6 +1027,14 @@ async def scrape_xianyu(task_config: dict, debug_limit: int = 0):
                     )
                     if not basic_items:
                         break
+                    basic_items = _filter_items_by_price_range(
+                        basic_items,
+                        min_price=min_price,
+                        max_price=max_price,
+                    )
+                    if not basic_items:
+                        log_time(f"第 {page_num} 页价格过滤后无可处理商品，继续下一页。")
+                        continue
                     historical_snapshots.extend(
                         record_market_snapshots(
                             keyword=keyword,

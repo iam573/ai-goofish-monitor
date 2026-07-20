@@ -2,6 +2,7 @@ import json
 from datetime import datetime
 
 from src.config import AI_DEBUG_MODE
+from src.services.price_history_service import parse_price_value
 from src.utils import safe_get
 
 
@@ -27,7 +28,9 @@ async def _parse_search_results_json(json_data: dict, source: str) -> list:
             price = "".join([str(p.get("text", "")) for p in price_parts if isinstance(p, dict)]).replace("当前价", "").strip() if isinstance(price_parts, list) else "价格异常"
             # 确保price是字符串类型，避免float类型导致的"in"操作错误
             price = str(price) if not isinstance(price, str) else price
-            if "万" in price: price = f"¥{float(price.replace('¥', '').replace('万', '')) * 10000:.0f}"
+            parsed_price = parse_price_value(price)
+            if parsed_price is not None:
+                price = f"¥{parsed_price:g}"
             area = await safe_get(main_data, "area", default="地区未知")
             seller = await safe_get(main_data, "userNickName", default="匿名卖家")
             raw_link = await safe_get(item, "data", "item", "main", "targetUrl", default="")

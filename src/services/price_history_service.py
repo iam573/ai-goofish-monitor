@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import re
 from collections import defaultdict
 from datetime import datetime
 from statistics import median
@@ -16,6 +17,7 @@ from src.infrastructure.persistence.sqlite_connection import sqlite_connection
 
 PRICE_HISTORY_DIR = "price_history"
 DEFAULT_HISTORY_WINDOW_DAYS = 30
+PRICE_PATTERN = re.compile(r"(?P<amount>\d+(?:\.\d+)?)(?P<unit>\s*万)?")
 
 
 def normalize_keyword_slug(keyword: str) -> str:
@@ -39,13 +41,27 @@ def parse_price_value(value: Any) -> Optional[float]:
     if isinstance(value, (int, float)):
         return round(float(value), 2)
 
-    text = str(value).strip().replace("¥", "").replace(",", "")
+    text = str(value).strip()
     if not text or text in {"价格异常", "暂无", "-", "N/A"}:
         return None
-    if text.endswith("万"):
-        text = str(float(text[:-1]) * 10000)
+
+    normalized = (
+        text.replace("¥", "")
+        .replace("￥", "")
+        .replace("元", "")
+        .replace("RMB", "")
+        .replace("rmb", "")
+        .replace(",", "")
+    )
+    match = PRICE_PATTERN.search(normalized)
+    if not match:
+        return None
+
     try:
-        return round(float(text), 2)
+        amount = float(match.group("amount"))
+        if match.group("unit"):
+            amount *= 10000
+        return round(amount, 2)
     except (TypeError, ValueError):
         return None
 
