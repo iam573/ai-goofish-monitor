@@ -188,6 +188,7 @@ cd web-ui && npm run build
 - `SERVER_PORT`: backend port, default `8000`.
 - `LOGIN_IS_EDGE`: use Edge instead of Chrome locally; Docker images do not bundle Edge and always run with Chromium.
 - `PCURL_TO_MOBILE`: convert desktop item URLs to mobile URLs.
+- `ENABLE_SELLER_PROFILE_FETCH`: open seller profile pages to collect ratings and listed items, default `false`.
 
 ### Notifications
 
@@ -233,7 +234,7 @@ graph TD
     A[Start Monitoring Task] --> B[Select Account/Proxy Configuration];
     B --> C[Task: Search Products];
     C --> D{Found New Products?};
-    D -- Yes --> E[Scrape Product Details & Seller Info];
+    D -- Yes --> E[Scrape Product Details & Basic Seller Fields];
     E --> F[Download Product Images];
     F --> G[Call AI for Analysis];
     G --> H{AI Recommended?};

@@ -133,6 +133,61 @@ def test_item_analysis_dispatcher_supports_keyword_mode_without_ai():
     assert notifications[0][0] == "demo"
 
 
+def test_item_analysis_dispatcher_skips_seller_loader_without_seller_id():
+    saved_records = []
+
+    async def seller_loader(user_id: str):
+        raise AssertionError("seller_loader should not be called without seller_id")
+
+    async def image_downloader(product_id: str, image_urls: list[str], task_name: str):
+        raise AssertionError("关键词模式不应下载图片")
+
+    async def ai_analyzer(record: dict, image_paths: list[str], prompt_text: str):
+        raise AssertionError("关键词模式不应调用 AI")
+
+    async def notifier(item_data: dict, reason: str):
+        raise AssertionError("未推荐商品不应通知")
+
+    async def saver(record: dict, keyword: str):
+        saved_records.append(record)
+        return True
+
+    async def run():
+        dispatcher = ItemAnalysisDispatcher(
+            concurrency=1,
+            skip_ai_analysis=False,
+            seller_loader=seller_loader,
+            image_downloader=image_downloader,
+            ai_analyzer=ai_analyzer,
+            notifier=notifier,
+            saver=saver,
+        )
+        dispatcher.submit(
+            ItemAnalysisJob(
+                keyword="demo",
+                task_name="Demo",
+                decision_mode="keyword",
+                analyze_images=False,
+                prompt_text="",
+                keyword_rules=("个人闲置",),
+                final_record={
+                    "商品信息": {"商品ID": "1", "商品标题": "演示商品"},
+                    "卖家信息": {},
+                },
+                seller_id=None,
+                zhima_credit_text="优秀",
+                registration_duration_text="来闲鱼1年",
+            )
+        )
+        await dispatcher.join()
+
+    asyncio.run(run())
+    assert saved_records[0]["卖家信息"] == {
+        "卖家芝麻信用": "优秀",
+        "卖家注册时长": "来闲鱼1年",
+    }
+
+
 def test_item_analysis_dispatcher_exclude_keywords_override_keyword_recommendation():
     saved_records = []
     notifications = []

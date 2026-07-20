@@ -201,6 +201,7 @@ cd web-ui && npm run build
 - `SERVER_PORT`：后端监听端口，默认 `8000`。
 - `LOGIN_IS_EDGE`：本地环境可切换为 Edge 内核；Docker 镜像未内置 Edge，容器内会固定使用 Chromium。
 - `PCURL_TO_MOBILE`：是否将 PC 商品链接转换为移动端链接。
+- `ENABLE_SELLER_PROFILE_FETCH`：是否额外打开卖家主页采集评价和在售商品列表，默认 `false`。
 
 ### 通知
 
@@ -246,7 +247,7 @@ graph TD
     A[启动监控任务] --> B[选择账号/代理配置];
     B --> C[任务: 搜索商品];
     C --> D{发现新商品?};
-    D -- 是 --> E[抓取商品详情 & 卖家信息];
+    D -- 是 --> E[抓取商品详情与基础卖家字段];
     E --> F[下载商品图片];
     F --> G[调用AI进行分析];
     G --> H{AI是否推荐?};

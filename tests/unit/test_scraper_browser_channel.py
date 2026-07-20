@@ -1,9 +1,22 @@
 import importlib
 
 
-def _load_scraper(monkeypatch, *, login_is_edge: bool, running_in_docker: bool):
+def _load_scraper(
+    monkeypatch,
+    *,
+    login_is_edge: bool,
+    running_in_docker: bool,
+    seller_profile_fetch: bool | None = None,
+):
     monkeypatch.setenv("LOGIN_IS_EDGE", "true" if login_is_edge else "false")
     monkeypatch.setenv("RUNNING_IN_DOCKER", "true" if running_in_docker else "false")
+    if seller_profile_fetch is None:
+        monkeypatch.delenv("ENABLE_SELLER_PROFILE_FETCH", raising=False)
+    else:
+        monkeypatch.setenv(
+            "ENABLE_SELLER_PROFILE_FETCH",
+            "true" if seller_profile_fetch else "false",
+        )
 
     import src.config as config_module
     import src.scraper as scraper_module
@@ -44,3 +57,20 @@ def test_build_extra_headers_filters_navigation_and_browser_managed_headers(monk
             "X-Custom-Trace": "keep-me",
         }
     ) == {"X-Custom-Trace": "keep-me"}
+
+
+def test_seller_profile_fetch_is_disabled_by_default(monkeypatch):
+    scraper = _load_scraper(monkeypatch, login_is_edge=False, running_in_docker=False)
+
+    assert scraper._should_fetch_seller_profile() is False
+
+
+def test_seller_profile_fetch_can_be_enabled_by_env(monkeypatch):
+    scraper = _load_scraper(
+        monkeypatch,
+        login_is_edge=False,
+        running_in_docker=False,
+        seller_profile_fetch=True,
+    )
+
+    assert scraper._should_fetch_seller_profile() is True

@@ -21,6 +21,7 @@ from src.ai_handler import (
 from src.config import (
     AI_DEBUG_MODE,
     DETAIL_API_URL_PATTERN,
+    ENABLE_SELLER_PROFILE_FETCH,
     LOGIN_IS_EDGE,
     RUN_HEADLESS,
     RUNNING_IN_DOCKER,
@@ -318,6 +319,10 @@ def _get_seller_profile_cache_ttl(task_config: dict) -> int:
     return max(0, _as_int(configured, default))
 
 
+def _should_fetch_seller_profile() -> bool:
+    return ENABLE_SELLER_PROFILE_FETCH
+
+
 def _default_context_options() -> dict:
     return {
         "user_agent": "Mozilla/5.0 (Linux; Android 6.0; Nexus 5 Build/MRA58N) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36",
@@ -544,6 +549,10 @@ async def scrape_xianyu(task_config: dict, debug_limit: int = 0):
     if new_publish_option == "__none__":
         new_publish_option = ""
     region_filter = (task_config.get("region") or "").strip()
+
+    fetch_seller_profile = _should_fetch_seller_profile()
+    if not fetch_seller_profile:
+        print("LOG: 卖家主页资料采集已关闭，将跳过卖家评价和在售商品列表抓取。")
 
     processed_links = set()
     history_run_id = datetime.now().strftime("%Y%m%d%H%M%S")
@@ -1191,7 +1200,11 @@ async def scrape_xianyu(task_config: dict, debug_limit: int = 0):
                                             exclude_keyword_rules or []
                                         ),
                                         final_record=final_record,
-                                        seller_id=str(user_id) if user_id else None,
+                                        seller_id=(
+                                            str(user_id)
+                                            if fetch_seller_profile and user_id
+                                            else None
+                                        ),
                                         zhima_credit_text=zhima_credit_text,
                                         registration_duration_text=registration_duration_text,
                                     )
