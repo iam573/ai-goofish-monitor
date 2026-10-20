@@ -1,8 +1,10 @@
 from dataclasses import replace
+import json
 
 import httpx
 
 from app_monitor.config import settings
+from app_monitor import notifications
 from app_monitor.notifications import NotificationService
 
 
@@ -20,6 +22,93 @@ def test_webhook_template_renders_nested_values():
     )
 
     assert rendered == {"title": "商品", "nested": ["价格合适"]}
+
+
+def test_notification_has_category_heading_and_product_on_next_line():
+    title, content = NotificationService._format_message(
+        {
+            "title": "自用国行 iPhone 17 128G，成色好",
+            "model": "17",
+            "storage": "128",
+            "price": 5100,
+            "quote_price": 4900,
+            "quote_grade": "小花",
+            "display_region": "厦门思明",
+            "item_url": "https://www.goofish.com/item?id=1090413599999",
+        },
+        "",
+        "https://pages.goofish.com/sharexy?example=1",
+        ["https://example.test/image.jpg"],
+    )
+
+    assert title == "iPhone 17 128G"
+    assert content.startswith("自用国行 iPhone 17 128G，成色好\n\n挂牌价：¥5100")
+    assert "小花回收报价：¥4900\n挂牌价高于回收报价：¥200\n地区：厦门思明" in content
+    assert "打开商品：https://pages.goofish.com/sharexy?example=1" in content
+    assert "网页链接：https://www.goofish.com/item?id=1090413599999" in content
+    assert "![商品图片](https://example.test/image.jpg)" in content
+
+
+def test_notification_supports_terabyte_and_test_push_without_category():
+    title, content = NotificationService._format_message(
+        {"title": "17 Pro Max 1T", "model": "17 Pro Max", "storage": "1T", "price": 4500, "quote_price": 4900},
+        "",
+        "",
+        [],
+    )
+    assert title == "iPhone 17 Pro Max 1TB"
+    assert "挂牌价低于回收报价：¥400" in content
+    test_title, test_content = NotificationService._format_message(
+        {"title": "[测试] App Monitor 推送", "price": 0}, "推送渠道配置有效。", "", []
+    )
+    assert test_title == "[测试] App Monitor 推送"
+    assert "原因：推送渠道配置有效。" in test_content
+
+
+async def test_send_webhook_preserves_heading_and_line_breaks(monkeypatch):
+    captured = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["payload"] = json.loads(request.content)
+        return httpx.Response(200, json={"ok": True})
+
+    real_client = httpx.AsyncClient
+    monkeypatch.setattr(
+        notifications.httpx,
+        "AsyncClient",
+        lambda *args, **kwargs: real_client(
+            *args, transport=httpx.MockTransport(handler), **kwargs
+        ),
+    )
+    service = NotificationService(replace(
+        settings,
+        ntfy_topic_url="",
+        bark_url="",
+        webhook_url="https://push.example.test/hook",
+        webhook_headers="",
+        webhook_body='{"title":"{{title}}","content":"{{content}}"}',
+        webhook_method="POST",
+        webhook_content_type="JSON",
+        webhook_query_parameters="",
+    ))
+    result = await service.send(
+        {
+            "title": "国行 iPhone 17 128G 自用",
+            "model": "17",
+            "storage": "128",
+            "price": 5100,
+            "quote_price": 4900,
+            "quote_grade": "小花",
+            "item_url": "https://www.goofish.com/item?id=1090413599999",
+        },
+        "命中",
+    )
+
+    assert result["webhook"]["success"] is True
+    assert captured["payload"]["title"] == "iPhone 17 128G"
+    assert captured["payload"]["content"].startswith(
+        "国行 iPhone 17 128G 自用\n\n挂牌价：¥5100\n小花回收报价：¥4900"
+    )
 
 
 async def test_custom_webhook_uses_headers_and_body_template():
@@ -56,4 +145,4 @@ async def test_custom_webhook_uses_headers_and_body_template():
 
     request = captured["request"]
     assert request.headers["X-Token"] == "secret"
-    assert request.content.decode() == '{"title":"iPhone 15 Pro","content":"价格：¥3000"}'
+    assert json.loads(request.content) == {"title": "iPhone 15 Pro", "content": "价格：¥3000"}

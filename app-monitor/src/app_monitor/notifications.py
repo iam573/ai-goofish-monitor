@@ -8,6 +8,7 @@ from urllib.parse import parse_qsl, quote, urlencode, urlparse, urlunparse
 import httpx
 
 from .config import Settings
+from .matching import display_storage
 
 
 class NotificationService:
@@ -26,22 +27,15 @@ class NotificationService:
         return channels
 
     async def send(self, item: dict[str, Any], reason: str) -> dict[str, dict[str, Any]]:
-        title = str(item["title"])
         item_url = str(item.get("item_url") or "").strip()
         if not re.search(r"(?:[?&])id=\d{8,}(?:&|$)", item_url):
             item_url = ""
         image_urls = self._image_urls(item)
         mobile_url = self._mobile_link(item_url)
         notification_item = {**item, "item_url": item_url, "image_urls": image_urls}
-        notification_title = title[:30] + ("..." if len(title) > 30 else "")
-        body_lines = [f"价格: ¥{float(item['price']):g}", f"原因: {reason}"]
-        if mobile_url:
-            body_lines.append(f"手机端链接: {mobile_url}")
-        if item_url:
-            body_lines.append(f"电脑端链接: {item_url}")
-        if image_urls:
-            body_lines.extend(("", f"![商品图片]({image_urls[0]})"))
-        body = "\n".join(body_lines)
+        notification_title, body = self._format_message(
+            notification_item, reason, mobile_url, image_urls
+        )
         async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
             results: dict[str, dict[str, Any]] = {}
             if self.settings.ntfy_topic_url:
@@ -69,7 +63,7 @@ class NotificationService:
                 )
             if self.settings.webhook_url:
                 try:
-                    response = await self._send_webhook(client, notification_item, reason, title, body)
+                    response = await self._send_webhook(client, notification_item, reason, notification_title, body)
                     results["webhook"] = await self._call("webhook", response)
                 except Exception as exc:
                     results["webhook"] = {
@@ -78,6 +72,42 @@ class NotificationService:
                         "channel": "webhook",
                     }
         return results
+
+    @staticmethod
+    def _format_message(
+        item: dict[str, Any], reason: str, mobile_url: str, image_urls: list[str]
+    ) -> tuple[str, str]:
+        product_title = str(item["title"]).strip()
+        model = str(item.get("model") or "").strip()
+        storage = str(item.get("storage") or "").strip()
+        category = f"iPhone {model} {display_storage(storage)}" if model and storage else product_title
+        price = float(item["price"])
+        lines = [product_title, "", f"挂牌价：¥{price:g}"]
+        quote = item.get("quote_price")
+        if quote is not None:
+            quote_price = float(quote)
+            grade = str(item.get("quote_grade") or "").strip()
+            lines.append(f"{grade}回收报价：¥{quote_price:g}")
+            difference = price - quote_price
+            if difference > 0:
+                lines.append(f"挂牌价高于回收报价：¥{difference:g}")
+            elif difference < 0:
+                lines.append(f"挂牌价低于回收报价：¥{-difference:g}")
+            else:
+                lines.append("挂牌价与回收报价持平")
+        elif reason:
+            lines.append(f"原因：{reason}")
+        region = str(item.get("display_region") or item.get("region") or "").strip()
+        if region:
+            lines.append(f"地区：{region}")
+        item_url = str(item.get("item_url") or "")
+        if mobile_url or item_url:
+            lines.extend(("", f"打开商品：{mobile_url or item_url}"))
+        if item_url and mobile_url and item_url != mobile_url:
+            lines.append(f"网页链接：{item_url}")
+        if image_urls:
+            lines.extend(("", f"![商品图片]({image_urls[0]})"))
+        return category, "\n".join(lines)
 
     async def _send_webhook(
         self,
@@ -97,7 +127,8 @@ class NotificationService:
         ) or {}
         replacements = {
             "title": title,
-            "notification_title": title[:30] + ("..." if len(title) > 30 else ""),
+            "notification_title": title,
+            "item_title": str(item.get("title") or ""),
             "keyword": str(item.get("keyword") or ""),
             "content": content,
             "price": f"{float(item['price']):g}",
@@ -108,7 +139,7 @@ class NotificationService:
             "image_urls": "\n".join(self._image_urls(item)),
             "image_gallery": "\n".join(f"![商品图片]({url})" for url in self._image_urls(item)[:6]),
             "image_carousel": "\n".join(f"![商品图片]({url})" for url in self._image_urls(item)[:6]),
-            "xianyu_card": content,
+            "xianyu_card": f"**{title}**\n\n{content}",
         }
         rendered_params = self._render_template(params, replacements)
         parsed_url = list(urlparse(self.settings.webhook_url))

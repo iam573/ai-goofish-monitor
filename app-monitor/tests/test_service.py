@@ -35,9 +35,11 @@ class FakeCollector:
 class FakeNotifier:
     def __init__(self):
         self.sent = []
+        self.payloads = []
 
     async def send(self, item, reason):
         self.sent.append((item["item_id"], reason))
+        self.payloads.append(item)
         return {"ntfy": {"success": True}}
 
 
@@ -78,6 +80,9 @@ async def test_run_model_applies_region_and_capacity_filter(database):
     # d 标题没写容量，但 App 内已筛选 256G，按 256G 报价判断
     assert result["observed"] == 5 and result["matched"] == 3
     assert sorted(sent[0] for sent in notifier.sent) == ["a", "b", "d"]
+    assert notifier.payloads[0]["model"] == "15 Pro"
+    assert notifier.payloads[0]["storage"] == "256"
+    assert notifier.payloads[0]["quote_price"] == 4000
 
     again = await service.run_model("15 Pro", "256")
     assert again["matched"] == 0 and len(notifier.sent) == 3

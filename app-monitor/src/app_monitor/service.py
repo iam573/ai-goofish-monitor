@@ -300,7 +300,17 @@ class MonitorService:
             if not deal_id:
                 continue
             matched += 1
-            result = await self.notifications.send(item, decision.reason)
+            result = await self.notifications.send(
+                {
+                    **item,
+                    "model": decision.model,
+                    "storage": decision.storage,
+                    "quote_price": decision.quote_price,
+                    "quote_grade": rules.quote_grade,
+                    "region": decision.region,
+                },
+                decision.reason,
+            )
             success = bool(result) and any(value.get("success") for value in result.values())
             notified += int(success)
             with self.database.connect() as connection:
