@@ -99,3 +99,39 @@ def test_api_flow_rules_targets_and_injected_items(tmp_path, monkeypatch):
             )
         assert client.get(f"/api/quotes/batches/{batch_id}/image").status_code == 404
         assert client.get("/api/quotes/batches").json()[0]["image_available"] is False
+
+
+def test_series_and_model_selection_cascades_to_all_capacities(tmp_path, monkeypatch):
+    monkeypatch.setattr(api.database, "path", tmp_path / "selection.sqlite3")
+    monkeypatch.setattr(api, "refresh_quotes_if_stale", _noop)
+    with TestClient(api.app) as client:
+        add_quotes(api.database, [
+            ("16", "128", "小花", 3000),
+            ("17", "256", "小花", 4000),
+            ("17 Pro", "256", "小花", 5000),
+            ("17 Pro", "512", "小花", 5500),
+        ])
+        rules = client.get("/api/rules").json()
+        rules["disabled_models"] = ["16|128", "17", "17 Pro|512"]
+        client.put("/api/rules", json=rules).raise_for_status()
+
+        client.put("/api/target-series/17", json={"enabled": True}).raise_for_status()
+        targets = {item["model"]: item for item in client.get("/api/targets").json()}
+        assert all(unit["enabled"] for model in ("17", "17 Pro") for unit in targets[model]["units"])
+        assert targets["16"]["units"][0]["enabled"] is False
+        assert client.get("/api/rules").json()["disabled_models"] == ["16|128"]
+
+        client.put("/api/target-series/17", json={"enabled": False}).raise_for_status()
+        targets = {item["model"]: item for item in client.get("/api/targets").json()}
+        assert all(not unit["enabled"] for model in ("17", "17 Pro") for unit in targets[model]["units"])
+
+        client.put("/api/target-series/17", json={"enabled": True}).raise_for_status()
+        client.put("/api/targets/17 Pro", json={"enabled": False, "storage": "512"}).raise_for_status()
+        targets = {item["model"]: item for item in client.get("/api/targets").json()}
+        assert [unit["enabled"] for unit in targets["17 Pro"]["units"]] == [True, False]
+        client.put("/api/targets/17 Pro", json={"enabled": True}).raise_for_status()
+        targets = {item["model"]: item for item in client.get("/api/targets").json()}
+        assert all(unit["enabled"] for unit in targets["17 Pro"]["units"])
+        client.put("/api/targets/17 Pro", json={"enabled": False}).raise_for_status()
+        targets = {item["model"]: item for item in client.get("/api/targets").json()}
+        assert all(not unit["enabled"] for unit in targets["17 Pro"]["units"])

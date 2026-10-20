@@ -219,6 +219,11 @@ function unitChip(target, unit) {
     title="${escapeHtml(detail)}\n点击${unit.enabled ? "停用" : "启用"}这个容量">${displayStorage(unit.storage)}${run && run.ok ? `<small>${run.observed}${run.matched ? `·${run.matched}` : ""}</small>` : ""}</button>`;
 }
 
+function selectionState(units) {
+  const selected = units.filter(unit => unit.enabled).length;
+  return { all: units.length > 0 && selected === units.length, partial: selected > 0 && selected < units.length, any: selected > 0 };
+}
+
 async function loadTargets() {
   const targets = await api("/api/targets");
   state.targets = targets;
@@ -226,15 +231,18 @@ async function loadTargets() {
   const rows = [];
   for (const target of targets) {
     if (target.series !== lastSeries) {
+      const seriesUnits = targets.filter(item => item.series === target.series).flatMap(item => item.units);
+      const seriesSelection = selectionState(seriesUnits);
       rows.push(`<tr class="series-row"><td colspan="5"><label class="switch small series-switch">
-        <input type="checkbox" class="series-toggle" data-series="${target.series}" ${target.series_enabled ? "checked" : ""} />
+        <input type="checkbox" class="series-toggle" data-series="${target.series}" data-partial="${seriesSelection.partial ? 1 : 0}" ${seriesSelection.all ? "checked" : ""} />
         <b>${target.series ? `iPhone ${target.series}` : "更早机型"} 全部机型</b></label></td></tr>`);
       lastSeries = target.series;
     }
+    const modelSelection = selectionState(target.units);
     const storages = `<div class="unit-chips">${target.units.map(unit => unitChip(target, unit)).join("")}</div>`;
-    const runnable = target.enabled && target.units.some(unit => unit.enabled);
-    rows.push(`<tr data-enabled="${target.enabled ? 1 : 0}" class="${target.enabled ? "" : "off"}">
-      <td><label class="switch small"><input type="checkbox" class="target-toggle" data-model="${escapeHtml(target.model)}" ${target.enabled ? "checked" : ""} ${target.series_enabled ? "" : "disabled"} /> <b>${escapeHtml(target.model)}</b></label></td>
+    const runnable = modelSelection.any;
+    rows.push(`<tr data-enabled="${modelSelection.any ? 1 : 0}" class="${modelSelection.any ? "" : "off"}">
+      <td><label class="switch small"><input type="checkbox" class="target-toggle" data-model="${escapeHtml(target.model)}" data-partial="${modelSelection.partial ? 1 : 0}" ${modelSelection.all ? "checked" : ""} ${target.series_enabled ? "" : "disabled"} /> <b>${escapeHtml(target.model)}</b></label></td>
       <td>${storages}</td>
       <td>${runSummary(target.last_run)}</td>
       <td class="num">${target.deals || ""}</td>
@@ -243,6 +251,9 @@ async function loadTargets() {
   }
   document.querySelector("#target-rows").innerHTML = rows.join("") ||
     `<tr><td colspan="5" class="empty">报价表里还没有机型，请先在「每日报价」同步。</td></tr>`;
+  document.querySelectorAll("#target-rows .series-toggle, #target-rows .target-toggle").forEach(input => {
+    input.indeterminate = input.dataset.partial === "1";
+  });
   updateRuleHints();
 }
 
@@ -587,22 +598,26 @@ rulesForm.addEventListener("submit", saveRules);
 document.querySelector("#target-rows").addEventListener("change", async event => {
   const seriesToggle = event.target.closest(".series-toggle");
   if (seriesToggle) {
+    const members = state.targets.filter(item => String(item.series) === seriesToggle.dataset.series);
+    const enabled = !selectionState(members.flatMap(item => item.units)).all;
     try {
       await api(`/api/target-series/${encodeURIComponent(seriesToggle.dataset.series)}`, {
-        method: "PUT", body: JSON.stringify({ enabled: seriesToggle.checked }),
+        method: "PUT", body: JSON.stringify({ enabled }),
       });
       state.rules = await api("/api/rules");
       await Promise.all([loadTargets(), loadOverview()]);
-    } catch (error) { toast(error.message, true); }
+    } catch (error) { toast(error.message, true); await loadTargets().catch(() => {}); }
     return;
   }
   const toggle = event.target.closest(".target-toggle");
   if (!toggle) return;
+  const target = state.targets.find(item => item.model === toggle.dataset.model);
+  const enabled = !selectionState(target.units).all;
   try {
-    await api(`/api/targets/${encodeURIComponent(toggle.dataset.model)}`, { method: "PUT", body: JSON.stringify({ enabled: toggle.checked }) });
+    await api(`/api/targets/${encodeURIComponent(toggle.dataset.model)}`, { method: "PUT", body: JSON.stringify({ enabled }) });
     state.rules = await api("/api/rules");
     await Promise.all([loadTargets(), loadOverview()]);
-  } catch (error) { toast(error.message, true); }
+  } catch (error) { toast(error.message, true); await loadTargets().catch(() => {}); }
 });
 
 document.querySelector("#target-rows").addEventListener("click", async event => {

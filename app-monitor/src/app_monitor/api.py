@@ -31,6 +31,7 @@ from .rules import (
     load_rules,
     save_rules,
     search_targets,
+    series_of,
 )
 from .service import MonitorService, unit_key
 
@@ -239,12 +240,14 @@ class TargetPayload(BaseModel):
 
 @app.put("/api/targets/{model}")
 async def update_target(model: str, payload: TargetPayload) -> dict[str, Any]:
-    """启停整个机型，或只启停该机型的某个容量。"""
+    """机型勾选启用全部容量；容量按钮只切换该容量。"""
     rules = load_rules(database)
     key = f"{model}|{payload.storage}" if payload.storage else model
     disabled = set(rules.disabled_models)
     if payload.enabled:
         disabled.discard(key)
+        if not payload.storage:
+            disabled = {value for value in disabled if not value.startswith(f"{model}|")}
     else:
         disabled.add(key)
     rules.disabled_models = sorted(disabled)
@@ -254,12 +257,16 @@ async def update_target(model: str, payload: TargetPayload) -> dict[str, Any]:
 
 @app.put("/api/target-series/{series}")
 async def update_target_series(series: int, payload: TargetPayload) -> dict[str, Any]:
-    """启停一个完整 iPhone 系列的所有机型。"""
+    """系列勾选启用全部机型与容量；取消勾选停用整个系列。"""
     rules = load_rules(database)
     key = f"@series:{series}"
     disabled = set(rules.disabled_models)
     if payload.enabled:
         disabled.discard(key)
+        disabled = {
+            value for value in disabled
+            if value.startswith("@series:") or series_of(value.split("|", 1)[0]) != series
+        }
     else:
         disabled.add(key)
     rules.disabled_models = sorted(disabled)
