@@ -78,7 +78,7 @@ WEBHOOK_BODY='{"title":"{{title}}","content":"{{content}}"}'
 ```
 
 后台右上角可以发送测试推送。未配置渠道时命中记录仍会保存，推送状态显示「未配置推送」。
-通知标题为机型和容量（如 `iPhone 17 128G`），正文第一行是商品标题，随后分行显示挂牌价、回收报价、价差、地区和商品链接；有图片时附带首张图片。Webhook 模板中的 `{{title}}` 和 `{{content}}` 对应这两部分，`{{item_title}}` 可单独引用原商品标题。
+通知标题为机型和容量（如 `iPhone 17 128G`），正文先显示可点击的商品标题，再分行显示挂牌价、回收报价、价差和地区，最后附上手机端与网页链接、首张商品图片。Webhook 的 `{{content}}` 使用 Markdown 段落和强制换行，适配当前与 `web-monitor` 一致的 Markdown 模板；`{{title}}` 对应品类标题，`{{item_title}}` 可单独引用原商品标题。
 
 报价检查时间由 `.env` 的 `APP_MONITOR_QUOTE_HOUR` / `APP_MONITOR_QUOTE_MINUTE` 控制（默认 09:00）；其他规则都在后台配置并保存在数据库中。
 

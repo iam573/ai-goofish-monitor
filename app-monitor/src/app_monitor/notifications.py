@@ -36,6 +36,9 @@ class NotificationService:
         notification_title, body = self._format_message(
             notification_item, reason, mobile_url, image_urls
         )
+        webhook_content = self._format_webhook_content(
+            notification_item, reason, mobile_url, image_urls
+        )
         async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
             results: dict[str, dict[str, Any]] = {}
             if self.settings.ntfy_topic_url:
@@ -63,7 +66,9 @@ class NotificationService:
                 )
             if self.settings.webhook_url:
                 try:
-                    response = await self._send_webhook(client, notification_item, reason, notification_title, body)
+                    response = await self._send_webhook(
+                        client, notification_item, reason, notification_title, webhook_content
+                    )
                     results["webhook"] = await self._call("webhook", response)
                 except Exception as exc:
                     results["webhook"] = {
@@ -81,8 +86,20 @@ class NotificationService:
         model = str(item.get("model") or "").strip()
         storage = str(item.get("storage") or "").strip()
         category = f"iPhone {model} {display_storage(storage)}" if model and storage else product_title
+        lines = [product_title, "", *NotificationService._detail_lines(item, reason)]
+        item_url = str(item.get("item_url") or "")
+        if mobile_url or item_url:
+            lines.extend(("", f"打开商品：{mobile_url or item_url}"))
+        if item_url and mobile_url and item_url != mobile_url:
+            lines.append(f"网页链接：{item_url}")
+        if image_urls:
+            lines.extend(("", f"![商品图片]({image_urls[0]})"))
+        return category, "\n".join(lines)
+
+    @staticmethod
+    def _detail_lines(item: dict[str, Any], reason: str) -> list[str]:
         price = float(item["price"])
-        lines = [product_title, "", f"挂牌价：¥{price:g}"]
+        lines = [f"挂牌价：¥{price:g}"]
         quote = item.get("quote_price")
         if quote is not None:
             quote_price = float(quote)
@@ -100,14 +117,31 @@ class NotificationService:
         region = str(item.get("display_region") or item.get("region") or "").strip()
         if region:
             lines.append(f"地区：{region}")
+        return lines
+
+    @staticmethod
+    def _format_webhook_content(
+        item: dict[str, Any], reason: str, mobile_url: str, image_urls: list[str]
+    ) -> str:
+        # 当前 Webhook 模板使用 Markdown；两个尾随空格让价格等字段真正换行。
+        product_title = re.sub(r"([\\`*_{}\[\]()#+.!|>~-])", r"\\\1", str(item["title"]).strip())
         item_url = str(item.get("item_url") or "")
-        if mobile_url or item_url:
-            lines.extend(("", f"打开商品：{mobile_url or item_url}"))
-        if item_url and mobile_url and item_url != mobile_url:
-            lines.append(f"网页链接：{item_url}")
+        main_url = mobile_url or item_url
+        title_line = f"[**{product_title}**]({main_url})" if main_url else f"**{product_title}**"
+        details = NotificationService._detail_lines(item, reason)
+        details[0] = f"**{details[0]}**"
+        blocks = [title_line, "  \n".join(details)]
+        links = []
+        if main_url:
+            label = "📱 手机端打开" if mobile_url and mobile_url != item_url else "打开商品"
+            links.append(f"[{label}]({main_url})")
+        if item_url and item_url != main_url:
+            links.append(f"[💻 网页打开]({item_url})")
+        if links:
+            blocks.append(" · ".join(links))
         if image_urls:
-            lines.extend(("", f"![商品图片]({image_urls[0]})"))
-        return category, "\n".join(lines)
+            blocks.append(f"![商品主图]({image_urls[0]})")
+        return "\n\n".join(blocks)
 
     async def _send_webhook(
         self,

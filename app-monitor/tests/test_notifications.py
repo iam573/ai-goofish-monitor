@@ -107,8 +107,24 @@ async def test_send_webhook_preserves_heading_and_line_breaks(monkeypatch):
     assert result["webhook"]["success"] is True
     assert captured["payload"]["title"] == "iPhone 17 128G"
     assert captured["payload"]["content"].startswith(
-        "国行 iPhone 17 128G 自用\n\n挂牌价：¥5100\n小花回收报价：¥4900"
+        "[**国行 iPhone 17 128G 自用**](https://pages.goofish.com/sharexy?"
     )
+    assert "**挂牌价：¥5100**  \n小花回收报价：¥4900  \n挂牌价高于回收报价：¥200" in captured["payload"]["content"]
+    assert "[📱 手机端打开](https://pages.goofish.com/sharexy?" in captured["payload"]["content"]
+    assert "[💻 网页打开](https://www.goofish.com/item?id=1090413599999)" in captured["payload"]["content"]
+
+
+def test_markdown_content_escapes_product_title_and_shows_image():
+    content = NotificationService._format_webhook_content(
+        {"title": "[全新] iPhone *17*", "price": 4500, "item_url": "https://www.goofish.com/item?id=1090413599999"},
+        "符合条件",
+        "",
+        ["https://example.test/image.jpg"],
+    )
+    assert content.startswith("[**\\[全新\\] iPhone \\*17\\***](https://www.goofish.com/item?id=1090413599999)")
+    assert "**挂牌价：¥4500**  \n原因：符合条件" in content
+    assert "[打开商品](https://www.goofish.com/item?id=1090413599999)" in content
+    assert content.endswith("![商品主图](https://example.test/image.jpg)")
 
 
 async def test_custom_webhook_uses_headers_and_body_template():
