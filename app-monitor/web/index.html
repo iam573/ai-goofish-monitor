@@ -1,0 +1,174 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>闲鱼捡漏监控</title>
+    <link rel="stylesheet" href="/assets/styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">
+        <p class="eyebrow">GOOFISH APP MONITOR</p>
+        <h1>闲鱼捡漏监控</h1>
+      </div>
+      <div class="header-actions">
+        <span id="health" class="status-dot">正在连接</span>
+        <button id="test-notification" class="ghost compact">测试推送</button>
+      </div>
+    </header>
+
+    <main>
+      <!-- 流程状态：报价 → 规则 → 搜索 → 命中 -->
+      <section id="pipeline" class="pipeline" aria-label="运行状态"></section>
+
+      <nav class="tabs" aria-label="功能导航">
+        <button class="tab active" data-panel="rules-panel">监控规则</button>
+        <button class="tab" data-panel="deals-panel">命中商品</button>
+        <button class="tab" data-panel="quotes-panel">每日报价</button>
+        <button class="tab" data-panel="runs-panel">运行记录</button>
+      </nav>
+
+      <!-- 命中商品 -->
+      <section id="deals-panel" class="panel">
+        <div class="card">
+          <div class="card-head">
+            <h2>命中商品</h2>
+            <button class="secondary compact" data-refresh="deals">刷新</button>
+          </div>
+          <div id="deal-list" class="deal-list"></div>
+        </div>
+      </section>
+
+      <!-- 监控规则 + 机型 -->
+      <section id="rules-panel" class="panel active">
+        <div class="rules-layout">
+          <form id="rules-form" class="card form-card">
+            <div class="card-head">
+              <h2>监控规则</h2>
+              <label class="switch"><input type="checkbox" name="enabled" /> <span>启用监控</span></label>
+            </div>
+
+            <fieldset>
+              <legend>地区</legend>
+              <div class="field-row">
+                <label>城市<input name="region_city" placeholder="例如 厦门；留空为全国" /></label>
+              </div>
+              <label>App 内区域点击路径
+                <input name="region_path" placeholder="留空自动生成，例如 区域 > 福建 > 厦门 > 查看" />
+              </label>
+              <p class="hint" id="region-hint"></p>
+            </fieldset>
+
+            <fieldset>
+              <legend>判价</legend>
+              <div class="field-row">
+                <label>参考报价<select name="quote_category"><option value="100025">苹果无保</option><option value="100027">苹果有保</option></select></label>
+                <label>参考成色<select name="quote_grade"><option>靓机</option><option>小花</option><option>大花</option><option>外爆</option><option>内爆可测</option></select></label>
+              </div>
+              <div class="field-row">
+                <label>最多高于回收报价（元）<input name="max_over_quote" type="number" min="0" step="10" /></label>
+              </div>
+              <p class="hint">推送上限 = 每日回收报价 + 允许高出的金额。例如报价 ¥4900、设置 ¥200，挂牌价不超过 ¥5100 的商品可进入推送候选。</p>
+              <div class="field-row">
+                <label>过低价比例<input name="min_price_ratio" type="number" min="0" max="0.99" step="0.05" /></label>
+                <span class="hint inline">低于报价的这个比例视为引流或非整机，不推送</span>
+              </div>
+              <label>排除词（逗号分隔）<textarea name="exclude_keywords" rows="3"></textarea></label>
+            </fieldset>
+
+            <fieldset>
+              <legend>搜索方式</legend>
+              <div class="field-row">
+                <label>每轮翻屏次数<input name="scroll_pages" type="number" min="0" max="10" step="1" /></label>
+                <span class="hint inline">每个容量筛选后向下翻几屏，把新发第一页的商品读完</span>
+              </div>
+              <p class="hint" id="storage-hint"></p>
+            </fieldset>
+
+            <fieldset>
+              <legend>搜索节奏</legend>
+              <div class="field-row three">
+                <label>开始<input name="search_start" inputmode="numeric" pattern="[0-2][0-9]:[0-5][0-9]" placeholder="09:00" /></label>
+                <label>结束<input name="search_end" inputmode="numeric" pattern="[0-2][0-9]:[0-5][0-9]" placeholder="23:00" /></label>
+                <label>同一单元间隔（分钟）<input name="model_interval_minutes" type="number" min="5" step="5" /></label>
+              </div>
+              <p class="hint" id="cadence-hint"></p>
+            </fieldset>
+
+            <button type="submit">保存规则</button>
+          </form>
+
+          <div class="card">
+            <div class="card-head">
+              <div>
+                <h2>搜索机型</h2>
+                <p class="hint">由最新报价表自动生成。容量标签显示上次看到的商品数·命中数，点击可单独停用。</p>
+              </div>
+              <button class="secondary compact" data-refresh="targets">刷新</button>
+            </div>
+            <div class="table-wrap"><table class="target-table">
+              <thead><tr><th>机型</th><th>容量</th><th>最近搜索</th><th class="num">累计命中</th><th></th></tr></thead>
+              <tbody id="target-rows"></tbody>
+            </table></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- 每日报价 -->
+      <section id="quotes-panel" class="panel">
+        <div class="card quote-card">
+          <div class="card-head">
+            <div><h2>每日报价</h2><div id="quote-batches" class="batch-line"></div></div>
+            <button id="sync-quote" class="compact">立即同步</button>
+          </div>
+          <details id="quote-history" class="quote-history" hidden>
+            <summary>历史报价原图</summary>
+            <div id="quote-history-list" class="quote-history-list"></div>
+          </details>
+          <div class="quote-controls">
+            <div id="series-chips" class="chips"></div>
+            <div id="quote-mode" class="segmented" role="group" aria-label="显示内容">
+              <button type="button" data-mode="nw" class="active">无保</button><button type="button" data-mode="w">有保</button><button type="button" data-mode="premium">加价</button>
+            </div>
+            <input id="quote-model-filter" placeholder="搜索机型/容量" />
+            <label class="check"><input id="quote-only-anomaly" type="checkbox" /> 只看异常 <span id="anomaly-count" class="anomaly-count"></span></label>
+          </div>
+          <div class="table-wrap"><table class="quote-table">
+            <thead><tr><th>机型</th><th>容量</th><th>靓机</th><th>小花</th><th>大花</th><th>外爆</th><th>内爆可测</th></tr></thead>
+            <tbody id="quote-body"></tbody>
+          </table></div>
+          <p class="hint">点击价格可校正；红底表示需复核（有保加价为负，或成色价格倒挂）。</p>
+        </div>
+        <dialog id="quote-editor">
+          <form id="quote-editor-form" method="dialog">
+            <h3 id="editor-title"></h3>
+            <label>无保报价（元）<input id="editor-nw" type="number" min="1" /><span id="editor-nw-src" class="hint"></span></label>
+            <label>有保报价（元）<input id="editor-w" type="number" min="1" /><span id="editor-w-src" class="hint"></span></label>
+            <div class="dialog-actions"><button type="button" id="editor-cancel" class="secondary">取消</button><button type="submit">保存</button></div>
+          </form>
+        </dialog>
+      </section>
+
+      <!-- 运行记录 -->
+      <section id="runs-panel" class="panel">
+        <div class="runs-layout">
+          <aside class="card run-list-card">
+            <div class="card-head">
+              <h2>搜索记录</h2>
+              <button class="secondary compact" data-refresh="runs">刷新</button>
+            </div>
+            <div id="run-filter" class="segmented run-filter" role="group" aria-label="筛选搜索记录">
+              <button type="button" data-status="" class="active">全部</button><button type="button" data-status="hit">有命中</button><button type="button" data-status="warn">有警告</button><button type="button" data-status="failed">失败</button>
+            </div>
+            <div id="run-list" class="run-list"></div>
+          </aside>
+          <section id="run-detail" class="card run-detail" aria-live="polite"></section>
+        </div>
+      </section>
+    </main>
+
+    <div id="toast" role="status"></div>
+    <script type="module" src="/assets/app.js"></script>
+  </body>
+</html>

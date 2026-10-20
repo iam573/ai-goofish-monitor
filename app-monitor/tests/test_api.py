@@ -1,0 +1,101 @@
+from fastapi.testclient import TestClient
+
+from app_monitor import api
+from conftest import add_quotes
+
+
+async def _noop():
+    return None
+
+
+def test_api_flow_rules_targets_and_injected_items(tmp_path, monkeypatch):
+    sent = []
+
+    async def fake_send(item, reason):
+        sent.append((item["item_id"], reason))
+        return {"test": {"success": True}}
+
+    monkeypatch.setattr(api.database, "path", tmp_path / "api.sqlite3")
+    monkeypatch.setattr(api, "refresh_quotes_if_stale", _noop)
+    # API 测试会命中虚构商品；绝不能使用本机 .env 中的真实推送渠道。
+    monkeypatch.setattr(api.notification_service, "send", fake_send)
+    with TestClient(api.app) as client:
+        batch_id = add_quotes(api.database, [
+            ("XR", "64", "小花", 500), ("15 Pro", "256", "小花", 4000),
+            ("15 Pro", "256", "靓机", 4300), ("17 Pro", "256", "小花", 5000),
+        ])
+
+        rules = client.get("/api/rules").json()
+        assert rules["quote_grade"] == "小花"
+        assert rules["max_over_quote"] == 200
+        rules.update(region_city="厦门", search_start="00:00", search_end="00:00", max_over_quote=250)
+        saved = client.put("/api/rules", json=rules).json()
+        assert saved["region_steps"] == ["区域", "福建", "厦门", "查看"]
+        assert saved["max_over_quote"] == 250
+        assert client.put("/api/rules", json={**rules, "max_over_quote": -1}).status_code == 422
+        assert client.put("/api/rules", json={**rules, "quote_grade": "九九新"}).status_code == 422
+
+        targets = client.get("/api/targets").json()
+        assert {t["model"] for t in targets} == {"XR", "15 Pro", "17 Pro"}
+        target = next(t for t in targets if t["model"] == "15 Pro")
+        assert target["units"][0]["storage"] == "256"
+        client.put("/api/targets/15 Pro", json={"enabled": False, "storage": "256"})
+        target = next(t for t in client.get("/api/targets").json() if t["model"] == "15 Pro")
+        assert target["enabled"] is True and target["units"][0]["enabled"] is False
+        assert client.put("/api/targets/15 Pro", json={"enabled": False}).json()["enabled"] is False
+        assert next(t for t in client.get("/api/targets").json() if t["model"] == "15 Pro")["enabled"] is False
+        assert client.post("/api/targets/15 Pro/run?storage=999").status_code == 404
+        assert client.put("/api/target-series/17", json={"enabled": False}).status_code == 200
+        assert all(not t["enabled"] for t in client.get("/api/targets").json() if t["series"] == 17)
+        client.put("/api/target-series/17", json={"enabled": True})
+
+        result = client.post(
+            "/api/targets/15 Pro/observations?storage=256",
+            json=[{"item_id": "1", "title": "iPhone 15 Pro 256G", "price": 3500, "display_region": "厦门思明"}],
+        ).json()
+        assert result["matched"] == 1
+        assert len(sent) == 1 and sent[0][0] == "1"
+        deals = client.get("/api/deals").json()
+        assert deals[0]["model"] == "15 Pro" and deals[0]["region"] == "厦门思明"
+        run = client.get("/api/runs").json()[0]
+        assert run["trigger"] == "inject" and run["passes"][0]["label"] == "调试"
+        assert run["item_count"] == 1 and run["hit_count"] == 1 and run["new_count"] == 1
+        detail = client.get(f"/api/runs/{run['id']}").json()
+        assert detail["items"][0]["matched"] == 1 and detail["items"][0]["code"] == "matched"
+        assert detail["codes"] == {"matched": 1}
+        assert client.get("/api/runs?status=hit").json()[0]["id"] == run["id"]
+        assert client.get("/api/runs?status=failed").json() == []
+        assert client.get("/api/runs/99999").status_code == 404
+        target = next(t for t in client.get("/api/targets").json() if t["model"] == "15 Pro")
+        assert target["last_run"]["observed"] == 1
+
+        page = client.get("/")
+        assert "/assets/app.js?v=" in page.text and page.headers["cache-control"] == "no-cache"
+        assert client.get("/assets/app.js").headers["cache-control"] == "no-cache"
+
+        overview = client.get("/api/overview").json()
+        assert overview["deals_today"] == 1
+        assert overview["quotes"][0]["entry_count"] == 4
+        assert len(client.get("/api/apple-products").json()) == 3
+
+        image_path = tmp_path / "daily-quotes" / "100025" / "quote.png"
+        image_path.parent.mkdir(parents=True)
+        image_path.write_bytes(b"\x89PNG\r\n\x1a\noriginal quote")
+        with api.database.connect() as connection:
+            connection.execute(
+                "UPDATE quote_batches SET image_path=? WHERE id=?", (str(image_path), batch_id)
+            )
+        status = client.get("/api/quotes/status").json()[0]
+        assert status["batch_id"] == batch_id and status["image_available"] is True
+        assert client.get("/api/quotes/batches").json()[0]["image_available"] is True
+        original = client.get(f"/api/quotes/batches/{batch_id}/image")
+        assert original.status_code == 200 and original.content == image_path.read_bytes()
+        assert original.headers["content-type"] == "image/png"
+        assert client.get("/api/quotes/batches/999/image").status_code == 404
+        with api.database.connect() as connection:
+            connection.execute(
+                "UPDATE quote_batches SET image_path=? WHERE id=?",
+                (str(tmp_path / "outside.png"), batch_id),
+            )
+        assert client.get(f"/api/quotes/batches/{batch_id}/image").status_code == 404
+        assert client.get("/api/quotes/batches").json()[0]["image_available"] is False

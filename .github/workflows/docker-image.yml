@@ -67,8 +67,8 @@ jobs:
       - name: Build and push base Docker image
         uses: docker/build-push-action@v5
         with:
-          context: .
-          file: ./Dockerfile.base
+          context: ./web-monitor
+          file: ./web-monitor/Dockerfile.base
           platforms: linux/amd64,linux/arm64
           pull: true
           push: true
@@ -127,8 +127,8 @@ jobs:
       - name: Build and push multi-arch Docker images
         uses: docker/build-push-action@v5
         with:
-          context: .
-          file: ./Dockerfile.release
+          context: ./web-monitor
+          file: ./web-monitor/Dockerfile.release
           platforms: linux/amd64,linux/arm64
           pull: true
           push: true

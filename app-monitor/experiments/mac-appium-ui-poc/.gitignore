@@ -1,0 +1,8 @@
+.appium/
+.env.local
+.venv/
+__pycache__/
+artifacts/
+appium.log
+node_modules/
+state/
