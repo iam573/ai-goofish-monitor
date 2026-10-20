@@ -112,6 +112,7 @@ def discover_xianyu_apps(udid: str) -> list[InstalledApp]:
             "apps",
             "--device",
             udid,
+            "--include-default-apps",
             "--json-output",
             "-",
         ]

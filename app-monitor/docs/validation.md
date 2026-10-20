@@ -181,3 +181,15 @@ user_id=0
 修正默认路径为 `筛选 > 存储容量 > {容量} > 确定`。A11y 容量选择现在必须定位到「存储容量」标题与确认按钮之间的选项；未找到该筛选上下文时拒绝点击页面其它同名容量文字。对当前 App 的实测中，`256G > 确定` 两步均由 AXPress 完成，筛选后排序栏仍存在；随后「新发」「降价」均成功点击，页面仍保持搜索结果状态。
 
 采集、筛选失败/恢复、排序结果与商品摘要已加入 INFO/WARNING 控制台日志。需要重启 `app-monitor` 才会加载新代码；本次没有替用户重启服务。
+
+## 14. iPhone 真机多设备方案预验证
+
+2026-10-20 在一台已配对、开启开发者模式的 iPhone 15 Pro Max（iOS 27.2 Beta）上尝试 Appium/XCUITest：
+
+- `devicectl device info apps` 默认只列开发者 App，旧实验因此误报未安装闲鱼；加 `--include-default-apps` 后确认 App Store 版闲鱼的 bundle ID 为 `com.taobao.fleamarket`。
+- 本机 Appium 3.8.0 / XCUITest 驱动 12.13.3 可启动；旧实验搬目录后，忽略文件中的驱动安装路径仍指向旧目录，修正该本地路径后才能加载驱动。
+- 按本机开发团队重新构建 WebDriverAgent Runner 成功，并通过 `devicectl` 安装到手机。原有旧构建的 provisioning profile 不适用于这台设备。
+- 启动测试会话仍被 iOS 拒绝；Xcode 结果包明确提示新安装的开发者证书尚未在手机上信任。等待用户在「设置 → 通用 → VPN 与设备管理」完成信任后复测。
+- iOS 18+ 的 RemoteXPC 通道当前未建立；Appium 的 `usePreinstalledWDA` 模式因此也无法启动。建立通道需要在 Mac 上以管理员权限运行驱动的 `tunnel-creation` 脚本。
+
+本轮还没有读取到闲鱼页面树，因此不能声称真机方案已取得商品标题、价格、ID、链接或图片。下一步先完成 WDA 会话，再验证搜索列表的数据字段。

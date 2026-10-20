@@ -1,6 +1,7 @@
 import unittest
+from unittest.mock import patch
 
-from monitor import extract_items_from_source
+from monitor import discover_xianyu_apps, extract_items_from_source
 
 
 SAMPLE_SOURCE = """
@@ -19,6 +20,13 @@ SAMPLE_SOURCE = """
 
 
 class ExtractItemsTest(unittest.TestCase):
+    def test_discovers_app_store_installed_app(self):
+        payload = {"result": {"apps": [{"bundleIdentifier": "com.taobao.fleamarket", "name": "闲鱼"}]}}
+        with patch("monitor._run_json", return_value=payload) as run_json:
+            apps = discover_xianyu_apps("device-id")
+        self.assertEqual("com.taobao.fleamarket", apps[0].bundle_id)
+        self.assertIn("--include-default-apps", run_json.call_args.args[0])
+
     def test_extracts_and_deduplicates_cards(self):
         items = extract_items_from_source(SAMPLE_SOURCE)
         self.assertEqual(2, len(items))
