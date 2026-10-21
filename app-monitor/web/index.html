@@ -42,6 +42,14 @@
 
       <!-- 监控规则 + 机型 -->
       <section id="rules-panel" class="panel active">
+        <div class="card device-card">
+          <div class="card-head">
+            <div><h2>采集设备</h2><p class="hint">可同时勾选 Mac 和多台 iPhone；每款机型会按勾选顺序逐台采集，商品按 ID 去重。</p></div>
+            <button class="secondary compact" id="refresh-devices" type="button">刷新设备</button>
+          </div>
+          <div id="device-options" class="device-options"></div>
+          <p class="hint">iPhone 优先从匹配城市的首页第 2 个 Tab 搜索；搜索栏和结果区域均确认城市后跳过区域筛选。随后逐个选择容量并点击「确定」，只读取「新发」列表；符合条件的候选才进入详情复制链接。</p>
+        </div>
         <div class="rules-layout">
           <form id="rules-form" class="card form-card">
             <div class="card-head">

@@ -1,6 +1,10 @@
 from datetime import datetime, timedelta
+import json
+
+import pytest
 
 from app_monitor.collector import CollectResult
+from app_monitor.devices import Device
 from app_monitor.rules import Rules, save_rules
 from app_monitor.service import MonitorService
 from conftest import add_quotes
@@ -114,6 +118,69 @@ async def test_one_search_changes_filter_for_each_enabled_capacity(database):
         ("512", ["筛选", "存储容量", "512G", "确定"]),
     ]
     assert [entry["storage"] for entry in result["passes"]] == ["256", "512"]
+
+
+async def test_iphone_prefilters_before_processing_shared_id(database, monkeypatch):
+    import app_monitor.service as service_module
+
+    service, notifier = setup(database, FakeCollector(), region_city="厦门")
+    database.state_set("collector_devices", ["ios:phone-1"])
+    monkeypatch.setattr(service_module, "discover_devices", lambda: [
+        Device("mac", "Mac", "mac", True),
+        Device("ios:phone-1", "测试 iPhone", "ios", True, "phone-1", "27.2"),
+    ])
+
+    class FakePhone:
+        async def collect(self, udid, version, keyword, city, region_steps, storages, pages, is_candidate):
+            assert (udid, version, keyword, city, storages) == (
+                "phone-1", "27.2", "iPhone 15 Pro", "厦门", ["256"]
+            )
+            assert region_steps == ["区域", "福建", "厦门", "查看"]
+            assert is_candidate({"title": "iPhone 15 Pro 256G 国行", "price": 4100, "display_region": "思明区"}, True, "256")
+            assert is_candidate({"title": "iPhone 15 Pro 国行 自用", "price": 4100, "display_region": ""}, True, "256")
+            assert not is_candidate({"title": "iPhone 15 Pro 512G 国行", "price": 4200, "display_region": "思明区"}, True, "256")
+            assert not is_candidate({"title": "iPhone 15 Pro 256G 国行", "price": 5000, "display_region": "思明区"}, True, "256")
+            item = {"item_id": "1091531543430", "title": "iPhone 15 Pro 256G 国行",
+                    "price": 4100, "display_region": "思明区", "source_storage": "256"}
+            return CollectResult(items=[item], region_applied=True, filter_applied=True,
+                                 passes=[{"label": "新发", "storage": "256", "filter_applied": True,
+                                          "observed": 1, "cards": 7, "candidates": 1, "error": None}])
+
+    service.iphone_collector = FakePhone()
+    result = await service.run_model("15 Pro", "256")
+    assert result["matched"] == 1 and notifier.sent[0][0] == "1091531543430"
+    assert result["passes"][0]["device_name"] == "测试 iPhone"
+    assert result["passes"][0]["cards"] == 7
+
+
+async def test_iphone_filter_failure_keeps_actions_in_failed_run(database, monkeypatch):
+    import app_monitor.service as service_module
+
+    service, _ = setup(database, FakeCollector(), region_city="厦门")
+    database.state_set("collector_devices", ["ios:phone-1"])
+    monkeypatch.setattr(service_module, "discover_devices", lambda: [
+        Device("ios:phone-1", "测试 iPhone", "ios", True, "phone-1", "27.2"),
+    ])
+
+    class FailedPhone:
+        async def collect(self, *args):
+            return CollectResult(items=[], region_error="地区未确认", passes=[{
+                "label": "新发", "storage": None, "observed": 0,
+                "error": "地区未确认", "actions": [
+                    {"action": "搜索", "target": "iPhone 15 Pro", "success": True},
+                    {"action": "地区筛选", "target": "厦门", "success": False, "error": "地区未确认"},
+                ],
+            }])
+
+    service.iphone_collector = FailedPhone()
+    with pytest.raises(RuntimeError, match="地区未确认"):
+        await service.run_model("15 Pro", "256")
+    with database.connect() as connection:
+        run = connection.execute("SELECT ok, passes FROM search_runs ORDER BY id DESC").fetchone()
+    assert run["ok"] == 0
+    saved = json.loads(run["passes"])
+    assert saved[0]["device_name"] == "测试 iPhone"
+    assert saved[0]["actions"][1]["action"] == "地区筛选"
 
 
 async def test_title_without_storage_is_rejected_when_filter_failed(database):

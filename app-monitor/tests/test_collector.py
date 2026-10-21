@@ -13,7 +13,17 @@ from app_monitor.collector import (
     visible_cards_from_nodes,
     _sort_bar_labels,
     VisibleCard,
+    CollectResult,
 )
+
+
+def test_device_error_aggregation_does_not_repeat_same_pass_warning():
+    result = CollectResult(items=[], region_error="测试 iPhone：新发：返回失败", passes=[
+        {"label": "新发", "error": "返回失败"},
+    ])
+    assert result.warnings == ["测试 iPhone：新发：返回失败"]
+    result.region_error = "返回失败"
+    assert result.warnings == ["新发：返回失败"]
 
 
 def test_exposure_prefers_item_id_and_preserves_explicit_image_urls():

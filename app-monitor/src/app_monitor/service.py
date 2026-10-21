@@ -10,6 +10,8 @@ from typing import Any
 
 from .collector import CollectResult, GoofishCollector
 from .db import Database, utc_now
+from .devices import MAC_DEVICE, discover_devices, selected_devices
+from .iphone_collector import IPhoneCollector
 from .matching import MatchDecision, evaluate
 from .notifications import NotificationService, notification_result_text
 from .rules import (
@@ -23,6 +25,12 @@ from .rules import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+class CollectionFailure(RuntimeError):
+    def __init__(self, message: str, partial: CollectResult):
+        super().__init__(message)
+        self.partial = partial
 
 def unit_key(model: str, storage: str | None) -> str:
     return f"{model}|{storage or ''}"
@@ -48,6 +56,7 @@ class MonitorService:
     ):
         self.database = database
         self.collector = collector
+        self.iphone_collector = IPhoneCollector(collector.settings) if hasattr(collector, "settings") else None
         self.notifications = notifications
         self._lock = asyncio.Lock()
 
@@ -179,13 +188,7 @@ class MonitorService:
                     ]
                     if not storages:
                         raise ValueError(f"{model} 没有启用的容量筛选项")
-                    collected = await self.collector.collect(
-                        keyword,
-                        region_steps=rules.region_steps,
-                        region_hint=rules.region_city,
-                        storage_filters=[(value, rules.storage_steps(value)) for value in storages],
-                        scroll_pages=rules.scroll_pages,
-                    )
+                    collected = await self._collect_sources(keyword, model, storages, rules)
                 else:
                     collected = CollectResult(
                         items=injected_items,
@@ -202,14 +205,16 @@ class MonitorService:
                 else:
                     for pass_result in collected.passes:
                         pass_storage = pass_result.get("storage")
+                        pass_device = pass_result.get("device", MAC_DEVICE)
                         pass_items = [item for item in collected.items
-                                      if item.get("source_storage") == pass_storage]
+                                      if item.get("source_storage") == pass_storage
+                                      and item.get("source_device", MAC_DEVICE) == pass_device]
                         pass_result["matched"] = 0
                         pass_result["notified"] = 0
                         if pass_result.get("error") or not pass_items:
                             continue
                         part = await self.process_items(
-                            pass_items, rules, keyword, collected.region_applied,
+                            pass_items, rules, keyword, pass_result.get("region_applied", collected.region_applied),
                             pass_storage if pass_result.get("filter_applied") else None,
                             run_id=run_id, expected_model=model,
                         )
@@ -244,9 +249,66 @@ class MonitorService:
                 )
                 return {"run_id": run_id, "model": model, "storage": storage, **result}
             except Exception as exc:
-                self._finish_run(run_id, False, {}, str(exc))
+                partial = exc.partial if isinstance(exc, CollectionFailure) else None
+                self._finish_run(run_id, False, {
+                    "passes": partial.passes if partial else [],
+                    "region_applied": partial.region_applied if partial else False,
+                    "filter_applied": partial.filter_applied if partial else False,
+                }, str(exc))
                 logger.exception("监控任务失败 run_id=%s model=%s storage=%s error=%s", run_id, model, storage, exc)
                 raise
+
+    async def _collect_sources(self, keyword: str, model: str, storages: list[str], rules: Rules) -> CollectResult:
+        """Run selected devices in order. A failed device does not discard others."""
+        selected = selected_devices(self.database)
+        available = {device.id: device for device in await asyncio.to_thread(discover_devices)}
+        combined = CollectResult(items=[])
+        failures = []
+        successes = 0
+        quotes = eligible_quotes(self.database, rules)
+
+        def is_candidate(item: dict[str, Any], region_applied: bool, storage_hint: str) -> bool:
+            decision = evaluate(item, rules, quotes, region_applied, storage_hint, model)
+            return decision.matched and decision.storage == storage_hint and storage_hint in storages
+
+        for device_id in selected:
+            device = available.get(device_id)
+            label = device.name if device else device_id
+            try:
+                if device_id == MAC_DEVICE:
+                    part = await self.collector.collect(
+                        keyword, region_steps=rules.region_steps,
+                        region_hint=rules.region_city,
+                        storage_filters=[(value, rules.storage_steps(value)) for value in storages],
+                        scroll_pages=rules.scroll_pages,
+                    )
+                else:
+                    if device is None or not device.connected:
+                        raise RuntimeError("iPhone 未连接；已保留勾选，重连后可继续使用")
+                    if self.iphone_collector is None:
+                        raise RuntimeError("iPhone 采集器未配置")
+                    part = await self.iphone_collector.collect(
+                        device.udid, device.os_version, keyword, rules.region_city,
+                        rules.region_steps, storages, rules.scroll_pages, is_candidate,
+                    )
+                if device_id == MAC_DEVICE or any(not entry.get("error") for entry in part.passes):
+                    successes += 1
+                combined.items.extend({**item, "source_device": device_id} for item in part.items)
+                for entry in part.passes:
+                    combined.passes.append({**entry, "device": device_id, "device_name": label,
+                                            "region_applied": entry.get("region_applied", part.region_applied)})
+                failures.extend(f"{label}：{warning}" for warning in dict.fromkeys(part.warnings))
+                combined.region_applied = combined.region_applied or part.region_applied
+                combined.filter_applied = combined.filter_applied or part.filter_applied
+            except Exception as exc:
+                logger.exception("采集设备失败 device=%s model=%s", label, model)
+                failures.append(f"{label}：{exc}")
+                combined.passes.append({"label": "新发", "device": device_id, "device_name": label,
+                                        "storage": None, "observed": 0, "error": str(exc), "actions": []})
+        combined.region_error = "；".join(failures) or None
+        if not successes:
+            raise CollectionFailure(combined.region_error or "没有可用的采集设备", combined)
+        return combined
 
     def _finish_run(self, run_id: int, ok: bool, result: dict[str, Any], error: str | None) -> None:
         with self.database.connect() as connection:

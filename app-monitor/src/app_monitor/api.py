@@ -17,6 +17,7 @@ from pydantic import BaseModel, Field
 from .collector import GoofishCollector
 from .config import ROOT, settings
 from .db import Database, rows_as_dicts, utc_now
+from .devices import discover_devices, selected_devices, set_selected_devices
 from .notifications import NotificationService
 from .quotes import (
     APPLE_PHONE_CATEGORIES,
@@ -88,6 +89,26 @@ async def lifespan(_: FastAPI):
 app = FastAPI(title="闲鱼报价捡漏监控", version="0.3.4", lifespan=lifespan)
 web_dir = ROOT / "web"
 app.mount("/assets", StaticFiles(directory=web_dir), name="assets")
+
+
+class DeviceSelectionPayload(BaseModel):
+    ids: list[str]
+
+
+@app.get("/api/devices")
+async def devices() -> dict[str, Any]:
+    selected = selected_devices(database)
+    found = await asyncio.to_thread(discover_devices)
+    return {"devices": [device.as_dict(device.id in selected) for device in found], "selected": selected}
+
+
+@app.put("/api/devices/selection")
+async def select_devices(payload: DeviceSelectionPayload) -> dict[str, Any]:
+    try:
+        selected = await asyncio.to_thread(set_selected_devices, database, payload.ids)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return {"selected": selected}
 
 
 @app.middleware("http")

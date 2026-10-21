@@ -1,0 +1,6 @@
+{
+  "private": true,
+  "devDependencies": {
+    "appium": "3.8.0"
+  }
+}

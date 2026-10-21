@@ -6,3 +6,5 @@ __pycache__/
 *.bak
 data/
 .runtime/
+node_modules/
+.appium/

@@ -566,9 +566,15 @@ class CollectResult:
 
     @property
     def warnings(self) -> list[str]:
-        values = [self.region_error, self.filter_error]
-        values += [f"{p['label']}：{p['error']}" for p in self.passes if p.get("error")]
-        return [value for value in values if value]
+        pass_errors = {entry.get("error") for entry in self.passes if entry.get("error")}
+        values = [value for value in (self.region_error, self.filter_error) if value not in pass_errors]
+        for entry in self.passes:
+            if not entry.get("error"):
+                continue
+            warning = f"{entry['label']}：{entry['error']}"
+            if not any(warning in value for value in values if value):
+                values.append(warning)
+        return list(dict.fromkeys(value for value in values if value))
 
 
 class GoofishCollector:

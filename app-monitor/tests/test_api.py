@@ -1,11 +1,29 @@
 from fastapi.testclient import TestClient
 
 from app_monitor import api
+from app_monitor.devices import Device
 from conftest import add_quotes
 
 
 async def _noop():
     return None
+
+
+def test_device_selection_is_saved_and_mac_stays_available(tmp_path, monkeypatch):
+    import app_monitor.devices as devices_module
+
+    found = [Device("mac", "本机 Mac 闲鱼", "mac", True),
+             Device("ios:phone-1", "测试 iPhone", "ios", True, "phone-1", "27.2")]
+    monkeypatch.setattr(api.database, "path", tmp_path / "devices.sqlite3")
+    monkeypatch.setattr(api, "refresh_quotes_if_stale", _noop)
+    monkeypatch.setattr(api, "discover_devices", lambda: found)
+    monkeypatch.setattr(devices_module, "discover_devices", lambda: found)
+    with TestClient(api.app) as client:
+        assert client.get("/api/devices").json()["selected"] == ["mac"]
+        assert client.put("/api/devices/selection", json={"ids": ["mac", "ios:phone-1"]}).status_code == 200
+        assert set(client.get("/api/devices").json()["selected"]) == {"mac", "ios:phone-1"}
+        assert client.put("/api/devices/selection", json={"ids": []}).status_code == 400
+        assert client.put("/api/devices/selection", json={"ids": ["ios:unknown"]}).status_code == 400
 
 
 def test_api_flow_rules_targets_and_injected_items(tmp_path, monkeypatch):

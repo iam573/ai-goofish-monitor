@@ -1,4 +1,4 @@
-const state = { products: [], rules: null, overview: null, targets: [] };
+const state = { products: [], rules: null, overview: null, targets: [], devices: [] };
 const gradeOrder = ["靓机", "小花", "大花", "外爆", "内爆可测"];
 
 async function api(path, options = {}) {
@@ -138,6 +138,19 @@ async function loadDeals() {
 
 /* ------------------------------------------------------------------ 规则 */
 
+async function loadDevices() {
+  const data = await api("/api/devices");
+  state.devices = data.devices;
+  document.querySelector("#device-options").innerHTML = data.devices.map(device =>
+    `<label class="device-option ${device.connected ? "" : "unavailable"}">
+      <input type="checkbox" value="${escapeHtml(device.id)}" ${device.selected ? "checked" : ""} />
+      <span>${escapeHtml(device.name)}</span>
+      <small>${device.kind === "mac" ? "Mac" : `${escapeHtml(device.os_version || "iOS")} · ${device.connected ? "已连接" : "未连接"}`}</small>
+    </label>`
+  ).join("");
+  if (state.rules) updateRuleHints();
+}
+
 const ruleFields = ["region_city", "region_path", "quote_category", "quote_grade", "max_over_quote",
   "min_price_ratio", "exclude_keywords", "scroll_pages",
   "search_start", "search_end", "model_interval_minutes"];
@@ -159,13 +172,17 @@ async function updateRuleHints() {
   let path = custom;
   if (city && !custom) path = (await api(`/api/rules/region-path?city=${encodeURIComponent(city)}`)).path;
   form.elements.region_path.placeholder = path || "留空自动生成，例如 区域 > 福建 > 厦门 > 查看";
+  const selected = [...document.querySelectorAll("#device-options input:checked")].map(input => input.value);
+  const usesMac = selected.includes("mac");
+  const usesPhone = selected.some(id => id.startsWith("ios:"));
   document.querySelector("#region-hint").innerHTML = city
-    ? `每次搜索会在 App 内依次点击 <b>${escapeHtml(path)}</b>（? 开头的步骤可选）；同时核对商品卡片上的地区，不是${escapeHtml(city)}的不推送。`
+    ? `${usesMac ? `Mac 端依次点击 <b>${escapeHtml(path)}</b>（? 开头的步骤可选）；` : ""}` +
+      `${usesPhone ? "iPhone 优先从匹配的首页第2个地区 Tab 搜索，核对搜索栏和结果区域后一致则跳过地区筛选，否则在结果页选择城市；" : ""}明确不是${escapeHtml(city)}的商品不推送。`
     : "未设置城市：搜索全国，不核对地区。";
   // 搜索方式与节奏的估算：每次搜索 = 打开搜索 + 区域筛选 + 容量筛选 + 新发读一轮
   const scrolls = Math.max(0, Number(form.elements.scroll_pages.value) || 0);
   document.querySelector("#storage-hint").innerHTML =
-    `每款机型只搜索一次，程序会自动切换各个容量，并仅查看「新发」商品` +
+    `每款机型只搜索一次，${usesMac ? "Mac 端自动切换各个容量；" : ""}${usesPhone ? "iPhone 端依次勾选容量并点击确定；" : ""}仅查看「新发」商品` +
     (scrolls ? `并向下翻 ${scrolls} 屏读完第一页。` : `并读取当前一屏。`);
   const units = state.targets.filter(target => target.enabled && target.units.some(unit => unit.enabled)).length;
   const capacityCount = state.targets.reduce((sum, target) =>
@@ -265,19 +282,24 @@ function passDetail(run) {
   for (const p of run.passes || []) {
     lines.push(p.error
       ? `${passName(p)}：${p.error}`
-      : `${passName(p)}：关联 ${p.observed} 件` + (p.cards != null ? `（页面卡片 ${p.cards}，曝光记录 ${p.exposures}）` : ""));
+      : `${passName(p)}：关联 ${p.observed} 件` + (p.cards != null
+        ? `（页面卡片 ${p.cards}${p.candidates != null ? `，候选 ${p.candidates}` : `，曝光记录 ${p.exposures}`}）` : ""));
     for (const action of p.actions || []) {
       const target = action.target || action.steps?.join(" → ") || "";
       lines.push(`操作${action.success ? "" : "失败"}：${action.action}${target ? `「${target}」` : ""}` +
         (action.method ? `（${action.method}）` : "") +
         (action.text_method ? `；输入：${action.text_method}` : "") + (action.error ? `：${action.error}` : ""));
-      if (action.clicked?.length && action.steps?.length) lines.push(`实际点击：${action.clicked.join(" → ")}`);
+      if (action.clicked?.length) lines.push(`实际点击：${action.clicked.join(" → ")}`);
       for (const method of action.methods || []) lines.push(`  ${method.target}：${method.method}`);
       if (action.skipped?.length) lines.push(`跳过可选项：${action.skipped.join("、")}`);
     }
     for (const item of p.items || []) {
       lines.push(`商品：¥${item.price} ${item.title}${item.display_region ? ` · ${item.display_region}` : ""} · ID ${item.item_id}`);
     }
+    for (const item of p.card_samples || []) {
+      lines.push(`列表商品：¥${item.price} ${item.title}${item.display_region ? ` · ${item.display_region}` : ""}`);
+    }
+    if (p.cards_truncated) lines.push(`其余列表商品未展开（本轮共 ${p.cards} 件）`);
     if (p.items_truncated) lines.push(`其余商品未展开（本轮共 ${p.items_total} 件）`);
   }
   if (run.error) lines.push(run.error);
@@ -292,7 +314,8 @@ const codeLabels = {
 };
 /** 每一轮的名字：按容量筛选时显示容量（「256G」），否则显示按钮名（「新发」）。 */
 function passName(p) {
-  return p.storage ? displayStorage(p.storage) : p.label;
+  const name = p.storage ? displayStorage(p.storage) : p.label;
+  return p.device_name ? `${p.device_name} · ${name}` : name;
 }
 
 const codeOrder = ["matched", "price_high", "region", "other_model", "unrecognized", "excluded", "too_cheap", "no_quote", "other"];
@@ -386,7 +409,10 @@ async function loadRunDetail(id) {
   if (total) body = items.map(runItem).join("");
   else if (run.ok === 0) body = `<div class="empty bad">这次搜索失败了，没有读到商品。</div>`;
   else if (run.observed) body = `<div class="empty">这条记录早于逐件明细功能，只知道看到了 ${run.observed} 件。</div>`;
-  else body = `<div class="empty">这次没有读到商品。<br /><span class="hint">把鼠标停在上面的「新发 / 降价」上，可以看到页面卡片数和曝光记录数。</span></div>`;
+  else body = `<div class="empty">这次没有关联到商品链接。<br /><span class="hint">下方日志会显示筛选操作、列表卡片和候选数。</span></div>`;
+
+  const phoneRun = (run.passes || []).some(p => String(p.device || "").startsWith("ios:"));
+  const cardCount = (run.passes || []).reduce((sum, p) => sum + (Number(p.cards) || 0), 0);
 
   document.querySelector("#run-detail").innerHTML = `
     <div class="detail-head ${tone}">
@@ -402,9 +428,9 @@ async function loadRunDetail(id) {
     </div>
     ${steps.length ? `<div class="step-chips">${steps.join("")}</div>` : ""}
     ${run.error ? `<div class="notice ${run.ok === 0 ? "bad" : "warn"}">${run.error.split("；").map(escapeHtml).join("<br />")}</div>` : ""}
+    ${logText ? `<details class="run-log" ${phoneRun ? "open" : ""}><summary>操作日志${cardCount ? ` · 列表卡片 ${cardCount} 件` : ""}</summary><pre>${escapeHtml(logText)}</pre></details>` : ""}
     ${filters ? `<div class="chips code-filter">${filters}</div>` : ""}
-    <div class="run-items">${body}</div>
-    ${logText ? `<details class="run-log"><summary>操作日志</summary><pre>${escapeHtml(logText)}</pre></details>` : ""}`;
+    <div class="run-items">${body}</div>`;
 }
 
 /* ------------------------------------------------------------------ 每日报价 */
@@ -592,6 +618,19 @@ document.querySelectorAll("[data-refresh]").forEach(button => button.addEventLis
 
 const rulesForm = document.querySelector("#rules-form");
 rulesForm.addEventListener("submit", saveRules);
+document.querySelector("#refresh-devices").addEventListener("click", () => loadDevices().catch(error => toast(error.message, true)));
+document.querySelector("#device-options").addEventListener("change", async () => {
+  const ids = [...document.querySelectorAll("#device-options input:checked")].map(input => input.value);
+  try {
+    if (!ids.length) throw new Error("至少选择一台采集设备");
+    await api("/api/devices/selection", { method: "PUT", body: JSON.stringify({ ids }) });
+    updateRuleHints();
+    toast("采集设备已保存，下一次搜索生效");
+  } catch (error) {
+    toast(error.message, true);
+    await loadDevices().catch(() => {});
+  }
+});
 ["region_city", "region_path", "model_interval_minutes", "scroll_pages"].forEach(name =>
   rulesForm.elements[name].addEventListener("input", () => { clearTimeout(updateRuleHints.t); updateRuleHints.t = setTimeout(updateRuleHints, 250); }));
 
@@ -690,7 +729,7 @@ document.querySelector("#test-notification").addEventListener("click", async () 
 
 async function initialize() {
   try {
-    await Promise.all([loadOverview(), loadRules()]);
+    await Promise.all([loadOverview(), loadRules(), loadDevices()]);
     await Promise.all([loadDeals(), loadTargets(), loadQuoteBatches(), loadQuotes()]);
   } catch (error) {
     document.querySelector("#health").textContent = "连接失败";

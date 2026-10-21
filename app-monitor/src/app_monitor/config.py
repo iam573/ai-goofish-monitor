@@ -40,6 +40,9 @@ class Settings:
         "GOOFISH_TRACK_DB",
         "~/Library/Containers/com.taobao.fleamarket/Data/Library/walle_ut_user_track.db",
     )
+    appium_server_url: str = os.environ.get("APPIUM_SERVER_URL", "http://127.0.0.1:4723").rstrip("/")
+    ios_wda_bundle_id: str = os.environ.get("IOS_WDA_BUNDLE_ID", "").strip()
+    ios_wda_derived_data_path: Path = _path_env("IOS_WDA_DERIVED_DATA_PATH", "/tmp/goofish-wda-probe")
     ntfy_topic_url: str = os.environ.get("NTFY_TOPIC_URL", "").strip()
     bark_url: str = os.environ.get("BARK_URL", "").strip()
     webhook_url: str = os.environ.get("WEBHOOK_URL", "").strip()
