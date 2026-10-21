@@ -5,7 +5,7 @@ import pytest
 
 from app_monitor.collector import CollectResult
 from app_monitor.devices import Device
-from app_monitor.rules import Rules, save_rules
+from app_monitor.rules import Rules, load_rules, save_rules
 from app_monitor.service import MonitorService
 from conftest import add_quotes
 
@@ -14,7 +14,7 @@ class FakeCollector:
     def __init__(self, items=None, error=None, filter_ok=True):
         self.items, self.error, self.filter_ok, self.calls = items or [], error, filter_ok, []
 
-    async def collect(self, keyword, region_steps=None, region_hint="", storage_filters=None, scroll_pages=0):
+    async def collect(self, keyword, region_steps=None, region_hint="", storage_filters=None, scroll_pages=0, on_items=None):
         self.calls.append(
             {"keyword": keyword, "region": region_steps, "hint": region_hint,
              "storage_filters": storage_filters, "sort": "新发"}
@@ -131,7 +131,7 @@ async def test_iphone_prefilters_before_processing_shared_id(database, monkeypat
     ])
 
     class FakePhone:
-        async def collect(self, udid, version, keyword, city, region_steps, storages, pages, is_candidate):
+        async def collect(self, udid, version, keyword, city, region_steps, storages, pages, is_candidate, on_items=None):
             assert (udid, version, keyword, city, storages) == (
                 "phone-1", "27.2", "iPhone 15 Pro", "厦门", ["256"]
             )
@@ -163,7 +163,7 @@ async def test_iphone_filter_failure_keeps_actions_in_failed_run(database, monke
     ])
 
     class FailedPhone:
-        async def collect(self, *args):
+        async def collect(self, *args, **kwargs):
             return CollectResult(items=[], region_error="地区未确认", passes=[{
                 "label": "新发", "storage": None, "observed": 0,
                 "error": "地区未确认", "actions": [
@@ -236,3 +236,72 @@ async def test_run_due_runs_one_unit(database):
     assert result and result["storage"] is None
     with database.connect() as connection:
         assert connection.execute("SELECT COUNT(*) FROM search_runs").fetchone()[0] == 1
+
+
+async def test_push_includes_full_quote_reference(database):
+    service, notifier = setup(database)
+    await service.process_items(
+        [{"item_id": "r1", "title": "iPhone 15 Pro 256G 国行", "price": 3900}], load_rules(database), "iPhone 15 Pro"
+    )
+    reference = notifier.payloads[0]["quote_reference"]
+    assert reference["grade"] == "小花" and reference["grades"] == [{"grade": "小花", "price": 4000}]
+    assert reference["deductions"] == [] and reference["category_name"] == "苹果无保"
+
+
+async def test_items_are_judged_and_pushed_while_collection_is_still_running(database):
+    import asyncio
+
+    seen_during_collection = {}
+
+    class StreamingCollector(FakeCollector):
+        async def collect(self, keyword, region_steps=None, region_hint="", storage_filters=None,
+                          scroll_pages=0, on_items=None):
+            first = {"item_id": "s1", "title": "iPhone 15 Pro 256G 国行", "price": 3500,
+                     "display_region": "厦门", "source_storage": "256", "source_pass": "新发"}
+            on_items([dict(first)], storage="256", region_applied=True, filter_applied=True, stage="读取 256G 第 1/1 屏")
+            await asyncio.sleep(0.05)  # 采集还没结束：第一件应已判价、写入记录并推送
+            seen_during_collection["pushed"] = [item_id for item_id, _ in notifier.sent]
+            with database.connect() as connection:
+                seen_during_collection["run_items"] = connection.execute("SELECT COUNT(*) FROM run_items").fetchone()[0]
+            seen_during_collection["live"] = dict(service.live)
+            on_items([], pass_info={"label": "新发", "storage": "256", "filter_applied": True,
+                                    "observed": 1, "error": None}, storage="256")
+            await asyncio.sleep(0.05)
+            with database.connect() as connection:
+                seen_during_collection["passes"] = json.loads(
+                    connection.execute("SELECT passes FROM search_runs ORDER BY id DESC").fetchone()[0])
+            return CollectResult(items=[first], region_applied=True, filter_applied=True,
+                                 passes=[{"label": "新发", "storage": "256", "filter_applied": True,
+                                          "observed": 1, "error": None}])
+
+    service, notifier = setup(database, StreamingCollector(), region_city="厦门", disabled_models=["15 Pro|512"])
+    result = await service.run_model("15 Pro")
+
+    assert seen_during_collection["pushed"] == ["s1"]
+    assert seen_during_collection["run_items"] == 1
+    assert seen_during_collection["live"]["stage"] == "读取 256G 第 1/1 屏"
+    assert seen_during_collection["live"]["matched"] == 1
+    assert seen_during_collection["passes"][0]["storage"] == "256"
+    assert len(notifier.sent) == 1  # 采集结束后不会重复处理同一商品
+    assert result["matched"] == 1 and result["passes"][0]["matched"] == 1
+    assert service.live is None
+
+
+async def test_item_stream_accepts_items_from_iphone_thread():
+    import asyncio
+    import threading
+
+    from app_monitor.service import ItemStream
+
+    received = []
+
+    async def handler(items, meta):
+        received.append((items[0]["item_id"], meta["device"], meta["storage"]))
+
+    stream = ItemStream(handler)
+    emit = stream.for_device("ios:abc", "测试 iPhone")
+    worker = threading.Thread(target=lambda: [emit([{"item_id": str(i)}], storage="256") for i in range(3)])
+    worker.start()
+    await asyncio.to_thread(worker.join)
+    await stream.close()
+    assert received == [("0", "ios:abc", "256"), ("1", "ios:abc", "256"), ("2", "ios:abc", "256")]

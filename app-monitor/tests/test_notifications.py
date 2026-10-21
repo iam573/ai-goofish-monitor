@@ -162,3 +162,29 @@ async def test_custom_webhook_uses_headers_and_body_template():
     request = captured["request"]
     assert request.headers["X-Token"] == "secret"
     assert json.loads(request.content) == {"title": "iPhone 15 Pro", "content": "价格：¥3000"}
+
+
+def test_notification_lists_all_grades_and_each_deduction():
+    item = {
+        "title": "iPhone 15 Pro 256G 自用", "model": "15 Pro", "storage": "256", "price": 4650,
+        "quote_price": 4500, "quote_grade": "小花", "display_region": "厦门",
+        "quote_reference": {
+            "category_name": "苹果无保", "quote_date": "2026-10-21", "grade": "小花",
+            "grades": [{"grade": "靓机", "price": 4700}, {"grade": "小花", "price": 4500}, {"grade": "大花", "price": 4200}],
+            "other_category_name": "苹果有保", "other_price": 4800,
+            "deductions": [
+                {"name": "换屏", "amount_min": 300, "amount_max": 300, "open_ended": False},
+                {"name": "电池低于80%", "amount_min": 200, "amount_max": 300, "open_ended": False},
+                {"name": "有锁", "amount_min": 1500, "amount_max": 1500, "open_ended": True},
+            ],
+            "notes": ["后盖破当大花收", "不分颜色"],
+        },
+    }
+    _, content = NotificationService._format_message(item, "", "", [])
+    assert "地区：厦门\n\n参考报价：苹果无保（10-21）\n" in content
+    assert "各成色：靓机 ¥4700 · 小花 ¥4500（参考） · 大花 ¥4200" in content
+    assert "苹果有保 · 小花：¥4800" in content
+    assert "扣费项：\n· 换屏 −¥300\n· 电池低于80% −¥200~300\n· 有锁 −¥1500 起" in content
+    assert "说明：后盖破当大花收；不分颜色" in content
+    markdown = NotificationService._format_webhook_content(item, "", "", [])
+    assert "**参考报价：苹果无保（10-21）**  \n各成色：" in markdown

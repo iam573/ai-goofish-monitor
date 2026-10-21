@@ -445,3 +445,35 @@ async def test_collect_run_log_contains_clicks_and_products(monkeypatch, caplog)
     assert any(action["action"] == "点击排序" and action["target"] == "新发" for action in entry["actions"])
     assert "采集结果 storage=未筛容量 sort=新发" in caplog.text
     assert "id=1094279560524" in caplog.text
+
+
+async def test_collect_streams_items_screen_by_screen(monkeypatch):
+    """每翻一屏就交出新关联到的商品，同一商品只交出一次，并在本轮结束时交出轮次结果。"""
+    from app_monitor import collector as module
+    from app_monitor.config import settings
+
+    class Exposures(FakeExposures):
+        def read_after(self, row_id, keyword):
+            return ([{
+                "item_id": "1094279560524", "keyword": keyword, "price": 3649,
+                "publish_time": None, "tags": [], "image_urls": [], "index": 0, "source_row_id": 1,
+            }], 1)
+
+    async def no_sleep(_):
+        return None
+
+    monkeypatch.setattr(module.asyncio, "sleep", no_sleep)
+    collector = module.GoofishCollector(settings)
+    collector.accessibility = FakeAX(REAL_SEARCH_PAGE, home_search=True)
+    collector.exposures = Exposures()
+    events = []
+
+    await collector.collect("iPhone 15 Pro", region_hint="厦门", scroll_pages=2,
+                            on_items=lambda items, **meta: events.append((items, meta)))
+
+    streamed = [item["item_id"] for items, _ in events for item in items]
+    assert streamed == ["1094279560524"]
+    first = next(meta for items, meta in events if items)
+    assert first["stage"].startswith("读取 全部容量 第 1/3 屏")
+    assert any("pass_info" in meta and meta["pass_info"]["items_total"] == 1 for _, meta in events)
+    assert [meta["stage"] for _, meta in events if meta.get("stage")][0] == "打开搜索页"

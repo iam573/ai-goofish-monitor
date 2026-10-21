@@ -3,178 +3,316 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="light dark" />
     <title>闲鱼捡漏监控</title>
     <link rel="stylesheet" href="/assets/styles.css" />
   </head>
   <body>
-    <header class="topbar">
-      <div class="brand">
-        <p class="eyebrow">GOOFISH APP MONITOR</p>
-        <h1>闲鱼捡漏监控</h1>
-      </div>
-      <div class="header-actions">
-        <span id="health" class="status-dot">正在连接</span>
-        <button id="test-notification" class="ghost compact">测试推送</button>
-      </div>
-    </header>
-
-    <main>
-      <!-- 流程状态：报价 → 规则 → 搜索 → 命中 -->
-      <section id="pipeline" class="pipeline" aria-label="运行状态"></section>
-
-      <nav class="tabs" aria-label="功能导航">
-        <button class="tab active" data-panel="rules-panel">监控规则</button>
-        <button class="tab" data-panel="deals-panel">命中商品</button>
-        <button class="tab" data-panel="quotes-panel">每日报价</button>
-        <button class="tab" data-panel="runs-panel">运行记录</button>
-      </nav>
-
-      <!-- 命中商品 -->
-      <section id="deals-panel" class="panel">
-        <div class="card">
-          <div class="card-head">
-            <h2>命中商品</h2>
-            <button class="secondary compact" data-refresh="deals">刷新</button>
+    <div class="app">
+      <!-- 侧边导航 -->
+      <aside class="sidebar">
+        <div class="brand">
+          <span class="brand-mark" aria-hidden="true">鱼</span>
+          <div>
+            <strong>闲鱼捡漏监控</strong>
+            <span>Goofish App Monitor</span>
           </div>
-          <div id="deal-list" class="deal-list"></div>
         </div>
-      </section>
 
-      <!-- 监控规则 + 机型 -->
-      <section id="rules-panel" class="panel active">
-        <div class="card device-card">
-          <div class="card-head">
-            <div><h2>采集设备</h2><p class="hint">可同时勾选 Mac 和多台 iPhone；每款机型会按勾选顺序逐台采集，商品按 ID 去重。</p></div>
-            <button class="secondary compact" id="refresh-devices" type="button">刷新设备</button>
-          </div>
-          <div id="device-options" class="device-options"></div>
-          <p class="hint">iPhone 优先从匹配城市的首页第 2 个 Tab 搜索；搜索栏和结果区域均确认城市后跳过区域筛选。随后逐个选择容量并点击「确定」，只读取「新发」列表；符合条件的候选才进入详情复制链接。</p>
+        <nav class="nav" aria-label="功能导航">
+          <button class="tab nav-item active" data-panel="deals-panel">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12.5 9.5 17 19 7.5"/></svg>
+            <span>命中商品</span><em id="nav-deal-count" class="nav-badge" hidden></em>
+          </button>
+          <button class="tab nav-item" data-panel="rules-panel">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h10M18 7h2M4 17h4M12 17h8"/><circle cx="16" cy="7" r="2"/><circle cx="10" cy="17" r="2"/></svg>
+            <span>监控规则</span>
+          </button>
+          <button class="tab nav-item" data-panel="quotes-panel">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 19V5M4 19h16"/><path d="M8 15l3.5-4 3 2.5L19 8"/></svg>
+            <span>每日报价</span>
+          </button>
+          <button class="tab nav-item" data-panel="runs-panel">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8"/><path d="M12 8v4.5l3 1.8"/></svg>
+            <span>运行记录</span>
+          </button>
+        </nav>
+
+        <div class="sidebar-foot">
+          <span id="health" class="status-dot">正在连接</span>
+          <button id="test-notification" class="secondary compact block">测试推送</button>
         </div>
-        <div class="rules-layout">
-          <form id="rules-form" class="card form-card">
-            <div class="card-head">
-              <h2>监控规则</h2>
-              <label class="switch"><input type="checkbox" name="enabled" /> <span>启用监控</span></label>
+      </aside>
+
+      <main class="main">
+        <!-- 流程状态：报价 → 规则 → 搜索 → 命中 -->
+        <section id="pipeline" class="pipeline" aria-label="运行状态"></section>
+
+        <!-- 命中商品 -->
+        <section id="deals-panel" class="panel active">
+          <header class="page-head">
+            <div>
+              <h1>命中商品</h1>
+              <p>挂牌价在推送上限以内、地区和机型都核对通过的商品。点击标题去闲鱼查看。</p>
             </div>
+            <div class="page-actions">
+              <button class="secondary compact" data-refresh="deals">刷新</button>
+            </div>
+          </header>
+          <div class="card flush">
+            <div id="deal-list" class="deal-list"></div>
+          </div>
+        </section>
 
-            <fieldset>
-              <legend>地区</legend>
-              <div class="field-row">
-                <label>城市<input name="region_city" placeholder="例如 厦门；留空为全国" /></label>
+        <!-- 监控规则 -->
+        <section id="rules-panel" class="panel">
+          <header class="page-head rules-head">
+            <div>
+              <h1>监控规则</h1>
+              <p>勾选机型、设备和启停开关即时生效；右侧规则修改后点「保存」，从下一次搜索开始生效。</p>
+            </div>
+            <div class="page-actions rules-head-actions">
+              <div class="device-picker" id="device-picker">
+                <button type="button" class="picker-btn" id="device-picker-btn" aria-haspopup="true" aria-expanded="false" aria-controls="device-menu">
+                  <svg class="picker-icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4.5" width="13" height="9.5" rx="1.6"/><path d="M6.5 17.5h6"/><rect x="17.5" y="8" width="4" height="10.5" rx="1.2"/></svg>
+                  <span class="picker-text"><small>采集设备</small><b id="device-summary">读取中…</b></span>
+                  <i id="device-dot" class="dot"></i>
+                  <svg class="picker-caret" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 10l5 5 5-5"/></svg>
+                </button>
+                <div class="picker-menu" id="device-menu" role="dialog" aria-label="采集设备" hidden>
+                  <div class="picker-menu-head">
+                    <div><b>采集设备</b><span class="hint">可多选，按列表顺序逐台采集，商品按 ID 去重</span></div>
+                    <button type="button" class="icon-btn" id="refresh-devices" title="重新检测设备" aria-label="重新检测设备">
+                      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8 8 0 1 0-2.3 5.7"/><path d="M20 5v6h-6"/></svg>
+                    </button>
+                  </div>
+                  <div id="device-options" class="device-options"></div>
+                  <p class="hint picker-foot">iPhone 优先从首页第 2 个城市 Tab 搜索，确认是目标城市后跳过区域筛选；之后逐个勾选容量并点「确定」，只读「新发」。</p>
+                </div>
               </div>
-              <label>App 内区域点击路径
-                <input name="region_path" placeholder="留空自动生成，例如 区域 > 福建 > 厦门 > 查看" />
+              <label class="power" id="power-switch" title="总开关：关闭后不再自动搜索">
+                <input type="checkbox" id="rules-enabled" role="switch" />
+                <span class="power-track"><span class="power-thumb"></span></span>
+                <span class="power-label" id="power-label">监控中</span>
               </label>
-              <p class="hint" id="region-hint"></p>
-            </fieldset>
-
-            <fieldset>
-              <legend>判价</legend>
-              <div class="field-row">
-                <label>参考报价<select name="quote_category"><option value="100025">苹果无保</option><option value="100027">苹果有保</option></select></label>
-                <label>参考成色<select name="quote_grade"><option>靓机</option><option>小花</option><option>大花</option><option>外爆</option><option>内爆可测</option></select></label>
-              </div>
-              <div class="field-row">
-                <label>最多高于回收报价（元）<input name="max_over_quote" type="number" min="0" step="10" /></label>
-              </div>
-              <p class="hint">推送上限 = 每日回收报价 + 允许高出的金额。例如报价 ¥4900、设置 ¥200，挂牌价不超过 ¥5100 的商品可进入推送候选。</p>
-              <div class="field-row">
-                <label>过低价比例<input name="min_price_ratio" type="number" min="0" max="0.99" step="0.05" /></label>
-                <span class="hint inline">低于报价的这个比例视为引流或非整机，不推送</span>
-              </div>
-              <label>排除词（逗号分隔）<textarea name="exclude_keywords" rows="3"></textarea></label>
-            </fieldset>
-
-            <fieldset>
-              <legend>搜索方式</legend>
-              <div class="field-row">
-                <label>每轮翻屏次数<input name="scroll_pages" type="number" min="0" max="10" step="1" /></label>
-                <span class="hint inline">每个容量筛选后向下翻几屏，把新发第一页的商品读完</span>
-              </div>
-              <p class="hint" id="storage-hint"></p>
-            </fieldset>
-
-            <fieldset>
-              <legend>搜索节奏</legend>
-              <div class="field-row three">
-                <label>开始<input name="search_start" inputmode="numeric" pattern="[0-2][0-9]:[0-5][0-9]" placeholder="09:00" /></label>
-                <label>结束<input name="search_end" inputmode="numeric" pattern="[0-2][0-9]:[0-5][0-9]" placeholder="23:00" /></label>
-                <label>同一单元间隔（分钟）<input name="model_interval_minutes" type="number" min="5" step="5" /></label>
-              </div>
-              <p class="hint" id="cadence-hint"></p>
-            </fieldset>
-
-            <button type="submit">保存规则</button>
-          </form>
-
-          <div class="card">
-            <div class="card-head">
-              <div>
-                <h2>搜索机型</h2>
-                <p class="hint">由最新报价表自动生成。容量标签显示上次看到的商品数·命中数，点击可单独停用。</p>
-              </div>
-              <button class="secondary compact" data-refresh="targets">刷新</button>
             </div>
-            <div class="table-wrap"><table class="target-table">
-              <thead><tr><th>机型</th><th>容量</th><th>最近搜索</th><th class="num">累计命中</th><th></th></tr></thead>
-              <tbody id="target-rows"></tbody>
-            </table></div>
-          </div>
-        </div>
-      </section>
+          </header>
 
-      <!-- 每日报价 -->
-      <section id="quotes-panel" class="panel">
-        <div class="card quote-card">
-          <div class="card-head">
-            <div><h2>每日报价</h2><div id="quote-batches" class="batch-line"></div></div>
-            <button id="sync-quote" class="compact">立即同步</button>
+          <!-- 一句话规则：点击高亮部分直接跳到对应设置 -->
+          <div class="card rule-sentence" id="rule-sentence" aria-live="polite"></div>
+
+          <div class="rules-layout">
+            <div class="card flush target-card">
+              <div class="target-head">
+                <div class="target-title">
+                  <h2>监控机型</h2>
+                  <span id="target-count" class="count-pill"></span>
+                </div>
+                <div class="target-tools">
+                  <label class="search-box"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6.5"/><path d="M16 16l4 4"/></svg>
+                    <input id="target-filter" type="search" placeholder="筛选机型，如 15 Pro" aria-label="筛选机型" /></label>
+                  <button type="button" class="secondary compact" id="expand-all-series">全部展开</button>
+                  <button type="button" class="icon-btn bordered" data-refresh="targets" title="刷新" aria-label="刷新机型">
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8 8 0 1 0-2.3 5.7"/><path d="M20 5v6h-6"/></svg>
+                  </button>
+                </div>
+              </div>
+              <div class="target-legend hint">
+                <span><i class="lg on"></i>监控中</span><span><i class="lg hit"></i>上次有命中</span><span><i class="lg fail"></i>上次失败</span><span><i class="lg off"></i>已停用</span>
+                <span class="legend-note">容量标签上的数字 = 上次看到的商品数 · 命中数，点一下启停该容量</span>
+              </div>
+              <div class="table-wrap"><table class="target-table">
+                <tbody id="target-rows"></tbody>
+              </table></div>
+            </div>
+
+            <form id="rules-form" class="card flush settings-card" novalidate>
+              <div class="settings-head">
+                <h2>规则设置</h2>
+                <div id="settings-tabs" class="segmented settings-tabs" role="tablist">
+                  <button type="button" role="tab" data-tab="region" class="active">地区</button><button type="button" role="tab" data-tab="price">判价</button><button type="button" role="tab" data-tab="search">搜索</button>
+                </div>
+              </div>
+
+              <div class="settings-body">
+                <section class="settings-pane active" data-pane="region" role="tabpanel">
+                  <label>目标城市
+                    <span class="input-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 21s-6.5-5.8-6.5-11a6.5 6.5 0 0 1 13 0c0 5.2-6.5 11-6.5 11z"/><circle cx="12" cy="10" r="2.3"/></svg>
+                    <input name="region_city" placeholder="例如 厦门；留空搜全国" /></span>
+                  </label>
+                  <p class="hint" id="region-hint"></p>
+                  <details class="advanced" id="region-advanced">
+                    <summary>高级：Mac 端区域点击路径</summary>
+                    <label><input name="region_path" placeholder="留空自动生成" /></label>
+                    <p class="hint">用 <b>&gt;</b> 分隔每一步，<b>?</b> 开头的步骤找不到时跳过。闲鱼已经记住该城市时会自动跳过。</p>
+                  </details>
+                </section>
+
+                <section class="settings-pane" data-pane="price" role="tabpanel">
+                  <div class="field">
+                    <span class="field-label">参考报价</span>
+                    <div class="opts" role="radiogroup">
+                      <label class="opt"><input type="radio" name="quote_category" value="100025" /><span>苹果无保</span></label>
+                      <label class="opt"><input type="radio" name="quote_category" value="100027" /><span>苹果有保</span></label>
+                    </div>
+                  </div>
+                  <div class="field">
+                    <span class="field-label">参考成色</span>
+                    <div class="opts grades" role="radiogroup">
+                      <label class="opt"><input type="radio" name="quote_grade" value="靓机" /><span>靓机</span></label>
+                      <label class="opt"><input type="radio" name="quote_grade" value="小花" /><span>小花</span></label>
+                      <label class="opt"><input type="radio" name="quote_grade" value="大花" /><span>大花</span></label>
+                      <label class="opt"><input type="radio" name="quote_grade" value="外爆" /><span>外爆</span></label>
+                      <label class="opt"><input type="radio" name="quote_grade" value="内爆可测" /><span>内爆可测</span></label>
+                    </div>
+                  </div>
+                  <div class="field-row">
+                    <label>最多高于回收价
+                      <span class="affix"><em>¥</em><input name="max_over_quote" type="number" min="0" step="10" /></span>
+                    </label>
+                    <label>过低价比例
+                      <span class="affix"><input name="min_price_ratio" type="number" min="0" max="0.99" step="0.05" /><em>× 报价</em></span>
+                    </label>
+                  </div>
+                  <div class="formula" id="price-formula"></div>
+                  <div class="field">
+                    <span class="field-label">排除词 <span class="hint">标题含这些词不推送；回车或逗号添加</span></span>
+                    <div class="tag-editor" id="exclude-editor">
+                      <div class="tags" id="exclude-tags"></div>
+                      <input id="exclude-input" placeholder="添加排除词…" aria-label="添加排除词" />
+                    </div>
+                    <textarea name="exclude_keywords" hidden></textarea>
+                  </div>
+                </section>
+
+                <section class="settings-pane" data-pane="search" role="tabpanel">
+                  <div class="field">
+                    <span class="field-label">搜索时段</span>
+                    <div class="time-range">
+                      <input name="search_start" type="time" required aria-label="开始时间" />
+                      <span>至</span>
+                      <input name="search_end" type="time" required aria-label="结束时间" />
+                    </div>
+                  </div>
+                  <div class="field-row">
+                    <label>同一机型间隔
+                      <span class="affix"><input name="model_interval_minutes" type="number" min="5" step="5" /><em>分钟</em></span>
+                    </label>
+                    <label>每轮翻屏
+                      <span class="affix"><input name="scroll_pages" type="number" min="0" max="10" step="1" /><em>屏</em></span>
+                    </label>
+                  </div>
+                  <p class="hint" id="storage-hint"></p>
+                  <div class="estimate" id="cadence-hint"></div>
+                </section>
+              </div>
+
+              <div class="settings-foot">
+                <span class="save-state" id="save-state">已保存</span>
+                <button type="button" class="secondary compact" id="rules-reset" disabled>撤销</button>
+                <button type="submit" class="compact" id="rules-save" disabled>保存规则</button>
+              </div>
+            </form>
           </div>
+        </section>
+
+        <!-- 每日报价 -->
+        <section id="quotes-panel" class="panel">
+          <header class="page-head">
+            <div>
+              <h1>每日报价</h1>
+              <p>点击任意价格打开估价：选成色、勾选扣费项，自动算出最终收购价。红底表示需要复核（有保加价为负，或成色价格倒挂）。</p>
+            </div>
+            <div class="page-actions">
+              <button id="reparse-quote" class="secondary compact" title="对已下载的原图重新识别价格和扣费项，手动校正过的价格不会被覆盖">重新识别原图</button>
+              <button id="sync-quote" class="compact">立即同步</button>
+            </div>
+          </header>
+          <div id="quote-batches" class="batch-line"></div>
           <details id="quote-history" class="quote-history" hidden>
             <summary>历史报价原图</summary>
             <div id="quote-history-list" class="quote-history-list"></div>
           </details>
-          <div class="quote-controls">
-            <div id="series-chips" class="chips"></div>
-            <div id="quote-mode" class="segmented" role="group" aria-label="显示内容">
-              <button type="button" data-mode="nw" class="active">无保</button><button type="button" data-mode="w">有保</button><button type="button" data-mode="premium">加价</button>
+          <div class="card flush quote-card">
+            <div class="quote-controls">
+              <div id="series-chips" class="chips"></div>
+              <div class="quote-tools">
+                <div id="quote-mode" class="segmented" role="group" aria-label="显示内容">
+                  <button type="button" data-mode="nw" class="active">无保</button><button type="button" data-mode="w">有保</button><button type="button" data-mode="premium">加价</button>
+                </div>
+                <input id="quote-model-filter" type="search" placeholder="搜索机型 / 容量" />
+                <label class="check"><input id="quote-only-anomaly" type="checkbox" /> 只看异常 <span id="anomaly-count" class="anomaly-count"></span></label>
+              </div>
             </div>
-            <input id="quote-model-filter" placeholder="搜索机型/容量" />
-            <label class="check"><input id="quote-only-anomaly" type="checkbox" /> 只看异常 <span id="anomaly-count" class="anomaly-count"></span></label>
+            <div class="table-wrap"><table class="quote-table">
+              <thead><tr><th>机型</th><th>容量</th><th>靓机</th><th>小花</th><th>大花</th><th>外爆</th><th>内爆可测</th></tr></thead>
+              <tbody id="quote-body"></tbody>
+            </table></div>
           </div>
-          <div class="table-wrap"><table class="quote-table">
-            <thead><tr><th>机型</th><th>容量</th><th>靓机</th><th>小花</th><th>大花</th><th>外爆</th><th>内爆可测</th></tr></thead>
-            <tbody id="quote-body"></tbody>
-          </table></div>
-          <p class="hint">点击价格可校正；红底表示需复核（有保加价为负，或成色价格倒挂）。</p>
-        </div>
-        <dialog id="quote-editor">
-          <form id="quote-editor-form" method="dialog">
-            <h3 id="editor-title"></h3>
-            <label>无保报价（元）<input id="editor-nw" type="number" min="1" /><span id="editor-nw-src" class="hint"></span></label>
-            <label>有保报价（元）<input id="editor-w" type="number" min="1" /><span id="editor-w-src" class="hint"></span></label>
-            <div class="dialog-actions"><button type="button" id="editor-cancel" class="secondary">取消</button><button type="submit">保存</button></div>
-          </form>
-        </dialog>
-      </section>
+          <dialog id="quote-estimator" class="estimator" aria-labelledby="est-title">
+            <div class="est-head">
+              <div>
+                <h3 id="est-title"></h3>
+                <p id="est-sub" class="hint"></p>
+              </div>
+              <button type="button" id="est-close" class="icon-btn" aria-label="关闭">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"/></svg>
+              </button>
+            </div>
+            <div class="est-body">
+              <div class="est-row">
+                <span class="est-label">报价</span>
+                <div id="est-source" class="segmented" role="group" aria-label="报价类型">
+                  <button type="button" data-source="no_warranty">无保</button><button type="button" data-source="warranty">有保</button>
+                </div>
+              </div>
+              <div class="est-row top">
+                <span class="est-label">成色</span>
+                <div id="est-grades" class="est-grades"></div>
+              </div>
+              <div id="est-deductions" class="est-deductions"></div>
+            </div>
+            <div class="est-foot">
+              <div id="est-total" class="est-total"></div>
+              <div class="dialog-actions">
+                <button type="button" id="est-reset" class="secondary compact">清空勾选</button>
+                <button type="button" id="est-edit" class="secondary compact">校正报价</button>
+              </div>
+            </div>
+          </dialog>
+          <dialog id="quote-editor">
+            <form id="quote-editor-form" method="dialog">
+              <h3 id="editor-title"></h3>
+              <label>无保报价（元）<input id="editor-nw" type="number" min="1" /><span id="editor-nw-src" class="hint"></span></label>
+              <label>有保报价（元）<input id="editor-w" type="number" min="1" /><span id="editor-w-src" class="hint"></span></label>
+              <div class="dialog-actions"><button type="button" id="editor-cancel" class="secondary">取消</button><button type="submit">保存</button></div>
+            </form>
+          </dialog>
+        </section>
 
-      <!-- 运行记录 -->
-      <section id="runs-panel" class="panel">
-        <div class="runs-layout">
-          <aside class="card run-list-card">
-            <div class="card-head">
-              <h2>搜索记录</h2>
+        <!-- 运行记录 -->
+        <section id="runs-panel" class="panel">
+          <header class="page-head">
+            <div>
+              <h1>运行记录</h1>
+              <p>每次搜索看到了哪些商品、哪件命中、其余为什么没推送。</p>
+            </div>
+            <div class="page-actions">
               <button class="secondary compact" data-refresh="runs">刷新</button>
             </div>
-            <div id="run-filter" class="segmented run-filter" role="group" aria-label="筛选搜索记录">
-              <button type="button" data-status="" class="active">全部</button><button type="button" data-status="hit">有命中</button><button type="button" data-status="warn">有警告</button><button type="button" data-status="failed">失败</button>
-            </div>
-            <div id="run-list" class="run-list"></div>
-          </aside>
-          <section id="run-detail" class="card run-detail" aria-live="polite"></section>
-        </div>
-      </section>
-    </main>
+          </header>
+          <div class="runs-layout">
+            <aside class="card run-list-card">
+              <div id="run-filter" class="segmented run-filter" role="group" aria-label="筛选搜索记录">
+                <button type="button" data-status="" class="active">全部</button><button type="button" data-status="hit">有命中</button><button type="button" data-status="warn">有警告</button><button type="button" data-status="failed">失败</button>
+              </div>
+              <div id="run-list" class="run-list"></div>
+            </aside>
+            <section id="run-detail" class="card run-detail" aria-live="polite"></section>
+          </div>
+        </section>
+      </main>
+    </div>
 
     <div id="toast" role="status"></div>
     <script type="module" src="/assets/app.js"></script>

@@ -115,6 +115,23 @@ CREATE TABLE IF NOT EXISTS run_items (
     UNIQUE(run_id, item_id)
 );
 
+-- 报价图中每款机型的扣费项（随报价批次保存，重新识别时整体替换）
+CREATE TABLE IF NOT EXISTS quote_deductions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    batch_id INTEGER NOT NULL REFERENCES quote_batches(id) ON DELETE CASCADE,
+    category_id TEXT NOT NULL,
+    model TEXT NOT NULL,
+    column_index INTEGER NOT NULL DEFAULT 0,
+    position INTEGER NOT NULL DEFAULT 0,
+    text TEXT NOT NULL,
+    name TEXT NOT NULL,
+    amount_min REAL,
+    amount_max REAL,
+    open_ended INTEGER NOT NULL DEFAULT 0,
+    kind TEXT NOT NULL DEFAULT 'deduct'
+);
+CREATE INDEX IF NOT EXISTS idx_quote_deductions_lookup ON quote_deductions(batch_id, model);
+
 CREATE TABLE IF NOT EXISTS app_state (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL,

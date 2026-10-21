@@ -9,12 +9,25 @@ import subprocess
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from .config import ROOT, Settings
 from .regions import CITY_DISTRICTS, CITY_PROVINCE, PROVINCES, normalize_city
 
 logger = logging.getLogger(__name__)
+
+# 采集过程中的实时回调：on_items(新读到的商品, storage=..., region_applied=..., filter_applied=...,
+# stage="当前步骤", pass_info={本轮结果})。回调必须很快返回（只入队），可以从其他线程调用。
+ItemCallback = Callable[..., None]
+
+
+def emit_safely(callback: ItemCallback | None, items: list[dict[str, Any]] | None = None, **meta: Any) -> None:
+    if callback is None:
+        return
+    try:
+        callback(list(items or []), **meta)
+    except Exception:
+        logger.exception("实时回调失败 meta=%s", {key: meta[key] for key in meta if key != "pass_info"})
 
 
 _NOT_REGION = {
@@ -590,9 +603,19 @@ class GoofishCollector:
         region_hint: str = "",
         storage_filters: list[tuple[str, list[str]]] | None = None,
         scroll_pages: int = 0,
+        on_items: ItemCallback | None = None,
     ) -> CollectResult:
-        """每款机型只打开一次搜索页，再逐个切换容量并读取「新发」第一页。"""
+        """每款机型只打开一次搜索页，再逐个切换容量并读取「新发」第一页。
+
+        每翻一屏就把新关联到的商品通过 ``on_items`` 交给调用方，边搜边判价、推送。
+        """
         result = CollectResult(items=[])
+
+        def add_pass(entry: dict[str, Any]) -> None:
+            result.passes.append(entry)
+            emit_safely(on_items, pass_info=entry, storage=entry.get("storage"))
+
+        emit_safely(on_items, stage="打开搜索页")
         logger.info(
             "采集开始 keyword=%s region=%s capacities=%s sort=新发 scroll_pages=%s",
             keyword, region_hint or "未指定", [storage for storage, _ in storage_filters or []], scroll_pages,
@@ -630,6 +653,7 @@ class GoofishCollector:
             logger.info("闲鱼搜索页就绪 keyword=%s method=deep-link", keyword)
 
         if region_steps:
+            emit_safely(on_items, stage=f"确认地区 {region_hint}")
             city_confirmed, search_city, slot = region_context_matches(search_nodes, region_hint)
             logger.info(
                 "地区二次确认 configured=%s search_bar=%s result_tab=%s confirmed=%s",
@@ -673,6 +697,8 @@ class GoofishCollector:
         for capacity_index, (storage, filter_steps) in enumerate(capacity_filters):
             label = "新发"
             actions = list(setup_actions)
+            storage_label = (storage if storage.endswith("T") else f"{storage}G") if storage else "全部容量"
+            emit_safely(on_items, stage=f"切换容量 {storage_label}", storage=storage or None)
             if filter_steps:
                 # Use the quick-filter category directly. The broad 「筛选」 button is
                 # unnecessary and can toggle a different panel. The picker is multi-select:
@@ -723,7 +749,7 @@ class GoofishCollector:
                 filter_success.append(applied)
                 if not applied:
                     filter_errors.append(f"{storage}：{filter_error}")
-                    result.passes.append({
+                    add_pass({
                         "label": label, "storage": storage, "filter_applied": False,
                         "observed": 0, "cards": 0, "exposures": 0, "actions": actions,
                         "items": [], "error": filter_error,
@@ -743,25 +769,47 @@ class GoofishCollector:
                 logger.warning("A11y 排序失败 target=%s error=%s", label, exc)
                 actions.append({"action": "点击排序", "target": label, "success": False, "error": str(exc)})
                 message = f"找不到按钮：{exc}"
-                result.passes.append({
+                add_pass({
                     "label": label, "storage": storage, "filter_applied": bool(filter_steps),
                     "observed": 0, "actions": actions, "items": [], "error": message,
                 })
                 continue
             await asyncio.sleep(4)
-            cards = await self._read_first_page(keyword, region_hint, scroll_pages)
+            emitted: set[str] = set()
+
+            def tag(values: list[dict[str, Any]]) -> list[dict[str, Any]]:
+                for value in values:
+                    value.setdefault("source_pass", label)
+                    value["source_storage"] = storage or None
+                return values
+
+            def emit_new(values: list[dict[str, Any]], stage: str) -> None:
+                fresh = [value for value in values if value["item_id"] not in emitted]
+                emitted.update(value["item_id"] for value in fresh)
+                emit_safely(
+                    on_items, [dict(value) for value in fresh], stage=stage, storage=storage or None,
+                    region_applied=result.region_applied, filter_applied=bool(filter_steps),
+                )
+
+            async def on_screen(cards_so_far: list[VisibleCard], page: int) -> None:
+                if on_items is None:
+                    return
+                exposures_now, _ = await asyncio.to_thread(self.exposures.read_after, start_row, keyword)
+                emit_new(tag(self._correlate(exposures_now, cards_so_far)),
+                         f"读取 {storage_label} 第 {page + 1}/{scroll_pages + 1} 屏")
+
+            cards = await self._read_first_page(keyword, region_hint, scroll_pages, on_screen)
             exposures, _ = await asyncio.to_thread(self.exposures.read_after, start_row, keyword)
-            items = self._correlate(exposures, cards)
+            items = tag(self._correlate(exposures, cards))
+            emit_new(items, f"{storage_label} 读取完成")
             for item in items:
-                item.setdefault("source_pass", label)
-                item["source_storage"] = storage or None
                 existing = merged.get(item["item_id"])
                 if existing is None:
                     merged[item["item_id"]] = item
                 elif existing.get("source_storage") != storage:
                     # 同一商品出现在多个容量结果里时，不用筛选容量替标题补容量，避免错误判价。
                     existing["source_storage"] = None
-            result.passes.append(
+            add_pass(
                 {
                     "label": label,
                     "storage": storage or None,
@@ -794,7 +842,7 @@ class GoofishCollector:
                     await asyncio.sleep(1)
                     logger.info("A11y 已返回列表顶部，准备切换下一容量 current=%s", storage)
                 except Exception as exc:
-                    result.passes.append({
+                    add_pass({
                         "label": label,
                         "storage": capacity_filters[capacity_index + 1][0],
                         "filter_applied": False,
@@ -815,8 +863,13 @@ class GoofishCollector:
         logger.info("采集结束 keyword=%s total_items=%d warnings=%s", keyword, len(result.items), result.warnings or "无")
         return result
 
-    async def _read_first_page(self, keyword: str, region_hint: str, scroll_pages: int) -> list[VisibleCard]:
-        """读当前屏，再向下翻屏若干次，把第一页的卡片都收集起来（按标题 + 价格去重）。"""
+    async def _read_first_page(
+        self, keyword: str, region_hint: str, scroll_pages: int, on_screen: Callable[..., Any] | None = None,
+    ) -> list[VisibleCard]:
+        """读当前屏，再向下翻屏若干次，把第一页的卡片都收集起来（按标题 + 价格去重）。
+
+        每读完一屏调用 ``on_screen(目前的卡片, 第几屏)``，用于实时关联并交出新商品。
+        """
         cards: dict[tuple[str, float], VisibleCard] = {}
         for page in range(scroll_pages + 1):
             if page:
@@ -827,6 +880,11 @@ class GoofishCollector:
                 await asyncio.sleep(2)
             for card in visible_cards_from_nodes(await self.accessibility.nodes(), keyword, region_hint):
                 cards.setdefault((card.title, card.price), card)
+            if on_screen is not None:
+                try:
+                    await on_screen(list(cards.values()), page)
+                except Exception:
+                    logger.exception("实时关联失败 page=%s", page)
         return list(cards.values())
 
     async def _apply(

@@ -59,7 +59,8 @@ def test_api_flow_rules_targets_and_injected_items(tmp_path, monkeypatch):
         assert target["units"][0]["storage"] == "256"
         client.put("/api/targets/15 Pro", json={"enabled": False, "storage": "256"})
         target = next(t for t in client.get("/api/targets").json() if t["model"] == "15 Pro")
-        assert target["enabled"] is True and target["units"][0]["enabled"] is False
+        # 15 Pro 只有 256G 一个容量：容量全部停用时机型也显示为未启用
+        assert target["enabled"] is False and target["units"][0]["enabled"] is False
         assert client.put("/api/targets/15 Pro", json={"enabled": False}).json()["enabled"] is False
         assert next(t for t in client.get("/api/targets").json() if t["model"] == "15 Pro")["enabled"] is False
         assert client.post("/api/targets/15 Pro/run?storage=999").status_code == 404
@@ -153,3 +154,59 @@ def test_series_and_model_selection_cascades_to_all_capacities(tmp_path, monkeyp
         client.put("/api/targets/17 Pro", json={"enabled": False}).raise_for_status()
         targets = {item["model"]: item for item in client.get("/api/targets").json()}
         assert all(not unit["enabled"] for unit in targets["17 Pro"]["units"])
+
+
+        # 取消整个系列后，仍可单独勾选其中的某个容量或机型
+        client.put("/api/target-series/17", json={"enabled": False}).raise_for_status()
+        client.put("/api/targets/17 Pro", json={"enabled": True, "storage": "256"}).raise_for_status()
+        targets = {item["model"]: item for item in client.get("/api/targets").json()}
+        assert [unit["enabled"] for unit in targets["17 Pro"]["units"]] == [True, False]
+        assert targets["17 Pro"]["enabled"] is True and targets["17"]["enabled"] is False
+        client.put("/api/targets/17", json={"enabled": True}).raise_for_status()
+        assert {item["model"]: item for item in client.get("/api/targets").json()}["17"]["enabled"] is True
+
+        # 旧版本保存的系列级 / 机型级停用项：勾选子项时自动展开
+        rules = client.get("/api/rules").json()
+        rules["disabled_models"] = ["@series:17", "16"]
+        client.put("/api/rules", json=rules).raise_for_status()
+        client.put("/api/targets/17 Pro", json={"enabled": True, "storage": "512"}).raise_for_status()
+        client.put("/api/targets/16", json={"enabled": True, "storage": "128"}).raise_for_status()
+        targets = {item["model"]: item for item in client.get("/api/targets").json()}
+        assert [unit["enabled"] for unit in targets["17 Pro"]["units"]] == [False, True]
+        assert targets["17"]["enabled"] is False and targets["16"]["enabled"] is True
+        assert client.get("/api/rules").json()["disabled_models"] == ["17 Pro|256", "17|256"]
+
+
+def test_quote_deductions_and_reparse_keep_manual_prices(tmp_path, monkeypatch):
+    from app_monitor.quotes import QuoteDeduction, QuoteEntry
+
+    monkeypatch.setattr(api.database, "path", tmp_path / "deductions.sqlite3")
+    monkeypatch.setattr(api, "refresh_quotes_if_stale", _noop)
+    monkeypatch.setattr(api, "backfill_deductions", _noop)
+    with TestClient(api.app) as client:
+        batch_id = add_quotes(api.database, [("15 Pro", "256", "小花", 4000), ("15 Pro", "256", "靓机", 4300)])
+        image = tmp_path / "quote.png"
+        image.write_bytes(b"png")
+        with api.database.connect() as connection:
+            connection.execute("UPDATE quote_batches SET image_path=? WHERE id=?", (str(image), batch_id))
+            connection.execute("UPDATE quote_entries SET price=4100, source='manual' WHERE grade='小花'")
+
+        def fake_parse(path):
+            return (
+                [QuoteEntry("15 Pro", "256", "小花", 3900), QuoteEntry("15 Pro", "256", "靓机", 4350)],
+                [QuoteDeduction("15 Pro", 0, 0, "港澳版-600-800", "港澳版", 600, 800),
+                 QuoteDeduction("15 Pro", 1, 0, "后盖破当大花收", "后盖破当大花收", kind="note")],
+            )
+
+        monkeypatch.setattr(api.quote_service.parser, "parse_image", fake_parse)
+        result = client.post("/api/quotes/reparse").json()
+        assert result[0]["deduction_count"] == 2
+
+        deductions = client.get("/api/quotes/deductions", params={"model": "15 Pro"}).json()
+        assert [d["name"] for d in deductions["no_warranty"]] == ["港澳版", "后盖破当大花收"]
+        assert deductions["no_warranty"][0]["amount_max"] == 800 and deductions["warranty"] == []
+
+        product = client.get("/api/apple-products").json()[0]
+        assert product["grades"]["小花"]["no_warranty"]["price"] == 4100  # 手动校正保留
+        assert product["grades"]["靓机"]["no_warranty"]["price"] == 4350  # OCR 结果更新
+        assert client.get("/api/quotes/status").json()[0]["deduction_count"] == 2

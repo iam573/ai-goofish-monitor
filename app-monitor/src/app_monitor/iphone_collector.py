@@ -17,7 +17,7 @@ from urllib.parse import unquote, urlparse
 import httpx
 
 from .appium_server import ensure_appium_server
-from .collector import CollectResult, guess_region
+from .collector import CollectResult, ItemCallback, emit_safely, guess_region
 from .config import Settings
 from .matching import normalize_search_text
 
@@ -343,17 +343,20 @@ class IPhoneCollector:
         self, udid: str, os_version: str, keyword: str, region_hint: str,
         region_steps: list[str], storages: list[str], scroll_pages: int,
         is_candidate: Callable[[dict[str, Any], bool, str], bool],
+        on_items: ItemCallback | None = None,
     ) -> CollectResult:
         return await asyncio.to_thread(
             self._collect, udid, os_version, keyword, region_hint, region_steps,
-            storages, scroll_pages, is_candidate,
+            storages, scroll_pages, is_candidate, on_items,
         )
 
     def _collect(
         self, udid: str, os_version: str, keyword: str, region_hint: str,
         region_steps: list[str], storages: list[str], scroll_pages: int,
         is_candidate: Callable[[dict[str, Any], bool, str], bool],
+        on_items: ItemCallback | None = None,
     ) -> CollectResult:
+        """在线程里运行；每拿到一件候选商品的链接就通过 ``on_items`` 交出，边搜边判价、推送。"""
         from appium import webdriver
         from appium.options.ios import XCUITestOptions
 
@@ -373,6 +376,11 @@ class IPhoneCollector:
         if os_version:
             capabilities["appium:platformVersion"] = os_version
         result = CollectResult(items=[])
+
+        def add_pass(entry: dict[str, Any]) -> None:
+            result.passes.append(entry)
+            emit_safely(on_items, pass_info=entry, storage=entry.get("storage"))
+
         setup_actions: list[dict[str, Any]] = []
         driver = None
         try:
@@ -411,6 +419,8 @@ class IPhoneCollector:
                                           "error": error, "actions": setup_actions})
                     return result  # Never collect nationwide cards as if the city filter succeeded.
             for storage in storages:
+                storage_label = storage if storage.endswith("T") else f"{storage}G"
+                emit_safely(on_items, stage=f"iPhone 切换容量 {storage_label}", storage=storage)
                 actions = setup_actions.copy()
                 setup_actions = []
                 seen: set[tuple[str, float, str]] = set()
@@ -429,6 +439,8 @@ class IPhoneCollector:
                             driver.execute_script("mobile: swipe", {"direction": "up", "velocity": 900})
                             time.sleep(1)
                             actions.append({"action": "上滑列表", "target": f"第 {page + 1} 屏", "success": True})
+                        emit_safely(on_items, stage=f"iPhone 读取 {storage_label} 第 {page + 1}/{max(0, scroll_pages) + 1} 屏",
+                                    storage=storage)
                         cards = parse_cards(driver.page_source, region_hint)
                         logger.info("iPhone 列表 udid=%s storage=%s page=%s cards=%s", udid[-6:], storage, page, len(cards))
                         for card in cards:
@@ -460,6 +472,9 @@ class IPhoneCollector:
                                         "image_urls": [], "source_storage": storage, "source_pass": "新发"}
                                 pass_items.append(item)
                                 result.items.append(item)
+                                emit_safely(on_items, [dict(item)], storage=storage,
+                                            region_applied=result.region_applied, filter_applied=True,
+                                            stage=f"iPhone 读取 {storage_label}")
                                 actions.append({"action": "复制候选链接", "target": card.title[:40],
                                                 "success": True})
                                 logger.info("iPhone 候选关联 item_id=%s price=%s title=%s",
@@ -469,7 +484,7 @@ class IPhoneCollector:
                     actions.append({"action": "容量筛选或采集", "target": storage,
                                     "success": False, "error": error})
                     logger.error("iPhone 容量采集失败 storage=%s error=%s", storage, error)
-                result.passes.append({
+                add_pass({
                     "label": "新发", "storage": storage, "filter_applied": error is None,
                     "region_applied": result.region_applied, "observed": len(pass_items),
                     "cards": len(seen), "candidates": candidates, "actions": actions,

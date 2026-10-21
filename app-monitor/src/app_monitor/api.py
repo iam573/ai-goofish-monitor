@@ -24,6 +24,7 @@ from .quotes import (
     GRADE_COLUMNS,
     QuoteService,
     grouped_apple_products,
+    latest_deductions,
     quote_status,
 )
 from .regions import default_region_path
@@ -32,7 +33,7 @@ from .rules import (
     load_rules,
     save_rules,
     search_targets,
-    series_of,
+    set_targets_enabled,
 )
 from .service import MonitorService, unit_key
 
@@ -49,6 +50,15 @@ scheduler = AsyncIOScheduler(timezone=settings.timezone)
 def quote_time_reached(now: datetime | None = None) -> bool:
     now = now or datetime.now().astimezone()
     return (now.hour, now.minute) >= (settings.quote_hour, settings.quote_minute)
+
+
+async def backfill_deductions() -> None:
+    """升级后首次启动时，给已有的最新报价补识别扣费项；失败不影响服务。"""
+    await asyncio.sleep(5)
+    try:
+        await quote_service.backfill_deductions()
+    except Exception:
+        pass
 
 
 async def refresh_quotes_if_stale() -> None:
@@ -81,8 +91,10 @@ async def lifespan(_: FastAPI):
     scheduler.start()
     # 启动补偿：服务在报价时间之后才启动时，立即检查一次当天报价。
     startup = asyncio.create_task(refresh_quotes_if_stale())
+    backfill = asyncio.create_task(backfill_deductions())
     yield
     startup.cancel()
+    backfill.cancel()
     scheduler.shutdown(wait=False)
 
 
@@ -165,6 +177,7 @@ async def overview() -> dict[str, Any]:
         "quote_last_check": database.state_get("quote_last_check"),
         "schedule": monitor_service.schedule_state(),
         "busy": monitor_service.busy,
+        "live": monitor_service.live,
         "last_run": monitor_service._run_dict(last_run) if last_run else None,
         "track_db_available": settings.track_db.exists(),
         "notification_channels": notification_service.configured_channels,
@@ -261,36 +274,16 @@ class TargetPayload(BaseModel):
 
 @app.put("/api/targets/{model}")
 async def update_target(model: str, payload: TargetPayload) -> dict[str, Any]:
-    """机型勾选启用全部容量；容量按钮只切换该容量。"""
-    rules = load_rules(database)
-    key = f"{model}|{payload.storage}" if payload.storage else model
-    disabled = set(rules.disabled_models)
-    if payload.enabled:
-        disabled.discard(key)
-        if not payload.storage:
-            disabled = {value for value in disabled if not value.startswith(f"{model}|")}
-    else:
-        disabled.add(key)
-    rules.disabled_models = sorted(disabled)
+    """勾选机型启用其全部容量；带 storage 时只切换该容量。系列 / 机型状态由容量推导。"""
+    rules = set_targets_enabled(database, load_rules(database), payload.enabled, model=model, storage=payload.storage)
     save_rules(database, rules)
     return {"model": model, "storage": payload.storage, "enabled": payload.enabled}
 
 
 @app.put("/api/target-series/{series}")
 async def update_target_series(series: int, payload: TargetPayload) -> dict[str, Any]:
-    """系列勾选启用全部机型与容量；取消勾选停用整个系列。"""
-    rules = load_rules(database)
-    key = f"@series:{series}"
-    disabled = set(rules.disabled_models)
-    if payload.enabled:
-        disabled.discard(key)
-        disabled = {
-            value for value in disabled
-            if value.startswith("@series:") or series_of(value.split("|", 1)[0]) != series
-        }
-    else:
-        disabled.add(key)
-    rules.disabled_models = sorted(disabled)
+    """勾选系列启用其全部机型与容量；取消勾选停用全部容量（之后仍可单独勾选子项）。"""
+    rules = set_targets_enabled(database, load_rules(database), payload.enabled, series=series)
     save_rules(database, rules)
     return {"series": series, "enabled": payload.enabled}
 
@@ -359,6 +352,18 @@ async def quotes_status() -> list[dict[str, Any]]:
 @app.post("/api/quotes/sync")
 async def sync_quotes() -> list[dict[str, Any]]:
     return await quote_service.sync_all()
+
+
+@app.post("/api/quotes/reparse")
+async def reparse_quotes() -> list[dict[str, Any]]:
+    """对最新的无保 / 有保原图重新识别价格和扣费项（手动校正过的价格保持不变）。"""
+    return await quote_service.reparse_latest()
+
+
+@app.get("/api/quotes/deductions")
+async def quote_deductions(model: str = Query(min_length=1, max_length=40)) -> dict[str, Any]:
+    """估价用：该机型在最新报价里的扣费项，按无保 / 有保分开。"""
+    return latest_deductions(database, model)
 
 
 @app.get("/api/quotes/batches")
@@ -473,7 +478,15 @@ async def runs(
         rows = connection.execute(
             f"{_RUN_COUNTS} {where} ORDER BY r.id DESC LIMIT ?", [*params, limit]
         ).fetchall()
-    return [monitor_service._run_dict(row) for row in rows]
+    return [_with_live(monitor_service._run_dict(row)) for row in rows]
+
+
+def _with_live(run: dict[str, Any]) -> dict[str, Any]:
+    """正在进行的搜索附上当前步骤（如「读取 256G 第 2/3 屏」）。"""
+    live = monitor_service.live
+    if live and live.get("run_id") == run.get("id") and run.get("ok") is None:
+        run["live"] = {key: live[key] for key in ("stage", "observed", "matched")}
+    return run
 
 
 @app.get("/api/runs/{run_id}")
@@ -492,7 +505,7 @@ async def run_detail(run_id: int) -> dict[str, Any]:
     codes: dict[str, int] = {}
     for item in items:
         codes[item["code"] or "other"] = codes.get(item["code"] or "other", 0) + 1
-    return {**monitor_service._run_dict(row), "items": items, "codes": codes}
+    return {**_with_live(monitor_service._run_dict(row)), "items": items, "codes": codes}
 
 
 @app.get("/api/items")

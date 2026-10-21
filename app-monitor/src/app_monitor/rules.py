@@ -191,8 +191,9 @@ def search_targets(database: Database, rules: Rules) -> list[dict[str, Any]]:
     targets = []
     for model in sorted(storages, key=model_sort_key):
         ordered = sorted(storages[model], key=_storage_value)
-        enabled = rules.is_enabled(model)
-        units = [{"storage": value, "enabled": enabled and rules.is_enabled(model, value)} for value in ordered]
+        units = [{"storage": value, "enabled": rules.is_enabled(model, value)} for value in ordered]
+        # 机型是否启用由容量决定：至少一个容量在监控即为启用（父级勾选状态从子项推导）
+        enabled = any(unit["enabled"] for unit in units)
         targets.append(
             {
                 "model": model,
@@ -205,6 +206,59 @@ def search_targets(database: Database, rules: Rules) -> list[dict[str, Any]]:
             }
         )
     return targets
+
+
+def expand_disabled(rules: Rules, targets: list[dict[str, Any]]) -> set[str]:
+    """把系列级（``@series:15``）和机型级（``15 Pro``）停用项展开成具体容量（``15 Pro|256``）。
+
+    勾选状态只记在容量这一层，系列和机型的勾选状态由容量推导；这样停用整个系列后，
+    仍然可以单独勾选其中某个机型或容量。报价表里已没有的机型保留原停用项。
+    """
+    storages = {target["model"]: target["storages"] for target in targets}
+    expanded: set[str] = set()
+    for key in rules.disabled_models:
+        if key.startswith("@series:"):
+            try:
+                series = int(key.split(":", 1)[1])
+            except ValueError:
+                expanded.add(key)
+                continue
+            models = [model for model in storages if series_of(model) == series]
+            if not models:
+                expanded.add(key)
+            for model in models:
+                expanded.update(f"{model}|{storage}" for storage in storages[model])
+        elif "|" not in key and key in storages:
+            expanded.update(f"{key}|{storage}" for storage in storages[key])
+        else:
+            expanded.add(key)
+    return expanded
+
+
+def set_targets_enabled(
+    database: Database, rules: Rules, enabled: bool, *, series: int | None = None,
+    model: str | None = None, storage: str | None = None,
+) -> Rules:
+    """勾选 / 取消勾选一个系列、机型或容量；只改动容量层的停用项。"""
+    targets = search_targets(database, rules)
+    disabled = expand_disabled(rules, targets)
+    if series is not None:
+        keys = {f"{t['model']}|{s}" for t in targets if t["series"] == series for s in t["storages"]}
+        disabled.discard(f"@series:{series}")
+    elif model is not None:
+        target = next((t for t in targets if t["model"] == model), None)
+        storages = [storage] if storage else (target["storages"] if target else [])
+        keys = {f"{model}|{value}" for value in storages}
+        if not storage:
+            disabled.discard(model)
+    else:
+        raise ValueError("需要指定系列或机型")
+    if enabled:
+        disabled -= keys
+    else:
+        disabled |= keys
+    rules.disabled_models = sorted(disabled)
+    return rules
 
 
 def search_units(database: Database, rules: Rules) -> list[dict[str, Any]]:
