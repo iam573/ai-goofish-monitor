@@ -52,7 +52,7 @@
 
 ## 本地启动
 
-需要 macOS、Python 3.10 以上和 Xcode Command Line Tools。首次运行：
+需要 macOS、Python 3.10 以上和完整 Xcode（仅 Command Line Tools 不包含发现 iPhone 所需的 devicectl）。安装并首次打开 Xcode 完成组件安装后，运行 `sudo xcode-select --switch /Applications/Xcode.app/Contents/Developer`，再用 `xcrun devicectl list devices` 确认手机已连接。首次运行：
 
 ```bash
 cd app-monitor
@@ -70,6 +70,8 @@ cd app-monitor
 npm ci
 APPIUM_HOME="$PWD/.appium" npx appium driver install xcuitest@12.13.3
 ```
+
+如果报价 OCR 提示 `SDK is not supported by the compiler`，先核对 `swift --version` 和 SDK 里的 `swift-compiler-version`。可在 `.env` 配置 `APP_MONITOR_SWIFT_SDK=/完整路径/MacOSX版本.sdk`，启动后报价和鱼小铺标识 OCR 都会显式使用这个 SDK，并覆盖子进程继承的 `SDKROOT`。该设置不修改系统工具链选择；留空保留原行为。SDK 必须与本机 Swift 编译器匹配，不能直接照抄其他服务器的路径。
 
 手机需要打开开发者模式、信任本机签名的 WebDriverAgent，并已有可用的 WDA 构建。在 `.env` 中设置 `IOS_WDA_BUNDLE_ID` 和 `IOS_WDA_DERIVED_DATA_PATH`（本机真机验证使用 `usePrebuiltWDA`）。勾选手机后，程序会复用已运行的 Appium 服务；本机 4723 端口没有服务时会启动仓库内安装的 Appium。运行采集前请关闭该手机的 Appium Inspector 会话，避免两个会话争用同一设备。未连接的手机保留勾选，但本轮会记为设备失败，不影响其他勾选手机。
 

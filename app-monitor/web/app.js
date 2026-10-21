@@ -176,7 +176,7 @@ function renderDevices() {
       <input type="checkbox" value="${escapeHtml(device.id)}" ${device.selected ? "checked" : ""} />
       <span class="device-glyph">${deviceIcons.ios}</span>
       <span class="device-info"><b>${escapeHtml(device.name)}</b>
-        <small>${meta} · <span class="${device.connected ? "online-text" : "warn-text"}">${device.connected ? "已连接" : "未连接"}</span></small></span>
+        <small>${meta} · <span class="${device.connected ? "online-text" : "warn-text"}">${escapeHtml(device.connection_status || (device.connected ? "已连接" : "未连接"))}</span></small></span>
       ${selected.length > 1 && order >= 0 ? `<em class="device-order" title="采集顺序">${order + 1}</em>` : ""}
     </label>`;
   }).join("") || `<p class="hint">没有检测到 iPhone；Mac 采集已禁用。</p>`;

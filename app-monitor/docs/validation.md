@@ -316,3 +316,25 @@ Mac 采集已禁用，历史实现保留但不参与设备发现、采集或失�
 隔离服务模拟首次OCR失败，页面正确展示原图和具体错误；相同图片再同步且解析零条时提示“图片已下载，但未识别到有效报价”，没有显示“没有变化”；再次同步同图成功后显示有效报价。未调用真实报价接口、修改生产数据或发送通知。
 
 验证结果：`uv run pytest -q` 为199 passed，含旧库迁移、同图失败恢复/空结果重试、并发等待、手动价格保留和迁移图片路径恢复；`node --check web/app.js`、`git diff --check` 通过。修复只在本地完成，新服务器需部署更新并重启后生效。
+
+
+## 25. 新 Mac 的 Swift/SDK 错配与残留模块定义（2026-10-21）
+
+SSH 检查新服务器：运行版本已由用户更新至019392d；两类报价图片存在，但两个批次均为failed、0条。CLT安装收据为16.4，Swift为6.1.2，继承的SDKROOT与默认SDK查询却指向26.2（其标准库由Swift6.2构建）；机器上已有与Swift6.1.2精确匹配的15.5 SDK。
+
+显式选择15.5 SDK后最小Swift程序正常，但Foundation导入暴露SwiftBridging重复定义：`usr/include/swift/module.modulemap`为2023年的残留文件，不在当前CLT安装收据中；`bridging.modulemap`为当前安装包文件，两者模块内容重复。远端保留了旧文件备份，移开残留定义后Foundation、Vision与AppKit导入成功（36.9秒）；没有删除SDK或报价数据库。
+
+代码新增可选APP_MONITOR_SWIFT_SDK，报价解析和卖家徽章OCR共用Swift启动器；设置后同时传入-sdk并覆盖子进程SDKROOT，避免父进程环境再次带入错误SDK。未配置时保持系统原行为，配置路径不存在时给出明确错误。验证SDK配置不会修改父进程环境，测试覆盖报价服务传入和实际切片OCR调用参数。
+
+
+远端恢复验证：使用SDK15.5重新识别已下载原图，无保550条报价/574条备注，有保231条报价/95条备注，合并124个机型容量组合。随后在服务环境中固定SDKROOT15.5并优雅重启，再由服务自身的重新识别接口复测，两批仍为parsed且parse_error为空；服务健康检查通过。远端只修改忽略的.env和.runtime启动/日志文件，Git工作区保持干净；后续可用.runtime/start-server.sh按相同SDK配置启动，运行日志在.runtime/server.log。
+
+本地新增SDK配置的回归结果为203 passed，`git diff --check`通过；新SDK启动器代码尚未提交或部署，远端当前服务019392d依靠固定SDKROOT运行。相关工具选择方式参考 [Apple命令行工具配置](https://developer.apple.com/documentation/xcode/configuring-command-line-tools-settings)。
+
+## 26. 新服务器 Xcode 配对与设备列表兼容（2026-10-21）
+
+远端安装完整 Xcode 26.3 并切换开发目录后，devicectl 已能发现 USB iPhone，但起初 pairingState=pairingInProgress、tunnelState=disconnected；配对未完成时返回的硬件信息缺少 reality。旧代码要求 reality=physical，将这类待配对手机直接丢弃；旧连接状态又只读取 properties.connection.state，不能识别实际返回的 connectionProperties.tunnelState。
+
+修复：明确的模拟设备仍排除；缺少 reality 时，只有 iOS 平台、iPhone 产品型号及 UDID 齐全才纳入列表。连接状态兼容两种结构，配对未完成不能显示在线；页面和运行失败信息显示配对中/未配对原因。测试覆盖旧结构、待配对、已连接、断开、未信任、模拟器及 iPad，完整测试为204 passed，前端语法检查通过。
+
+用户完成 Xcode/手机配对后，远端实测 paired、tunnel connected、开发者模式 enabled、DDI 服务可用，Xcode 首次启动组件检查成功。已备份并更新远端设备发现、状态展示及采集错误说明三个文件，再优雅重启空闲服务；本轮未触发商品搜索或推送。远端仍未安装项目 Appium/XCUITest 驱动，也没有配置 WDA bundle ID 或预构建目录；设备发现成功不代表自动化会话已验证。Swift SDK 启动器的本地改动仍未部署。

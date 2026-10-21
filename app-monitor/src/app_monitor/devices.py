@@ -22,6 +22,7 @@ class Device:
     connected: bool
     udid: str = ""
     os_version: str = ""
+    connection_status: str = ""
 
     def as_dict(self, selected: bool = False) -> dict:
         return {**self.__dict__, "selected": selected}
@@ -41,14 +42,29 @@ def discover_devices() -> list[Device]:
     for raw in payload.get("result", {}).get("devices", []):
         hardware = raw.get("hardwareProperties") or {}
         props = raw.get("deviceProperties") or {}
-        connection = (raw.get("properties") or {}).get("connection") or {}
+        connection = raw.get("connectionProperties") or (raw.get("properties") or {}).get("connection") or {}
         udid = str(hardware.get("udid") or "")
-        if hardware.get("deviceType") != "iPhone" or hardware.get("reality") != "physical" or not udid:
+        reality = hardware.get("reality")
+        physical = reality == "physical" or (
+            reality is None and hardware.get("platform") == "iOS"
+            and str(hardware.get("productType") or "").startswith("iPhone")
+        )
+        if hardware.get("deviceType") != "iPhone" or not physical or not udid:
             continue
+        pairing = connection.get("pairingState")
+        connected = (connection.get("tunnelState") == "connected" or connection.get("state") == "connected")
+        if pairing and pairing != "paired":
+            connected = False
+        status = "已连接" if connected else "未连接"
+        if pairing == "pairingInProgress":
+            status = "配对中，请在 Xcode 和手机上完成确认"
+        elif pairing and pairing != "paired":
+            status = "未配对，请在 Xcode 中连接并信任设备"
         devices.append(Device(
             id=f"ios:{udid}", name=str(props.get("name") or hardware.get("marketingName") or "iPhone"),
-            kind="ios", connected=connection.get("state") == "connected",
+            kind="ios", connected=connected,
             udid=udid, os_version=str(props.get("osVersionNumber") or ""),
+            connection_status=status,
         ))
     return devices
 

@@ -18,6 +18,7 @@ from typing import Any, Callable
 from urllib.parse import unquote, urlparse
 
 import httpx
+from .swift_runtime import run_swift
 from PIL import Image
 
 from .appium_server import ensure_appium_server
@@ -197,7 +198,7 @@ def detail_seller(source: str, badge_texts: dict[tuple[int, ...], str] | None = 
     return {"seller_name": _text(name), "is_fish_shop": True if fish_shop else (None if ambiguous else False)}
 
 
-def recognize_seller_badges(png: bytes, source: str, badges: list[ET.Element]) -> dict[tuple[int, ...], str]:
+def recognize_seller_badges(png: bytes, source: str, badges: list[ET.Element], *, sdk: str = "") -> dict[tuple[int, ...], str]:
     """OCR only unnamed seller badges; full screenshots remain in memory."""
     root = ET.fromstring(source)
     app = next(root.iter("XCUIElementTypeApplication"), root)
@@ -215,8 +216,7 @@ def recognize_seller_badges(png: bytes, source: str, badges: list[ET.Element]) -
                                min(image.width, (x + width + 2) * scale_x), min(image.height, (y + height + 2) * scale_y)))
             path = Path(temp) / f"badge-{index}.png"
             crop.resize((crop.width * 3, crop.height * 3), Image.Resampling.LANCZOS).save(path)
-            result = subprocess.run(["swift", str(ROOT / "scripts" / "vision_ocr.swift"), str(path)],
-                                    capture_output=True, text=True, timeout=15, check=False)
+            result = run_swift(ROOT / "scripts" / "vision_ocr.swift", [str(path)], sdk=sdk, timeout=15)
             if result.returncode == 0:
                 texts = [parts[5] for line in result.stdout.splitlines() if len(parts := line.split("\t", 5)) == 6]
                 labels[rect] = "".join(texts)
@@ -1001,7 +1001,7 @@ class IPhoneCollector:
                 try:
                     _, badges = _seller_header(source)
                     images = [node for node in badges if node.tag == "XCUIElementTypeImage" and not _text(node)]
-                    labels = recognize_seller_badges(driver.get_screenshot_as_png(), source, images)
+                    labels = recognize_seller_badges(driver.get_screenshot_as_png(), source, images, sdk=self.settings.swift_sdk)
                     seller = detail_seller(source, labels)
                     seller_method = "页面树名称 + 标识局部OCR"
                 except Exception as exc:

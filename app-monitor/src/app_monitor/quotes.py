@@ -4,7 +4,6 @@ import asyncio
 import hashlib
 import logging
 import re
-import subprocess
 import tempfile
 from dataclasses import dataclass
 from datetime import datetime
@@ -17,6 +16,7 @@ from PIL import Image
 
 from .config import ROOT, Settings
 from .db import Database, utc_now
+from .swift_runtime import run_swift
 
 logger = logging.getLogger(__name__)
 
@@ -177,8 +177,9 @@ class QuoteImageParser:
     slice_height = 1250
     slice_step = 1200
 
-    def __init__(self, script: Path | None = None):
+    def __init__(self, script: Path | None = None, sdk: str = ""):
         self.script = script or ROOT / "scripts" / "vision_ocr.swift"
+        self.sdk = sdk
 
     def parse_image(self, image_path: Path) -> tuple[list[QuoteEntry], list[QuoteDeduction]]:
         """一次识别同时得到价格和扣费项。"""
@@ -202,10 +203,7 @@ class QuoteImageParser:
                     source.crop((0, top, width, bottom)).save(crop_path)
                     slices.append((crop_path, top, bottom - top))
 
-                command = ["swift", str(self.script), *[str(item[0]) for item in slices]]
-                result = subprocess.run(
-                    command, capture_output=True, text=True, timeout=180, check=False
-                )
+                result = run_swift(self.script, [str(item[0]) for item in slices], sdk=self.sdk, timeout=180)
                 if result.returncode != 0:
                     raise RuntimeError(result.stderr.strip() or "Vision OCR 执行失败")
 
@@ -399,7 +397,7 @@ class QuoteService:
     def __init__(self, database: Database, settings: Settings):
         self.database = database
         self.settings = settings
-        self.parser = QuoteImageParser()
+        self.parser = QuoteImageParser(sdk=settings.swift_sdk)
         self._lock = asyncio.Lock()
 
     async def categories(self) -> list[dict[str, str]]:

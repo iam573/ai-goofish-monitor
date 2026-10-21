@@ -44,6 +44,7 @@ class Settings:
     ios_wda_bundle_id: str = os.environ.get("IOS_WDA_BUNDLE_ID", "").strip()
     ios_wda_derived_data_path: Path = _path_env("IOS_WDA_DERIVED_DATA_PATH", "/tmp/goofish-wda-probe")
     ai_api_key: str = os.environ.get("APP_MONITOR_AI_API_KEY", "").strip()
+    swift_sdk: str = os.environ.get("APP_MONITOR_SWIFT_SDK", "").strip()
     ntfy_topic_url: str = os.environ.get("NTFY_TOPIC_URL", "").strip()
     bark_url: str = os.environ.get("BARK_URL", "").strip()
     webhook_url: str = os.environ.get("WEBHOOK_URL", "").strip()

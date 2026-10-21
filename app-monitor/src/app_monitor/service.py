@@ -374,7 +374,8 @@ class MonitorService:
                 if not device_id.startswith("ios:") or (device and device.kind != "ios"):
                     raise RuntimeError("仅支持 iPhone；Mac 采集已禁用")
                 if device is None or not device.connected:
-                    raise RuntimeError("iPhone 未连接；已保留勾选，重连后可继续使用")
+                    status = device.connection_status if device else "未连接"
+                    raise RuntimeError(f"iPhone {status or '未连接'}；已保留勾选，重连后可继续使用")
                 part = await self.iphone_collector.collect(
                     device.udid, device.os_version, keyword, rules.region_city,
                     rules.region_steps, storages, rules.scroll_pages, is_candidate,
