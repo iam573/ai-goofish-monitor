@@ -86,7 +86,10 @@ async function loadOverview() {
   const quoteStep = {
     label: "① 每日报价",
     main: noWarranty?.quote_date ? `${noWarranty.quote_date.slice(5)} · ${noWarranty.entry_count} 条` : "尚未同步",
-    sub: quoteFresh ? `今天已更新 · 每天 ${value.quote_schedule} 起检查` : `等待今天的报价 · 每天 ${value.quote_schedule} 起检查`,
+    sub: noWarranty?.parse_status === "failed" ? "图片已下载，报价识别失败，请查看每日报价"
+      : noWarranty?.parse_status === "parsing" ? "图片已下载，正在识别报价"
+      : noWarranty?.parse_status === "needs_review" ? "图片已下载，尚未识别到有效报价"
+      : quoteFresh ? `今天已更新 · 每天 ${value.quote_schedule} 起检查` : `等待今天的报价 · 每天 ${value.quote_schedule} 起检查`,
     tone: quoteFresh ? "ok" : "warn",
   };
   const ruleStep = {
@@ -751,12 +754,14 @@ async function loadQuoteBatches() {
     if (!item.quote_date) return `<span class="batch-chip warn">${escapeHtml(item.category_name)} · 未同步</span>`;
     const ok = item.parse_status === "parsed";
     const fresh = item.fresh;
-    const label = `${item.category_name} · ${item.quote_date.slice(5)} · ${item.entry_count}条 · 扣费项${item.deduction_count ?? 0}条${ok ? "" : " · 需复核"}${fresh ? "" : " · 非今日"}`;
+    const statusLabel = {parsing:"识别中", failed:"识别失败", needs_review:"未识别到有效报价，需复核"}[item.parse_status] || "需复核";
+    const label = `${item.category_name} · ${item.quote_date.slice(5)} · ${item.entry_count}条 · 扣费项${item.deduction_count ?? 0}条${ok ? "" : ` · ${statusLabel}`}${fresh ? "" : " · 尚未取得今日有效报价"}`;
+    const error = item.parse_error ? `<span class="bad">${escapeHtml(item.parse_error)}</span>` : "";
     if (!item.image_available) return `<span class="batch-chip warn">${escapeHtml(label)} · 原图缺失</span>`;
     const image = `/api/quotes/batches/${encodeURIComponent(item.batch_id)}/image`;
     return `<a class="quote-image-card ${ok && fresh ? "" : "warn"}" href="${image}" target="_blank" rel="noopener noreferrer" title="打开${escapeHtml(item.category_name)}报价原图（抓取于 ${escapeHtml(formatTime(item.fetched_at))}）">
       <img src="${image}" alt="${escapeHtml(item.category_name)}报价原图缩略图" loading="lazy" />
-      <span>${escapeHtml(label)} · 打开原图 ↗</span>
+      <span>${escapeHtml(label)} · 打开原图 ↗</span>${error}
     </a>`;
   }).join("");
   const currentIds = new Set(statuses.map(item => item.batch_id));
@@ -1180,9 +1185,11 @@ document.querySelector("#sync-quote").addEventListener("click", async event => {
   try {
     const results = await api("/api/quotes/sync", { method: "POST" });
     const errors = results.filter(result => result.error);
+    const incomplete = results.filter(result => !result.error && (result.parse_status !== "parsed" || !Number(result.entry_count)));
     const count = results.reduce((sum, result) => sum + Number(result.entry_count || 0), 0);
     if (errors.length) toast(errors.map(result => result.error).join("；"), true);
-    else toast(results.some(result => result.updated) ? `同步完成，共识别 ${count} 条报价` : "报价没有变化");
+    else if (incomplete.length) toast(incomplete.map(result => `${result.category_name || result.category_id}：${result.parse_error || "图片已下载，但尚无有效报价，请重新识别"}`).join("；"), true);
+    else toast(results.some(result => result.updated) ? `同步完成，共有 ${count} 条有效报价` : `报价没有变化，已有 ${count} 条有效报价`);
     await Promise.all([loadQuoteBatches(), loadQuotes(), loadOverview(), loadTargets()]);
   } catch (error) { toast(error.message, true); }
   finally { button.disabled = false; button.textContent = "立即同步"; }
@@ -1257,10 +1264,13 @@ async function reparseQuotes(button) {
   try {
     const results = await api("/api/quotes/reparse", { method: "POST" });
     const errors = results.filter(result => result.error);
+    const incomplete = results.filter(result => !result.error && result.parse_status !== "parsed");
     deductionCache.clear();
     if (errors.length) toast(errors.map(result => result.error).join("；"), true);
+    else if (incomplete.length) toast(incomplete.map(result => result.parse_error || "原图未识别到有效报价，请核对原图").join("；"), true);
+    else if (!results.length) toast("还没有报价原图，请先立即同步", true);
     else toast(`已重新识别：${results.map(r => `${r.entry_count} 条报价、${r.deduction_count} 条扣费项`).join("；")}`);
-    await Promise.all([loadQuoteBatches(), loadQuotes()]);
+    await Promise.all([loadQuoteBatches(), loadQuotes(), loadOverview(), loadTargets()]);
     if (estimatorDialog.open) { await deductionsFor(estimator.model, true); renderEstimator(); }
   } catch (error) { toast(error.message, true); }
   finally { if (button) { button.disabled = false; button.textContent = label; } }

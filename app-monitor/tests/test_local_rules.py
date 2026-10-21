@@ -139,3 +139,49 @@ def test_stated_repair_without_price_rule_is_pending_not_free(quotes):
     assert result['status']=='pending' and any('换屏' in u for u in result['uncertainties'])
     result=price_facts(item,facts,quotes,[fee('换屏',300)],SmartConfig(),Rules(),'17','256')
     assert result['status']=='matched' and result['value_low']==4900
+
+
+@pytest.mark.parametrize('title,actual',[
+    ('女大自用i\u200bP\u200bh\u200bo\u200bn\u200be\u200b7P\u200bl\u200bu\u200bs\u200b 128G 原装 功能正常','7 Plus'),
+    ('个人闲置 iPhone 6 128G 金色 国行 插卡即用','6'),
+    ('苹果8Plus 128G 备用机','8 Plus'),
+    ('iPhone XR 128G 备用机','XR'),
+])
+def test_unquoted_explicit_model_never_inherits_search_target(title,actual):
+    quotes=[dict(id=1,model='16 Plus',storage='128',grade='靓机',price=3500)]
+    result=candidate_decision(listing('99新',198,title),Rules(),quotes,SmartConfig(),True,'128','16 Plus')
+    assert not result.matched and result.code=='other_model'
+    assert result.model==actual and result.storage=='128'
+
+
+def test_search_context_can_still_admit_a_genuinely_unspecified_model(quotes):
+    item=listing('99新',4500,'个人闲置手机 256G，电池健康96%')
+    assert candidate_decision(item,Rules(),quotes,SmartConfig(),True,'256','17').matched
+
+
+def test_explicit_old_model_in_detail_is_not_replaced_with_listing_model(quotes):
+    item=listing('iPhone 7 Plus 256G，99新')
+    facts=extract_local(item,SmartConfig(),quotes,Rules())
+    assert facts.findings['model'].value=='7 Plus'
+    assert price_facts(item,facts,quotes,[],SmartConfig(),Rules(),'17','256')['status']=='rejected'
+
+
+@pytest.mark.parametrize('title,blocked',[
+    ('苹果 i\u200bP\u200bh\u200bo\u200bn\u200be\u200b 16 P\u200bl\u200bus 黑色 128G 美版官换有锁 双卡槽 插卡即用',True),
+    ('iPhone 16 Plus 128G 美版无锁，屏幕无水印',False),
+    ('iPhone 16 Plus 128G 不是有锁机',False),
+    ('iPhone 16 Plus 128G 不确定是否有锁',False),
+    ('iPhone 16 Plus 128G 屏幕有水印',True),
+    ('iPhone 16 Plus 128G 图片有水印',False),
+])
+def test_explicit_configured_fault_is_filtered_before_opening_detail(title,blocked):
+    quotes=[dict(id=1,model='16 Plus',storage='128',grade='靓机',price=3300)]
+    result=candidate_decision(listing('99新',3260,title),Rules(),quotes,SmartConfig(),True,'128','16 Plus')
+    assert result.matched is not blocked
+    if blocked:assert result.code=='excluded' and '不收问题' in result.reason
+
+
+def test_title_fault_filter_respects_receiving_configuration():
+    quotes=[dict(id=1,model='16 Plus',storage='128',grade='靓机',price=3300)]
+    item=listing('99新',3260,'iPhone 16 Plus 128G 有锁')
+    assert candidate_decision(item,Rules(),quotes,SmartConfig(blocked_conditions=[]),True,'128','16 Plus').matched

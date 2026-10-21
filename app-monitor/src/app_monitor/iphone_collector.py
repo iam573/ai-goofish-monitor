@@ -124,17 +124,29 @@ def item_id_from_share(share_text: str, page_html: str) -> str:
     return ""
 
 
-def detail_matches(source: str, card: PhoneCard) -> bool:
+def detail_mismatch_reason(source: str, card: PhoneCard) -> str | None:
     detail = ET.fromstring(source)
     expected = normalize_search_text(card.title)
-    descriptions = [normalize_search_text(_text(node)) for node in detail.iter("XCUIElementTypeTextView")]
-    if len(expected) < 12 or not any(value.startswith(expected) for value in descriptions):
-        return False
-    return any(
-        _text(node).replace("¥", "").replace("￥", "").replace("元", "") == f"{card.price:g}"
-        and 100 <= int(node.get("y") or 0) < 300
-        for node in detail.iter()
-    )
+    descriptions = [_text(node) for node in detail.iter("XCUIElementTypeTextView")
+                    if node.get("visible") != "false" and _text(node)]
+    problems = []
+    if len(expected) < 12 or not any(normalize_search_text(value).startswith(expected) for value in descriptions):
+        problems.append(f"标题不匹配（列表：{card.title[:70]}；详情：{descriptions[0][:70] if descriptions else '未读到正文'}）")
+    prices = []
+    for node in detail.iter():
+        if node.get("visible") == "false" or not 100 <= int(node.get("y") or 0) < 300:
+            continue
+        value = re.fullmatch(r"[¥￥]?\s*(\d+(?:\.\d{1,2})?)\s*元?", _text(node).replace(',', ''))
+        if value:
+            prices.append(float(value.group(1)))
+    if card.price not in prices:
+        observed = ' / '.join(f"¥{value:g}" for value in dict.fromkeys(prices)) or '未读到详情价'
+        problems.append(f"价格不匹配（列表 ¥{card.price:g}；详情 {observed}）")
+    return '；'.join(problems) or None
+
+
+def detail_matches(source: str, card: PhoneCard) -> bool:
+    return detail_mismatch_reason(source, card) is None
 
 
 def _seller_header(source: str) -> tuple[ET.Element | None, list[ET.Element]]:
@@ -959,9 +971,18 @@ class IPhoneCollector:
                 time.sleep(0.4)
             else:
                 raise RuntimeError("进入详情后找不到分享按钮")
-            source = driver.page_source
-            if not detail_matches(source, card):
-                raise RuntimeError("详情页标题或价格与候选卡片不一致，已跳过复制")
+            # The share button can appear before the description and price load.
+            for attempt in range(6):
+                source = driver.page_source
+                if detail_matches(source, card):
+                    break
+                if attempt < 5:
+                    time.sleep(0.35)
+            else:
+                reason = detail_mismatch_reason(source, card) or "详情身份校验未通过"
+                actions.append({"action": "核对详情标题和价格", "target": f"¥{card.price:g}",
+                                "success": False, "error": reason})
+                raise RuntimeError(f"详情身份校验失败：{reason}；已跳过复制")
             actions.append({"action": "核对详情标题和价格", "target": f"¥{card.price:g}", "success": True})
             if seller_info is not None:
                 seller_info.update(detail_content(source))

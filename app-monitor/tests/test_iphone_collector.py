@@ -571,3 +571,58 @@ def test_unnamed_checkmark_is_scoped_to_picker_option_row():
     assert not checked_storages(source.replace('name="确定"', 'name="其他按钮"'))
     assert not checked_storages(source.replace('width="24" height="25"', 'width="100" height="150"'))
     assert not checked_storages(source.replace('x="155"', 'x="5"'))
+
+
+def test_detail_identity_diagnostics_distinguish_title_price_and_loading():
+    from app_monitor.iphone_collector import detail_mismatch_reason
+    card=PhoneCard('iPhone 16 Plus 黑色 128G 美版官换有锁',3260,'湖里区',20,400)
+    source=f'''<XCUIElementTypeApplication>
+      <XCUIElementTypeTextView name="{card.title}，单机出，无配件" visible="true" />
+      <XCUIElementTypeStaticText name="￥3,260.00元" y="157" visible="true" />
+    </XCUIElementTypeApplication>'''
+    assert detail_mismatch_reason(source,card) is None
+    reason=detail_mismatch_reason(source.replace('3,260.00','3,200.00'),card)
+    assert '价格不匹配' in reason and '¥3260' in reason and '¥3200' in reason and '标题不匹配' not in reason
+    assert '标题不匹配' in detail_mismatch_reason(source.replace(card.title,'iPhone 15 Pro 128G'),card)
+    assert '未读到正文' in detail_mismatch_reason('<XCUIElementTypeApplication/>',card)
+    assert not detail_matches(source.replace('visible="true"','visible="false"'),card)
+
+
+@pytest.mark.parametrize('delayed',[True,False])
+def test_share_waits_for_identity_and_preserves_failed_comparison(monkeypatch,delayed):
+    card=PhoneCard('iPhone 16 Plus 黑色 128G 个人自用',3260,'湖里区',20,400)
+    full=f'''<XCUIElementTypeApplication>
+      <XCUIElementTypeTextView name="{card.title}" visible="true" />
+      <XCUIElementTypeStaticText name="3260" y="157" visible="true" />
+    </XCUIElementTypeApplication>'''
+    class Element:
+        rect={'x':20,'y':400,'width':100,'height':30}
+        def is_displayed(self):return True
+        def get_attribute(self,key):return card.title
+        def click(self):pass
+    class Driver:
+        reads=0
+        def find_elements(self,*args):return [Element()]
+        @property
+        def page_source(self):
+            self.reads+=1
+            if not delayed:return full.replace('name="3260"','name="3200"')
+            return '<XCUIElementTypeApplication/>' if self.reads<3 else full
+        def execute_script(self,*args):pass
+    driver=Driver();collector=IPhoneCollector(Settings());returns=[];copies=[]
+    monkeypatch.setattr(collector,'_ensure_foreground',lambda *args:None)
+    monkeypatch.setattr(collector,'_find',lambda *args:Element())
+    monkeypatch.setattr(collector,'_return_to_results',lambda *args:returns.append(True))
+    monkeypatch.setattr('app_monitor.iphone_collector.time.sleep',lambda _:None)
+    monkeypatch.setattr('app_monitor.iphone_collector._prepare_pasteboard',lambda _:copies.append(True) or 'marker')
+    monkeypatch.setattr('app_monitor.iphone_collector._pasteboard',lambda _:'https://www.goofish.com/item?id=1091531543430')
+    actions=[]
+    if delayed:
+        assert collector._share_item_id(driver,'test',card,actions)=='1091531543430'
+        assert driver.reads>=3 and copies
+    else:
+        with pytest.raises(RuntimeError,match='价格不匹配.*3260.*3200'):
+            collector._share_item_id(driver,'test',card,actions)
+        assert driver.reads==6 and copies==[]
+        assert any(a.get('success') is False and '3200' in a.get('error','') for a in actions)
+    assert returns==[True]

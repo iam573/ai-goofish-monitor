@@ -103,6 +103,22 @@ def normalize_search_text(value: str) -> str:
     return re.sub(r"[^0-9a-z㐀-鿿]", "", text)
 
 
+def explicit_iphone_models(title: str) -> list[str]:
+    """Read explicitly branded models, including models absent from the quote sheet.
+
+    Bare numbers (battery health, cycle counts, prices) are never model evidence.
+    """
+    text = expand_shorthand(title)
+    pattern = r"(?:iphone|苹果(?:手机)?)\s*(\d{1,2}|xs|xr|x|se)(?!\d)\s*(pro\s*max|pro|plus|mini|max|air|s\s*plus|s|e)?"
+    models = []
+    for match in re.finditer(pattern, text, re.I):
+        generation, suffix = match.group(1), match.group(2) or ""
+        suffix = re.sub(r"\s+", " ", suffix, flags=re.I)
+        value = f"{generation}{suffix}" if suffix.casefold().startswith('s') else f"{generation} {suffix}"
+        models.append(normalize_model(value))
+    return list(dict.fromkeys(models))
+
+
 def recognize_apple_product(
     title: str, products: list[dict[str, Any]], storage: str | None = None
 ) -> tuple[str, str] | None:

@@ -5,7 +5,7 @@ import re
 import unicodedata
 from typing import Any
 
-from .matching import extract_storage, model_in_title, recognize_apple_product
+from .matching import explicit_iphone_models, extract_storage, model_in_title, recognize_apple_product
 from .smart import BATTERY_PATTERN, Facts, Finding, Policy
 
 GRADE_KEYWORDS = {
@@ -73,6 +73,16 @@ def _finding(values, label: str, unknowns: list[str]) -> Finding:
                    evidence=selected[0][1][:500] if selected else "")
 
 
+def blocked_title_condition(title: str, blocked: list[str]) -> tuple[str, str] | None:
+    """Skip only explicit, configured faults; negation/uncertainty still use detail review."""
+    text = clean(title)
+    for key in blocked:
+        finding = _finding(mentions(text, FAULTS[key]), key, [])
+        if finding.value == "yes":
+            return key, finding.evidence
+    return None
+
+
 def extract_local(item: dict, config, quotes: list[dict], rules) -> Facts:
     text = clean(item.get("description", "") + "\n" + "\n".join(item.get("detail_parameters", [])))
     title = clean(item["title"])
@@ -109,11 +119,15 @@ def extract_local(item: dict, config, quotes: list[dict], rules) -> Facts:
     # Description identity takes priority over the listing summary; contradictions remain explicit.
     for key in ("model", "storage"):
         findings[key] = Finding()
+    explicit = explicit_iphone_models(text)
+    if len(explicit) == 1:
+        findings["model"] = Finding(value=explicit[0], evidence=text[:500])
     products = [dict(q) for q in quotes]
     for content in (text, title):
         identity = recognize_apple_product(content, products)
         if identity:
-            findings["model"] = Finding(value=identity[0], evidence=content[:500])
+            if not findings["model"].value:
+                findings["model"] = Finding(value=identity[0], evidence=content[:500])
             findings["storage"] = Finding(value=identity[1], evidence=content[:500])
             break
     if not findings["model"].value:

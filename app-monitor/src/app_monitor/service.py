@@ -428,9 +428,10 @@ class MonitorService:
                         if smart.enabled else evaluate(item, rules, quotes, bool(meta.get("region_applied")), storage_hint, model))
             if decision.matched:
                 reason = card.get("link_error") or (
-                    f"标题容量（{decision.storage}）与当前容量筛选不一致，未进详情取链接" if storage_hint else "未进详情取链接"
+                    f"标题容量（{decision.storage}）与当前容量筛选不一致，未进详情取链接"
+                    if storage_hint and decision.storage != storage_hint else "未取得详情分享链接，原因未记录"
                 )
-                decision = replace(decision, matched=False, code="no_link", reason=f"价格符合，但没拿到商品链接：{reason}")
+                decision = replace(decision, matched=False, code="no_link", reason=f"列表初筛符合，但未取得商品链接：{reason}")
             digest = hashlib.sha1(f"{storage}|{title}|{price}|{region}".encode("utf-8")).hexdigest()[:12]
             item["item_id"] = f"card:{digest}"
             self._save_run_item(run_id, label, item, decision, False)

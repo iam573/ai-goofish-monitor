@@ -15,7 +15,7 @@ import httpx
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from .db import Database, utc_now
-from .matching import MatchDecision, evaluate, extract_storage, model_in_title, normalize_search_text
+from .matching import MatchDecision, evaluate, explicit_iphone_models, extract_storage, model_in_title, normalize_search_text
 from .quotes import GRADE_COLUMNS, deduction_storages, latest_deductions, latest_entries
 from .rules import Rules
 
@@ -215,6 +215,17 @@ def policies_for(database: Database, model: str, category: str, storage: str | N
 
 def candidate_decision(item: dict, rules: Rules, quotes: list[dict], config: SmartConfig,
                        region_applied=False, storage_hint=None, expected_model=None) -> MatchDecision:
+    explicit_models = explicit_iphone_models(item["title"])
+    if expected_model and explicit_models and not model_in_title(expected_model, item["title"]) and normalize_search_text(expected_model) not in {normalize_search_text(m) for m in explicit_models}:
+        actual = " / ".join(explicit_models)
+        return MatchDecision(False, f"标题明确为 iPhone {actual}，与当前搜索目标 {expected_model} 不一致",
+                             model=actual, storage=extract_storage(item["title"]) or storage_hint, code="other_model")
+    from .local_rules import blocked_title_condition
+    blocked = blocked_title_condition(item["title"], config.blocked_conditions)
+    if blocked:
+        key, evidence = blocked
+        return MatchDecision(False, f"标题明确存在不收问题：{FACT_LABELS[key]}（{evidence}）",
+                             model=expected_model, storage=extract_storage(item["title"]) or storage_hint, code="excluded")
     maxima: dict[tuple[str, str], dict] = {}
     for quote in quotes:
         if quote["grade"] not in config.accepted_grades:

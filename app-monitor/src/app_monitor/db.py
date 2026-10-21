@@ -22,6 +22,7 @@ CREATE TABLE IF NOT EXISTS quote_batches (
     image_sha256 TEXT NOT NULL,
     fetched_at TEXT NOT NULL,
     parse_status TEXT NOT NULL DEFAULT 'pending',
+    parse_error TEXT NOT NULL DEFAULT '',
     UNIQUE(category_id, image_sha256)
 );
 
@@ -177,6 +178,7 @@ class Database:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self.connect() as connection:
             connection.executescript(SCHEMA)
+            _add_columns(connection, "quote_batches", {"parse_error": "TEXT NOT NULL DEFAULT ''"})
             # 旧版本数据库的增量列；旧的 monitor_tasks / matches 表保留不动，不再使用。
             _add_columns(
                 connection,

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import logging
 import re
 import subprocess
 import tempfile
@@ -17,6 +18,7 @@ from PIL import Image
 from .config import ROOT, Settings
 from .db import Database, utc_now
 
+logger = logging.getLogger(__name__)
 
 API_ROOT = "https://api.ajhuishou.com/ajhuishou-product/api/home"
 APPLE_NO_WARRANTY_CATEGORY = "100025"
@@ -398,6 +400,7 @@ class QuoteService:
         self.database = database
         self.settings = settings
         self.parser = QuoteImageParser()
+        self._lock = asyncio.Lock()
 
     async def categories(self) -> list[dict[str, str]]:
         payload = await self._get_json(f"{API_ROOT}/categoryTree")
@@ -422,6 +425,12 @@ class QuoteService:
         return leaves
 
     async def sync(self, category_id: str, category_name: str | None = None) -> dict[str, Any]:
+        # Startup refresh, scheduled checks and manual sync share this service.
+        # Wait for an active parse rather than reporting its half-finished row as unchanged.
+        async with self._lock:
+            return await self._sync(category_id, category_name)
+
+    async def _sync(self, category_id: str, category_name: str | None = None) -> dict[str, Any]:
         payload = await self._get_json(
             f"{API_ROOT}/getQuoteImage", params={"categoryId": category_id}
         )
@@ -437,8 +446,6 @@ class QuoteService:
                 "SELECT * FROM quote_batches WHERE category_id=? AND image_sha256=?",
                 (category_id, digest),
             ).fetchone()
-            if existing:
-                return {"updated": False, "batch": dict(existing), "entry_count": self._entry_count(existing["id"])}
 
         fetched_at = utc_now()
         quote_date = self._date_from_url(image_url) or fetched_at[:10]
@@ -449,6 +456,23 @@ class QuoteService:
         directory.mkdir(parents=True, exist_ok=True)
         image_path = directory / f"{digest[:16]}{suffix}"
         image_path.write_bytes(image)
+
+        if existing:
+            # A moved installation may still contain the previous machine's absolute path.
+            with self.database.connect() as connection:
+                connection.execute("UPDATE quote_batches SET image_path=?, image_url=? WHERE id=?",
+                                   (str(image_path), image_url, existing["id"]))
+            count = self._entry_count(existing["id"])
+            if existing["parse_status"] == "parsed" and count > 0:
+                batch = {**dict(existing), "image_path": str(image_path), "image_url": image_url}
+                logger.info("报价图片未变化且已有有效报价 category=%s batch_id=%s entries=%s", category_id, existing["id"], count)
+                return {"updated": False, "batch": batch, "batch_id": existing["id"],
+                        "category_name": existing["category_name"], "entry_count": count, "parse_status": "parsed"}
+            logger.info("报价图片未变化，重试未完成解析 category=%s batch_id=%s status=%s entries=%s",
+                        category_id, existing["id"], existing["parse_status"], count)
+            result = await self._reparse(int(existing["id"]))
+            return {**result, "updated": True, "reparsed": True,
+                    "category_name": existing["category_name"], "image_url": image_url, "image_path": str(image_path)}
 
         resolved_name = category_name or category_id
         if not category_name:
@@ -481,90 +505,68 @@ class QuoteService:
             )
             batch_id = cursor.lastrowid
 
-        try:
-            entries, deductions = await asyncio.to_thread(self.parser.parse_image, image_path)
-            status = "parsed" if entries else "needs_review"
-            now = utc_now()
-            with self.database.connect() as connection:
-                _save_deductions(connection, batch_id, category_id, deductions)
-                connection.executemany(
-                    """
-                    INSERT OR REPLACE INTO quote_entries(
-                        batch_id, category_id, model, storage, grade, price,
-                        source, enabled, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, 'ocr', 1, ?)
-                    """,
-                    [
-                        (
-                            batch_id,
-                            category_id,
-                            entry.model,
-                            entry.storage,
-                            entry.grade,
-                            entry.price,
-                            now,
-                        )
-                        for entry in entries
-                    ],
-                )
-                connection.execute(
-                    "UPDATE quote_batches SET parse_status=? WHERE id=?",
-                    (status, batch_id),
-                )
-        except Exception:
-            with self.database.connect() as connection:
-                connection.execute(
-                    "UPDATE quote_batches SET parse_status='failed' WHERE id=?", (batch_id,)
-                )
-            raise
-
+        result = await self._reparse(int(batch_id))
         return {
+            **result,
             "updated": True,
-            "batch_id": batch_id,
+            "category_name": resolved_name,
             "image_url": image_url,
             "image_path": str(image_path),
-            "entry_count": len(entries),
-            "parse_status": status,
         }
 
     async def reparse(self, batch_id: int) -> dict[str, Any]:
         """对已下载的报价原图重新识别价格和扣费项；手动校正过的价格保持不变。"""
+        async with self._lock:
+            return await self._reparse(batch_id)
+
+    async def _reparse(self, batch_id: int) -> dict[str, Any]:
         with self.database.connect() as connection:
             batch = connection.execute("SELECT * FROM quote_batches WHERE id=?", (batch_id,)).fetchone()
         if not batch:
             raise ValueError("报价批次不存在")
-        image_path = Path(batch["image_path"])
-        if not image_path.exists():
-            raise FileNotFoundError(f"报价原图不存在：{image_path}")
-        entries, deductions = await asyncio.to_thread(self.parser.parse_image, image_path)
-        now = utc_now()
         with self.database.connect() as connection:
-            if entries:
-                connection.execute("DELETE FROM quote_entries WHERE batch_id=? AND source='ocr'", (batch_id,))
-                connection.executemany(
-                    """
-                    INSERT OR IGNORE INTO quote_entries(
-                        batch_id, category_id, model, storage, grade, price, source, enabled, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, 'ocr', 1, ?)
-                    """,
-                    [
-                        (batch_id, batch["category_id"], e.model, e.storage, e.grade, e.price, now)
-                        for e in entries
-                    ],
-                )
-                connection.execute("UPDATE quote_batches SET parse_status='parsed' WHERE id=?", (batch_id,))
-            _save_deductions(connection, batch_id, batch["category_id"], deductions)
+            connection.execute("UPDATE quote_batches SET parse_status='parsing',parse_error='' WHERE id=?", (batch_id,))
+        logger.info("报价识别开始 category=%s batch_id=%s", batch["category_id"], batch_id)
+        try:
+            image_path = Path(batch["image_path"])
+            if not image_path.is_file():
+                raise FileNotFoundError(f"报价原图不存在：{image_path}")
+            entries, deductions = await asyncio.to_thread(self.parser.parse_image, image_path)
+            status = "parsed" if entries else "needs_review"
+            error = "" if entries else "图片已下载，但未识别到有效报价，请核对原图或重新识别"
+            now = utc_now()
+            with self.database.connect() as connection:
+                if entries:
+                    connection.execute("DELETE FROM quote_entries WHERE batch_id=? AND source='ocr'", (batch_id,))
+                    connection.executemany(
+                        """INSERT OR IGNORE INTO quote_entries(
+                            batch_id, category_id, model, storage, grade, price, source, enabled, updated_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, 'ocr', 1, ?)""",
+                        [(batch_id, batch["category_id"], e.model, e.storage, e.grade, e.price, now) for e in entries],
+                    )
+                _save_deductions(connection, batch_id, batch["category_id"], deductions)
+                connection.execute("UPDATE quote_batches SET parse_status=?,parse_error=? WHERE id=?", (status, error, batch_id))
+        except Exception as exc:
+            with self.database.connect() as connection:
+                connection.execute("UPDATE quote_batches SET parse_status='failed',parse_error=? WHERE id=?", (str(exc)[:4000], batch_id))
+            logger.exception("报价识别失败 category=%s batch_id=%s", batch["category_id"], batch_id)
+            raise
+        count = self._entry_count(batch_id)
+        logger.info("报价识别结束 category=%s batch_id=%s status=%s parsed=%s entries=%s deductions=%s",
+                    batch["category_id"], batch_id, status, len(entries), count, len(deductions))
         return {
             "batch_id": batch_id,
             "category_id": batch["category_id"],
-            "entry_count": len(entries),
+            "entry_count": count,
             "deduction_count": len(deductions),
+            "parse_status": status,
+            "parse_error": error,
         }
 
     async def reparse_latest(self) -> list[dict[str, Any]]:
         results = []
         for category_id in APPLE_PHONE_CATEGORIES:
-            batch = latest_batch(self.database, category_id)
+            batch = latest_downloaded_batch(self.database, category_id)
             if not batch:
                 continue
             try:
@@ -604,7 +606,7 @@ class QuoteService:
         today = today or datetime.now().astimezone().date().isoformat()
         results = []
         for category_id, category_name in APPLE_PHONE_CATEGORIES.items():
-            latest = latest_batch(self.database, category_id)
+            latest = latest_downloaded_batch(self.database, category_id)
             if latest and is_fresh(latest, today):
                 results.append({"category_id": category_id, "updated": False, "fresh": True})
                 continue
@@ -691,9 +693,22 @@ def latest_batch(database: Database, category_id: str) -> dict[str, Any] | None:
     return dict(row) if row else None
 
 
+def latest_downloaded_batch(database: Database, category_id: str) -> dict[str, Any] | None:
+    """Status/image views must expose failed or in-progress downloads too."""
+    with database.connect() as connection:
+        row = connection.execute(
+            """SELECT qb.*, (SELECT COUNT(*) FROM quote_entries qe WHERE qe.batch_id=qb.id) AS entry_count,
+                   (SELECT COUNT(*) FROM quote_deductions qd WHERE qd.batch_id=qb.id) AS deduction_count
+               FROM quote_batches qb WHERE category_id=? ORDER BY fetched_at DESC,id DESC LIMIT 1""",
+            (category_id,),
+        ).fetchone()
+    return dict(row) if row else None
+
+
 def is_fresh(batch: dict[str, Any], today: str) -> bool:
-    """今天拿到过新图片即视为最新；报价图片 URL 上的日期可能比实际晚一天，不能单独依赖。"""
-    return str(batch.get("fetched_at") or "")[:10] == today or batch.get("quote_date") == today
+    """Only a successfully parsed, nonempty batch can satisfy the daily refresh."""
+    return (batch.get("parse_status") == "parsed" and int(batch.get("entry_count") or 0) > 0
+            and (str(batch.get("fetched_at") or "")[:10] == today or batch.get("quote_date") == today))
 
 
 def latest_entries(
@@ -722,7 +737,7 @@ def latest_entries(
 def quote_status(database: Database) -> list[dict[str, Any]]:
     values = []
     for category_id, category_name in APPLE_PHONE_CATEGORIES.items():
-        batch = latest_batch(database, category_id)
+        batch = latest_downloaded_batch(database, category_id)
         today = datetime.now().astimezone().date().isoformat()
         values.append(
             {
@@ -734,6 +749,7 @@ def quote_status(database: Database) -> list[dict[str, Any]]:
                 "quote_date": batch.get("quote_date") if batch else None,
                 "fetched_at": batch.get("fetched_at") if batch else None,
                 "parse_status": batch.get("parse_status") if batch else None,
+                "parse_error": batch.get("parse_error", "") if batch else "",
                 "entry_count": batch.get("entry_count", 0) if batch else 0,
                 "deduction_count": batch.get("deduction_count", 0) if batch else 0,
             }
