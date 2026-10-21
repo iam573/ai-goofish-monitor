@@ -199,10 +199,10 @@ def test_reference_prices_come_last_in_plain_text():
     assert content.startswith(
         "iPhone 15 Pro 256G 自用\n\n挂牌价：¥4650\n小花回收报价：¥4500\n挂牌价高于回收报价：¥150\n地区：厦门\n\n"
         "打开商品：https://pages.goofish.com/sharexy?x=1\n网页链接：https://www.goofish.com/item?id=1090413599999\n\n"
-        "📋 各成色回收价（苹果无保 10-21）\n"
+        "📋 iPhone 15 Pro 256G 各成色回收价（苹果无保 10-21）\n"
     )
     assert "靓机 4,700 ｜ 小花 4,500 ✓ ｜ 大花 4,200\n有保·小花 4,800" in content
-    assert "🔧 扣费项（→ 扣后回收价）\n· 换屏  −300 → 4,200\n· 电池低于80%  −200～300 → 4,200～4,300\n· 有锁  −1,500 起 → ≤ 3,000" in content
+    assert "🔧 iPhone 15 Pro 256G 扣费项（→ 扣后回收价）\n· 换屏  −300 → 4,200\n· 电池低于80%  −200～300 → 4,200～4,300\n· 有锁  −1,500 起 → ≤ 3,000" in content
     assert content.endswith("💬 后盖破当大花收；不分颜色")
 
 
@@ -218,8 +218,9 @@ def test_markdown_keeps_classic_header_and_puts_reference_tables_last():
         "![商品主图](https://example.test/a.jpg)"
     )
     assert "|" not in head
-    assert tail.startswith("**📋 各成色回收价**（苹果无保 10-21）\n\n| 靓机 | 小花 | 大花 | 有保·小花 |")
+    assert tail.startswith("**📋 iPhone 15 Pro 256G 各成色回收价**（苹果无保 10-21）\n\n| 靓机 | 小花 | 大花 | 有保·小花 |")
     assert "| 4,700 | **4,500** | 4,200 | 4,800 |" in tail
+    assert "**🔧 iPhone 15 Pro 256G 扣费项**" in tail
     assert "| 项目 | 扣费 | 扣后回收价 |\n| :-- | --: | --: |\n| 换屏 | −300 | 4,200 |" in tail
     assert "| 电池低于80% | −200～300 | 4,200～4,300 |" in tail
     assert tail.endswith("> 💬 后盖破当大花收；不分颜色")

@@ -93,6 +93,13 @@ class NotificationService:
         return f"iPhone {model} {display_storage(storage)}" if model and storage else str(item["title"]).strip()
 
     @staticmethod
+    def _reference_subject(item: dict[str, Any]) -> str:
+        """参考价对应的机型容量，例如「iPhone 15 Pro 128G 」；没有识别出机型时为空。"""
+        if item.get("model") and item.get("storage"):
+            return f"{NotificationService._category(item)} "
+        return ""
+
+    @staticmethod
     def _detail_lines(item: dict[str, Any], reason: str, markdown: bool = False) -> list[str]:
         price = float(item["price"])
         lines = [f"挂牌价：¥{price:g}"]
@@ -157,12 +164,13 @@ class NotificationService:
         if image_urls:
             lines.extend(("", f"![商品图片]({image_urls[0]})"))
 
-        # 参考价放在最后
+        # 参考价放在最后；标题写明是哪个机型容量的参考价
         reference = item.get("quote_reference") or {}
         grades = reference.get("grades") or []
+        subject = NotificationService._reference_subject(item)
         if grades:
             date = str(reference.get("quote_date") or "")[5:]
-            lines.extend(("", f"📋 各成色回收价（{reference.get('category_name', '')}{f' {date}' if date else ''}）"))
+            lines.extend(("", f"📋 {subject}各成色回收价（{reference.get('category_name', '')}{f' {date}' if date else ''}）"))
             lines.append(" ｜ ".join(
                 f"{value['grade']} {money(value['price'])}{' ✓' if value['grade'] == reference.get('grade') else ''}"
                 for value in grades
@@ -172,10 +180,10 @@ class NotificationService:
                 lines.append(f"{other}·{reference.get('grade', '')} {money(reference['other_price'])}")
         deductions = NotificationService._deduction_rows(item)
         if deductions:
-            lines.extend(("", "🔧 扣费项（→ 扣后回收价）"))
+            lines.extend(("", f"🔧 {subject}扣费项（→ 扣后回收价）"))
             lines.extend(f"· {name}  {amount}{f' → {after}' if after else ''}" for name, amount, after in deductions)
         elif grades:
-            lines.extend(("", "🔧 扣费项：报价单未识别到"))
+            lines.extend(("", f"🔧 {subject}扣费项：报价单未识别到"))
         notes = reference.get("notes") or []
         if notes:
             lines.append(f"💬 {'；'.join(notes)}")
@@ -213,10 +221,11 @@ class NotificationService:
         # 参考价放在最后，只有这里用表格
         reference = item.get("quote_reference") or {}
         grades = reference.get("grades") or []
+        subject = NotificationService._reference_subject(item)
         tail: list[str] = []
         if grades:
             date = str(reference.get("quote_date") or "")[5:]
-            tail.append(f"**📋 各成色回收价**（{reference.get('category_name', '')}{f' {date}' if date else ''}）")
+            tail.append(f"**📋 {subject}各成色回收价**（{reference.get('category_name', '')}{f' {date}' if date else ''}）")
             headers = [value["grade"] for value in grades]
             values = [
                 f"**{money(value['price'])}**" if value["grade"] == reference.get("grade") else money(value["price"])
@@ -231,9 +240,9 @@ class NotificationService:
         deductions = NotificationService._deduction_rows(item)
         if deductions:
             rows = "\n".join(f"| {cell(name)} | {amount} | {after} |" for name, amount, after in deductions)
-            tail.append(f"**🔧 扣费项**\n\n| 项目 | 扣费 | 扣后回收价 |\n| :-- | --: | --: |\n{rows}")
+            tail.append(f"**🔧 {subject}扣费项**\n\n| 项目 | 扣费 | 扣后回收价 |\n| :-- | --: | --: |\n{rows}")
         elif grades:
-            tail.append("**🔧 扣费项**：报价单未识别到")
+            tail.append(f"**🔧 {subject}扣费项**：报价单未识别到")
         notes = reference.get("notes") or []
         if notes:
             tail.append(f"> 💬 {'；'.join(cell(note) for note in notes)}")
