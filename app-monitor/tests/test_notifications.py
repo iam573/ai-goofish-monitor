@@ -6,6 +6,17 @@ import httpx
 from app_monitor.config import settings
 from app_monitor import notifications
 from app_monitor.notifications import NotificationService
+import pytest
+
+
+@pytest.mark.parametrize("shop, suffix", [(True, "（鱼小铺）"), (False, ""), (None, "")])
+def test_seller_and_shop_are_shown_in_plain_and_markdown_notifications(shop, suffix):
+    item = {"title": "iPhone 17 自用", "price": 4500, "seller_name": "小鱼[店铺]", "is_fish_shop": shop}
+    _, content = NotificationService._format_message(item, "", "", [])
+    markdown = NotificationService._format_webhook_content(item, "", "", [])
+    assert f"卖家：小鱼[店铺]{suffix}" in content
+    assert f"卖家：小鱼\\[店铺\\]{suffix}" in markdown
+    assert "鱼小铺：" not in content + markdown
 
 
 def test_mobile_link_uses_share_page_only_for_real_item_ids():
@@ -41,11 +52,11 @@ def test_notification_has_category_heading_and_product_on_next_line():
         ["https://example.test/image.jpg"],
     )
 
-    assert title == "iPhone 17 128G ¥5,100 · 比回收价高 ¥200"
-    assert content.startswith("自用国行 iPhone 17 128G，成色好\n\n💰 挂牌 ¥5,100 ｜ 回收 ¥4,900（小花）")
-    assert "📊 比回收价高 ¥200\n📍 厦门思明" in content
-    assert "🔗 打开商品：https://pages.goofish.com/sharexy?example=1" in content
-    assert "💻 网页链接：https://www.goofish.com/item?id=1090413599999" in content
+    assert title == "iPhone 17 128G"
+    assert content.startswith("自用国行 iPhone 17 128G，成色好\n\n挂牌价：¥5100")
+    assert "小花回收报价：¥4900\n挂牌价高于回收报价：¥200\n地区：厦门思明" in content
+    assert "打开商品：https://pages.goofish.com/sharexy?example=1" in content
+    assert "网页链接：https://www.goofish.com/item?id=1090413599999" in content
     assert "![商品图片](https://example.test/image.jpg)" in content
 
 
@@ -56,13 +67,13 @@ def test_notification_supports_terabyte_and_test_push_without_category():
         "",
         [],
     )
-    assert title == "iPhone 17 Pro Max 1TB ¥4,500 · 比回收价低 ¥400"
-    assert "📊 比回收价低 ¥400" in content
+    assert title == "iPhone 17 Pro Max 1TB"
+    assert "挂牌价低于回收报价：¥400" in content
     test_title, test_content = NotificationService._format_message(
         {"title": "[测试] App Monitor 推送", "price": 0}, "推送渠道配置有效。", "", []
     )
     assert test_title == "[测试] App Monitor 推送"
-    assert "ℹ️ 推送渠道配置有效。" in test_content
+    assert "原因：推送渠道配置有效。" in test_content
 
 
 async def test_send_webhook_preserves_heading_and_line_breaks(monkeypatch):
@@ -105,11 +116,11 @@ async def test_send_webhook_preserves_heading_and_line_breaks(monkeypatch):
     )
 
     assert result["webhook"]["success"] is True
-    assert captured["payload"]["title"] == "iPhone 17 128G ¥5,100 · 比回收价高 ¥200"
+    assert captured["payload"]["title"] == "iPhone 17 128G"
     assert captured["payload"]["content"].startswith(
-        "### [国行 iPhone 17 128G 自用](https://pages.goofish.com/sharexy?"
+        "[**国行 iPhone 17 128G 自用**](https://pages.goofish.com/sharexy?"
     )
-    assert "| 挂牌价 | 回收价（小花） | 差价 |\n| :-: | :-: | :-: |\n| **¥5,100** | ¥4,900 | **+¥200** |" in captured["payload"]["content"]
+    assert "**挂牌价：¥5100**  \n小花回收报价：¥4900  \n挂牌价高于回收报价：¥200" in captured["payload"]["content"]
     assert "[📱 手机打开](https://pages.goofish.com/sharexy?" in captured["payload"]["content"]
     assert "[💻 网页打开](https://www.goofish.com/item?id=1090413599999)" in captured["payload"]["content"]
 
@@ -121,8 +132,8 @@ def test_markdown_content_escapes_product_title_and_shows_image():
         "",
         ["https://example.test/image.jpg"],
     )
-    assert content.startswith("### [\\[全新\\] iPhone \\*17\\*](https://www.goofish.com/item?id=1090413599999)")
-    assert "**挂牌价：¥4,500**  \n原因：符合条件" in content
+    assert content.startswith("[**\\[全新\\] iPhone \\*17\\***](https://www.goofish.com/item?id=1090413599999)")
+    assert "**挂牌价：¥4500**  \n原因：符合条件" in content
     assert "[🔗 打开商品](https://www.goofish.com/item?id=1090413599999)" in content
     assert content.endswith("![商品主图](https://example.test/image.jpg)")
 
@@ -164,44 +175,51 @@ async def test_custom_webhook_uses_headers_and_body_template():
     assert json.loads(request.content) == {"title": "iPhone 15 Pro", "content": "价格：¥3000"}
 
 
-def test_notification_lists_all_grades_and_each_deduction():
-    item = {
-        "title": "iPhone 15 Pro 256G 自用", "model": "15 Pro", "storage": "256", "price": 4650,
-        "quote_price": 4500, "quote_grade": "小花", "display_region": "厦门",
-        "quote_reference": {
-            "category_name": "苹果无保", "quote_date": "2026-10-21", "grade": "小花",
-            "grades": [{"grade": "靓机", "price": 4700}, {"grade": "小花", "price": 4500}, {"grade": "大花", "price": 4200}],
-            "other_category_name": "苹果有保", "other_price": 4800,
-            "deductions": [
-                {"name": "换屏", "amount_min": 300, "amount_max": 300, "open_ended": False},
-                {"name": "电池低于80%", "amount_min": 200, "amount_max": 300, "open_ended": False},
-                {"name": "有锁", "amount_min": 1500, "amount_max": 1500, "open_ended": True},
-            ],
-            "notes": ["后盖破当大花收", "不分颜色"],
-        },
-    }
-    _, content = NotificationService._format_message(item, "", "", [])
-    assert "📍 厦门\n\n📋 各成色回收价（苹果无保 10-21）\n" in content
+REFERENCE_ITEM = {
+    "title": "iPhone 15 Pro 256G 自用", "model": "15 Pro", "storage": "256", "price": 4650,
+    "quote_price": 4500, "quote_grade": "小花", "display_region": "厦门",
+    "item_url": "https://www.goofish.com/item?id=1090413599999",
+    "quote_reference": {
+        "category_name": "苹果无保", "quote_date": "2026-10-21", "grade": "小花",
+        "grades": [{"grade": "靓机", "price": 4700}, {"grade": "小花", "price": 4500}, {"grade": "大花", "price": 4200}],
+        "other_category_name": "苹果有保", "other_price": 4800,
+        "deductions": [
+            {"name": "换屏", "amount_min": 300, "amount_max": 300, "open_ended": False},
+            {"name": "电池低于80%", "amount_min": 200, "amount_max": 300, "open_ended": False},
+            {"name": "有锁", "amount_min": 1500, "amount_max": 1500, "open_ended": True},
+        ],
+        "notes": ["后盖破当大花收", "不分颜色"],
+    },
+}
+
+
+def test_reference_prices_come_last_in_plain_text():
+    title, content = NotificationService._format_message(REFERENCE_ITEM, "", "https://pages.goofish.com/sharexy?x=1", [])
+    assert title == "iPhone 15 Pro 256G"
+    assert content.startswith(
+        "iPhone 15 Pro 256G 自用\n\n挂牌价：¥4650\n小花回收报价：¥4500\n挂牌价高于回收报价：¥150\n地区：厦门\n\n"
+        "打开商品：https://pages.goofish.com/sharexy?x=1\n网页链接：https://www.goofish.com/item?id=1090413599999\n\n"
+        "📋 各成色回收价（苹果无保 10-21）\n"
+    )
     assert "靓机 4,700 ｜ 小花 4,500 ✓ ｜ 大花 4,200\n有保·小花 4,800" in content
     assert "🔧 扣费项（→ 扣后回收价）\n· 换屏  −300 → 4,200\n· 电池低于80%  −200～300 → 4,200～4,300\n· 有锁  −1,500 起 → ≤ 3,000" in content
-    assert "💬 后盖破当大花收；不分颜色" in content
-    markdown = NotificationService._format_webhook_content(item, "", "", [])
-    assert "| 靓机 | 小花 | 大花 | 有保·小花 |\n| :-: | :-: | :-: | :-: |\n| 4,700 | **4,500** | 4,200 | 4,800 |" in markdown
-    assert "| 项目 | 扣费 | 扣后回收价 |\n| :-- | --: | --: |\n| 换屏 | −300 | 4,200 |" in markdown
-    assert "| 电池低于80% | −200～300 | 4,200～4,300 |" in markdown
-    assert "> 💬 后盖破当大花收；不分颜色" in markdown
+    assert content.endswith("💬 后盖破当大花收；不分颜色")
 
 
-def test_reference_prices_come_last():
-    item = {
-        "title": "iPhone 15 Pro 256G", "model": "15 Pro", "storage": "256", "price": 4400,
-        "quote_price": 4500, "quote_grade": "小花", "item_url": "https://www.goofish.com/item?id=1090413599999",
-        "quote_reference": {"category_name": "苹果无保", "grade": "小花",
-                            "grades": [{"grade": "小花", "price": 4500}],
-                            "deductions": [{"name": "换屏", "amount_min": 300, "amount_max": 300, "open_ended": False}]},
-    }
-    _, text = NotificationService._format_message(item, "", "", ["https://example.test/a.jpg"])
-    assert text.index("打开商品") < text.index("![商品图片]") < text.index("各成色回收价") < text.index("换屏")
-    markdown = NotificationService._format_webhook_content(item, "", "", ["https://example.test/a.jpg"])
-    assert markdown.index("打开商品") < markdown.index("![商品主图]") < markdown.index("\n\n---\n\n") < markdown.index("各成色回收价")
-    assert markdown.rstrip().endswith("| 换屏 | −300 | 4,200 |")
+def test_markdown_keeps_classic_header_and_puts_reference_tables_last():
+    markdown = NotificationService._format_webhook_content(
+        REFERENCE_ITEM, "", "https://pages.goofish.com/sharexy?x=1", ["https://example.test/a.jpg"]
+    )
+    head, tail = markdown.split("\n\n---\n\n")
+    assert head == (
+        "[**iPhone 15 Pro 256G 自用**](https://pages.goofish.com/sharexy?x=1)\n\n"
+        "**挂牌价：¥4650**  \n小花回收报价：¥4500  \n挂牌价高于回收报价：¥150  \n地区：厦门\n\n"
+        "[📱 手机打开](https://pages.goofish.com/sharexy?x=1) ｜ [💻 网页打开](https://www.goofish.com/item?id=1090413599999)\n\n"
+        "![商品主图](https://example.test/a.jpg)"
+    )
+    assert "|" not in head
+    assert tail.startswith("**📋 各成色回收价**（苹果无保 10-21）\n\n| 靓机 | 小花 | 大花 | 有保·小花 |")
+    assert "| 4,700 | **4,500** | 4,200 | 4,800 |" in tail
+    assert "| 项目 | 扣费 | 扣后回收价 |\n| :-- | --: | --: |\n| 换屏 | −300 | 4,200 |" in tail
+    assert "| 电池低于80% | −200～300 | 4,200～4,300 |" in tail
+    assert tail.endswith("> 💬 后盖破当大花收；不分颜色")

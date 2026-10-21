@@ -4,21 +4,25 @@ from __future__ import annotations
 
 import asyncio
 import html
+import io
 import logging
 import re
 import subprocess
+import tempfile
 import time
 import uuid
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import unquote, urlparse
 
 import httpx
+from PIL import Image
 
 from .appium_server import ensure_appium_server
 from .collector import CollectResult, ItemCallback, emit_safely, guess_region
-from .config import Settings
+from .config import ROOT, Settings
 from .matching import normalize_search_text
 
 logger = logging.getLogger(__name__)
@@ -131,6 +135,80 @@ def detail_matches(source: str, card: PhoneCard) -> bool:
         and 100 <= int(node.get("y") or 0) < 300
         for node in detail.iter()
     )
+
+
+def _seller_header(source: str) -> tuple[ET.Element | None, list[ET.Element]]:
+    """Read only the seller header beside the detail avatar, never description text."""
+    root = ET.fromstring(source)
+    visible = [node for node in root.iter() if node.get("visible") != "false"]
+    if not any(_text(node) == "分享按钮" for node in visible):
+        return None, []
+    avatar = next((node for node in visible if _text(node) == "用户头像"), None)
+    if avatar is None:
+        return None, []
+    x, y, width, height = (int(avatar.get(key) or 0) for key in ("x", "y", "width", "height"))
+    if width <= 0 or height <= 0:
+        return None, []
+    row = [node for node in visible
+           if node.tag in {"XCUIElementTypeOther", "XCUIElementTypeButton", "XCUIElementTypeStaticText", "XCUIElementTypeImage"}
+           and int(node.get("x") or 0) >= x + width
+           and abs(int(node.get("y") or 0) + int(node.get("height") or 0) / 2 - (y + height / 2)) <= height / 2
+           and 0 < int(node.get("height") or 0) <= height * 1.5]
+    names = [node for node in row if _text(node) and _text(node) != "鱼小铺"
+             and node.tag != "XCUIElementTypeImage"
+             and 0 <= int(node.get("x") or 0) - (x + width) <= 28]
+    if not names:
+        return None, []
+    name = min(names, key=lambda node: (int(node.get("x") or 0), int(node.get("width") or 0)))
+    right = int(name.get("x") or 0) + int(name.get("width") or 0)
+    badges = [node for node in row if int(node.get("x") or 0) >= right - 2
+              and int(node.get("width") or 0) <= 120]
+    return name, badges
+
+
+def _badge_rect(node: ET.Element) -> tuple[int, int, int, int]:
+    return tuple(int(node.get(key) or 0) for key in ("x", "y", "width", "height"))
+
+
+def detail_seller(source: str, badge_texts: dict[tuple[int, ...], str] | None = None) -> dict[str, Any]:
+    name, badges = _seller_header(source)
+    if name is None:
+        return {"seller_name": "", "is_fish_shop": None}
+    labels = badge_texts or {}
+    fish_shop = any("鱼小铺" in re.sub(r"\s+", "", _text(node) or labels.get(_badge_rect(node), ""))
+                    for node in badges)
+    # An unlabeled badge is not evidence that this is an ordinary seller.
+    known_other_badges = {"减碳榜样", "信用极好", "信用优秀", "信用良好"}
+    ambiguous = any(node.tag == "XCUIElementTypeImage" and not _text(node)
+                    and re.sub(r"\s+", "", labels.get(_badge_rect(node), "")) not in known_other_badges
+                    for node in badges)
+    return {"seller_name": _text(name), "is_fish_shop": True if fish_shop else (None if ambiguous else False)}
+
+
+def recognize_seller_badges(png: bytes, source: str, badges: list[ET.Element]) -> dict[tuple[int, ...], str]:
+    """OCR only unnamed seller badges; full screenshots remain in memory."""
+    root = ET.fromstring(source)
+    app = next(root.iter("XCUIElementTypeApplication"), root)
+    logical_width, logical_height = int(app.get("width") or 0), int(app.get("height") or 0)
+    if not logical_width or not logical_height:
+        return {}
+    labels = {}
+    with Image.open(io.BytesIO(png)) as image, tempfile.TemporaryDirectory(prefix="goofish-badge-") as temp:
+        scale_x, scale_y = image.width / logical_width, image.height / logical_height
+        for index, badge in enumerate(badges):
+            x, y, width, height = rect = _badge_rect(badge)
+            if width <= 0 or height <= 0 or not (0 <= x < x + width <= logical_width and 0 <= y < y + height <= logical_height):
+                continue
+            crop = image.crop((max(0, (x - 2) * scale_x), max(0, (y - 2) * scale_y),
+                               min(image.width, (x + width + 2) * scale_x), min(image.height, (y + height + 2) * scale_y)))
+            path = Path(temp) / f"badge-{index}.png"
+            crop.resize((crop.width * 3, crop.height * 3), Image.Resampling.LANCZOS).save(path)
+            result = subprocess.run(["swift", str(ROOT / "scripts" / "vision_ocr.swift"), str(path)],
+                                    capture_output=True, text=True, timeout=15, check=False)
+            if result.returncode == 0:
+                texts = [parts[5] for line in result.stdout.splitlines() if len(parts := line.split("\t", 5)) == 6]
+                labels[rect] = "".join(texts)
+    return labels
 
 
 def checked_storages(source: str) -> set[str]:
@@ -461,8 +539,9 @@ class IPhoneCollector:
                                 emit_safely(on_items, cards=[dict(raw)], **card_meta)
                                 continue
                             candidates += 1
+                            seller_info: dict[str, Any] = {}
                             try:
-                                item_id = self._share_item_id(driver, udid, card, actions)
+                                item_id = self._share_item_id(driver, udid, card, actions, seller_info)
                             except Exception as exc:
                                 logger.warning("iPhone 候选分享失败 title=%s error=%s", card.title[:40], exc)
                                 actions.append({"action": "复制候选链接", "target": card.title[:40],
@@ -472,7 +551,7 @@ class IPhoneCollector:
                                     raise RuntimeError("分享失败后未回到搜索列表，停止本机采集") from exc
                                 continue
                             if item_id:
-                                item = {**raw, "item_id": item_id,
+                                item = {**raw, **seller_info, "item_id": item_id,
                                         "item_url": f"https://www.goofish.com/item?id={item_id}",
                                         "image_urls": [], "source_storage": storage, "source_pass": "新发"}
                                 pass_items.append(item)
@@ -842,6 +921,7 @@ class IPhoneCollector:
     def _share_item_id(
         self, driver: Any, udid: str, card: PhoneCard,
         actions: list[dict[str, Any]] | None = None,
+        seller_info: dict[str, Any] | None = None,
     ) -> str:
         from appium.webdriver.common.appiumby import AppiumBy
 
@@ -863,9 +943,35 @@ class IPhoneCollector:
                 time.sleep(0.4)
             else:
                 raise RuntimeError("进入详情后找不到分享按钮")
-            if not detail_matches(driver.page_source, card):
+            source = driver.page_source
+            if not detail_matches(source, card):
                 raise RuntimeError("详情页标题或价格与候选卡片不一致，已跳过复制")
             actions.append({"action": "核对详情标题和价格", "target": f"¥{card.price:g}", "success": True})
+            seller = detail_seller(source)
+            # Seller header accessibility may become visible shortly after the description.
+            for _ in range(2):
+                if seller["seller_name"]:
+                    break
+                time.sleep(0.3)
+                source = driver.page_source
+                if not detail_matches(source, card):
+                    raise RuntimeError("读取卖家信息时详情页发生变化，已跳过复制")
+                seller = detail_seller(source)
+            seller_method = "页面树"
+            if seller["seller_name"] and seller["is_fish_shop"] is None:
+                try:
+                    _, badges = _seller_header(source)
+                    images = [node for node in badges if node.tag == "XCUIElementTypeImage" and not _text(node)]
+                    labels = recognize_seller_badges(driver.get_screenshot_as_png(), source, images)
+                    seller = detail_seller(source, labels)
+                    seller_method = "页面树名称 + 标识局部OCR"
+                except Exception as exc:
+                    logger.warning("iPhone 卖家标识识别失败，保留未识别状态：%s", _brief_error(exc))
+            if seller_info is not None:
+                seller_info.update(seller)
+            shop_label = {True: "是", False: "否", None: "未识别"}[seller["is_fish_shop"]]
+            actions.append({"action": "读取卖家信息", "target": f"{seller['seller_name'] or '未识别'} · 鱼小铺：{shop_label}",
+                            "method": seller_method, "success": bool(seller["seller_name"])})
             share.click()
             actions.append({"action": "打开分享面板", "target": "分享按钮", "success": True})
             copy = None

@@ -345,3 +345,21 @@ def test_interrupted_runs_are_closed_on_startup(database):
     with database.connect() as connection:
         row = connection.execute("SELECT ok, error FROM search_runs").fetchone()
     assert row["ok"] == 0 and "中断" in row["error"]
+
+
+@pytest.mark.parametrize("shop", [True, False, None])
+async def test_seller_metadata_survives_processing_and_persistence(database, shop):
+    service, notifier = setup(database, region_city="厦门")
+    item = {"item_id": "1090413599999", "title": "iPhone 15 Pro 256G 国行", "price": 3500,
+            "display_region": "厦门", "seller_name": " 测试卖家 ", "is_fish_shop": shop}
+    await service.process_items([item], load_rules(database), "iPhone 15 Pro")
+    assert notifier.payloads[0]["seller_name"] == "测试卖家"
+    assert notifier.payloads[0]["is_fish_shop"] is shop
+    # A later list-only observation must not erase the detail metadata.
+    await service.process_items([{k: v for k, v in item.items() if k not in {"seller_name", "is_fish_shop"}}],
+                                load_rules(database), "iPhone 15 Pro")
+    with database.connect() as connection:
+        saved = connection.execute("SELECT seller_name, is_fish_shop FROM observed_items WHERE item_id=?",
+                                   (item["item_id"],)).fetchone()
+    assert saved["seller_name"] == "测试卖家"
+    assert saved["is_fish_shop"] == shop

@@ -1,11 +1,12 @@
 import pytest
 
 from app_monitor.iphone_collector import (
-    IPhoneCollector, PhoneCard, checked_storages, detail_matches, home_search_city,
+    IPhoneCollector, PhoneCard, checked_storages, detail_matches, detail_seller, home_search_city,
     home_tabs, item_id_from_share, parse_cards, result_bar_label, result_region_chip,
     active_storage_chip,
     is_search_results,
     search_entry_points,
+    recognize_seller_badges,
 )
 from app_monitor.config import Settings
 
@@ -77,6 +78,69 @@ def test_detail_matches_text_view_with_extra_description_and_same_price():
     </XCUIElementTypeApplication>"""
     assert detail_matches(source, card)
     assert not detail_matches(source.replace('name="4819"', 'name="4919"'), card)
+
+
+def seller_source(badge="", seller="测试卖家"):
+    return f'''<XCUIElementTypeApplication width="390" height="844">
+      <XCUIElementTypeOther name="分享按钮" x="354" y="53" width="24" height="24" visible="true" />
+      <XCUIElementTypeOther name="用户头像" x="12" y="99" width="32" height="32" visible="true" />
+      <XCUIElementTypeOther name="{seller}" x="52" y="99" width="80" height="32" visible="true" />
+      {badge}
+      <XCUIElementTypeStaticText name="刚刚来过" x="260" y="108" width="50" height="15" visible="true" />
+      <XCUIElementTypeStaticText name="厦门" x="340" y="108" width="28" height="15" visible="true" />
+      <XCUIElementTypeTextView name="描述里提到鱼小铺不代表卖家开店" x="12" y="300" width="360" height="80" visible="true" />
+    </XCUIElementTypeApplication>'''
+
+
+@pytest.mark.parametrize("badge, expected", [
+    ('<XCUIElementTypeImage name="鱼小铺" x="136" y="108" width="40" height="15" visible="true" />', True),
+    ('<XCUIElementTypeStaticText name="鱼小铺" x="136" y="108" width="40" height="15" visible="true" />', True),
+    ("", False),
+    ('<XCUIElementTypeImage x="136" y="108" width="40" height="15" visible="true" />', None),
+    ('<XCUIElementTypeImage name="鱼小铺" x="136" y="108" width="40" height="15" visible="false" />', False),
+    ('<XCUIElementTypeStaticText name="鱼小铺" x="136" y="600" width="40" height="15" visible="true" />', False),
+])
+def test_seller_is_bound_to_detail_avatar_and_adjacent_badge(badge, expected):
+    assert detail_seller(seller_source(badge)) == {"seller_name": "测试卖家", "is_fish_shop": expected}
+
+
+def test_missing_seller_header_is_unknown_instead_of_non_shop():
+    source = seller_source().replace('name="用户头像"', 'name="其他图片"')
+    assert detail_seller(source) == {"seller_name": "", "is_fish_shop": None}
+    # A result list must not provide seller detail metadata even if matching text is present.
+    assert detail_seller(seller_source().replace('name="分享按钮"', 'name="图片搜索"'))["seller_name"] == ""
+
+
+@pytest.mark.parametrize("text, shop", [("鱼 小 铺", True), ("减碳榜样", False), ("鱼小辅", None), ("", None)])
+def test_unnamed_seller_badge_needs_ocr_evidence(text, shop):
+    source = seller_source('<XCUIElementTypeImage x="136" y="108" width="40" height="15" visible="true" />')
+    assert detail_seller(source, {(136, 108, 40, 15): text})["is_fish_shop"] is shop
+
+
+def test_badge_ocr_crops_logical_bounds_and_removes_temporary_image(monkeypatch):
+    import io
+    from pathlib import Path
+    from types import SimpleNamespace
+    import xml.etree.ElementTree as ET
+    from PIL import Image
+
+    source = seller_source('<XCUIElementTypeImage x="136" y="108" width="40" height="15" visible="true" />')
+    image = Image.new("RGB", (780, 1688), "white")  # Screenshot scale is independent of screen points.
+    png = io.BytesIO()
+    image.save(png, format="PNG")
+    files = []
+
+    def recognize(command, **kwargs):
+        path = Path(command[-1])
+        files.append(path)
+        with Image.open(path) as crop:
+            assert crop.size == (264, 114)  # Badge + two points padding, scaled to screenshot, then enlarged.
+        return SimpleNamespace(returncode=0, stdout="0\t0\t0\t1\t1\t鱼小铺\n")
+
+    monkeypatch.setattr("app_monitor.iphone_collector.subprocess.run", recognize)
+    badges = list(ET.fromstring(source).iter("XCUIElementTypeImage"))
+    assert recognize_seller_badges(png.getvalue(), source, badges) == {(136, 108, 40, 15): "鱼小铺"}
+    assert files and all(not path.exists() for path in files)
 
 
 def test_picker_checkmark_and_result_bar_are_checked_independently():
@@ -286,7 +350,7 @@ def test_share_keeps_copied_id_when_returned_sort_bar_is_hidden(monkeypatch, cli
             pass
 
     class Driver:
-        page_source = '<XCUIElementTypeApplication />'
+        page_source = seller_source('<XCUIElementTypeImage name="鱼小铺" x="136" y="108" width="40" height="15" visible="true" />')
 
         def find_elements(self, *args):
             return [Element()]
@@ -308,7 +372,9 @@ def test_share_keeps_copied_id_when_returned_sort_bar_is_hidden(monkeypatch, cli
         with pytest.raises(RuntimeError, match="剪贴板未产生新链接"):
             collector._share_item_id(driver, "test", card, actions)
     else:
-        assert collector._share_item_id(driver, "test", card, actions) == "1091531543430"
+        seller = {}
+        assert collector._share_item_id(driver, "test", card, actions, seller) == "1091531543430"
+        assert seller == {"seller_name": "测试卖家", "is_fish_shop": True}
         assert any(action["action"] == "取得商品链接" for action in actions)
     assert actions[-1]["action"] == "确认搜索列表"
 

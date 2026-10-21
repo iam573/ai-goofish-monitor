@@ -46,6 +46,8 @@ CREATE TABLE IF NOT EXISTS observed_items (
     price REAL NOT NULL,
     publish_time TEXT,
     display_region TEXT,
+    seller_name TEXT NOT NULL DEFAULT '',
+    is_fish_shop INTEGER,
     tags_json TEXT NOT NULL DEFAULT '[]',
     image_urls_json TEXT NOT NULL DEFAULT '[]',
     item_url TEXT NOT NULL,
@@ -165,6 +167,7 @@ class Database:
                 {
                     "model": "TEXT", "storage": "TEXT", "decision": "TEXT",
                     "matched": "INTEGER NOT NULL DEFAULT 0", "image_urls_json": "TEXT NOT NULL DEFAULT '[]'",
+                    "seller_name": "TEXT NOT NULL DEFAULT ''", "is_fish_shop": "INTEGER",
                 },
             )
             _add_columns(

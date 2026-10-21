@@ -560,6 +560,8 @@ class MonitorService:
             "price": price,
             "publish_time": item.get("publish_time"),
             "display_region": str(item.get("display_region") or ""),
+            "seller_name": str(item.get("seller_name") or "").strip(),
+            "is_fish_shop": item.get("is_fish_shop") if type(item.get("is_fish_shop")) is bool else None,
             "tags": item.get("tags") if isinstance(item.get("tags"), list) else [],
             "image_urls": [
                 url.strip() for url in item.get("image_urls", [])
@@ -578,15 +580,17 @@ class MonitorService:
                 INSERT INTO observed_items(
                     item_id, keyword, title, price, publish_time, display_region,
                     tags_json, image_urls_json, item_url, observed_at, source_row_id, raw_index,
-                    model, storage, decision, matched
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    model, storage, decision, matched, seller_name, is_fish_shop
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(item_id) DO UPDATE SET
                     title=excluded.title, price=excluded.price,
                     display_region=excluded.display_region, tags_json=excluded.tags_json,
                     image_urls_json=excluded.image_urls_json,
                     item_url=excluded.item_url,
                     observed_at=excluded.observed_at, model=excluded.model,
-                    storage=excluded.storage, decision=excluded.decision, matched=excluded.matched
+                    storage=excluded.storage, decision=excluded.decision, matched=excluded.matched,
+                    seller_name=COALESCE(NULLIF(excluded.seller_name, ''), observed_items.seller_name),
+                    is_fish_shop=COALESCE(excluded.is_fish_shop, observed_items.is_fish_shop)
                 """,
                 (
                     item["item_id"], item["keyword"], item["title"], item["price"],
@@ -595,6 +599,7 @@ class MonitorService:
                     json.dumps(item["image_urls"], ensure_ascii=False), item["item_url"],
                     item["observed_at"], item["source_row_id"], item["index"],
                     decision.model, decision.storage, decision.reason, int(decision.matched),
+                    item["seller_name"], item["is_fish_shop"],
                 ),
             )
 
