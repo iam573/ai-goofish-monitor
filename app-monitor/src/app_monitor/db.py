@@ -134,6 +134,23 @@ CREATE TABLE IF NOT EXISTS quote_deductions (
 );
 CREATE INDEX IF NOT EXISTS idx_quote_deductions_lookup ON quote_deductions(batch_id, model);
 
+CREATE TABLE IF NOT EXISTS smart_facts (
+    fingerprint TEXT PRIMARY KEY, facts_json TEXT NOT NULL, created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS smart_assessments (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, item_id TEXT NOT NULL,
+    fingerprint TEXT NOT NULL UNIQUE, snapshot_json TEXT NOT NULL, config_json TEXT NOT NULL,
+    facts_json TEXT NOT NULL, result_json TEXT NOT NULL, status TEXT NOT NULL,
+    created_at TEXT NOT NULL, source TEXT NOT NULL DEFAULT 'model', reviewed INTEGER NOT NULL DEFAULT 0,
+    notification_status TEXT NOT NULL DEFAULT 'none', notification_result TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_smart_item ON smart_assessments(item_id,id DESC);
+CREATE TABLE IF NOT EXISTS smart_notifications (
+    item_id TEXT NOT NULL, tier TEXT NOT NULL, status TEXT NOT NULL,
+    updated_at TEXT NOT NULL, result TEXT,
+    PRIMARY KEY(item_id,tier)
+);
+
 CREATE TABLE IF NOT EXISTS app_state (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL,
@@ -170,6 +187,7 @@ class Database:
                     "seller_name": "TEXT NOT NULL DEFAULT ''", "is_fish_shop": "INTEGER",
                 },
             )
+            _add_columns(connection, "run_items", {"assessment_id": "INTEGER"})
             _add_columns(
                 connection,
                 "search_runs",

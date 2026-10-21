@@ -21,5 +21,5 @@ def test_discovery_only_marks_connected_physical_iphones_online(monkeypatch):
 
     found = discover_devices()
     assert [(item.id, item.connected) for item in found] == [
-        ("mac", True), ("ios:online", True), ("ios:paired-only", False),
+        ("ios:online", True), ("ios:paired-only", False),
     ]

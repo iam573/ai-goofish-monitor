@@ -101,22 +101,25 @@ class NotificationService:
 
     @staticmethod
     def _detail_lines(item: dict[str, Any], reason: str, markdown: bool = False) -> list[str]:
-        price = float(item["price"])
-        lines = [f"挂牌价：¥{price:g}"]
-        quote = item.get("quote_price")
-        if quote is not None:
-            quote_price = float(quote)
-            grade = str(item.get("quote_grade") or "").strip()
-            lines.append(f"{grade}回收报价：¥{quote_price:g}")
-            difference = price - quote_price
-            if difference > 0:
-                lines.append(f"挂牌价高于回收报价：¥{difference:g}")
-            elif difference < 0:
-                lines.append(f"挂牌价低于回收报价：¥{-difference:g}")
-            else:
-                lines.append("挂牌价与回收报价持平")
-        elif reason:
-            lines.append(f"原因：{reason}")
+        if item.get("smart_assessment"):
+            lines = NotificationService._smart_lines(item, markdown)
+        else:
+            price = float(item["price"])
+            lines = [f"挂牌价：¥{price:g}"]
+            quote = item.get("quote_price")
+            if quote is not None:
+                quote_price = float(quote)
+                grade = str(item.get("quote_grade") or "").strip()
+                lines.append(f"{grade}回收报价：¥{quote_price:g}")
+                difference = price - quote_price
+                if difference > 0:
+                    lines.append(f"挂牌价高于回收报价：¥{difference:g}")
+                elif difference < 0:
+                    lines.append(f"挂牌价低于回收报价：¥{-difference:g}")
+                else:
+                    lines.append("挂牌价与回收报价持平")
+            elif reason:
+                lines.append(f"原因：{reason}")
         region = str(item.get("display_region") or item.get("region") or "").strip()
         if region:
             lines.append(f"地区：{region}")
@@ -129,11 +132,43 @@ class NotificationService:
         return lines
 
     @staticmethod
+    def _smart_lines(item, markdown=False):
+        value = item["smart_assessment"]
+        escape = lambda text: re.sub(r"([\\`*_{}\[\]()#+.!|>~-])", r"\\\1", str(text)) if markdown else str(text)
+        method = "本地规则 + AI复核" if value.get("ai_reviewed") else "本地规则"
+        lines = [f"挂牌价：¥{float(item['price']):g}", f"判价方式：{method}（按描述，未验机）",
+                 f"判断成色：{value.get('grade') or '待确认'}"]
+        if value.get("defaults"):
+            lines.append("未说明的电池、拆修等按正常处理，未扣费")
+        evidence = (item.get("assessment_facts") or {}).get("grade_evidence")
+        if evidence:
+            lines.append(f"成色依据：{escape(evidence)}")
+        if value.get("base_price") is not None:
+            lines.append(f"基础回收价：¥{value['base_price']:g}")
+        for row in value.get("deductions", []):
+            amount = f"¥{row['min']:g}" if row['min'] == row['max'] else f"¥{row['min']:g}～{row['max']:g}"
+            lines.append(f"扣费：{escape(row['name'])} −{amount}{'起' if row.get('open_ended') else ''}")
+        low, high = value.get("value_low"), value.get("value_high")
+        if low is not None:
+            price = f"¥{low:g}" if low == high else f"¥{low:g}～{high:g}"
+            lines.append(f"调整后回收价：{price}")
+            difference = float(item['price']) - low
+            lines.append(f"挂牌价高于保守回收价 ¥{difference:g}，需要议价" if difference > 0 else f"挂牌价低于保守回收价 ¥{-difference:g}")
+        elif high is not None:
+            lines.append(f"候选回收价上限：¥{high:g}（信息未齐，不代表实际回收价）")
+        lines.append(f"允许议价金额：¥{value['max_over_quote']:g}")
+        if value.get("threshold_low") is not None:
+            lines.append(f"保守推送上限：¥{value['threshold_low']:g}")
+        if value.get("uncertainties"):
+            lines.append("待确认：" + escape("；".join(value["uncertainties"])))
+        return lines
+
+    @staticmethod
     def _deduction_rows(item: dict[str, Any]) -> list[tuple[str, str, str]]:
         """扣费项：(名称, 扣多少, 扣后回收价)。扣后回收价 = 参考成色回收价 − 该项扣费。"""
         reference = item.get("quote_reference") or {}
         money = NotificationService._money
-        base = item.get("quote_price")
+        base = (item.get("smart_assessment") or {}).get("base_price", item.get("quote_price"))
         rows = []
         for value in reference.get("deductions") or []:
             low = float(value["amount_min"])
@@ -187,7 +222,7 @@ class NotificationService:
         notes = reference.get("notes") or []
         if notes:
             lines.append(f"💬 {'；'.join(notes)}")
-        return NotificationService._category(item), "\n".join(lines)
+        return (("【待确认】" if (item.get("smart_assessment") or {}).get("status") == "pending" else "") + NotificationService._category(item)), "\n".join(lines)
 
     @staticmethod
     def _format_webhook_content(

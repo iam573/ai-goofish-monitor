@@ -9,19 +9,20 @@ async def _noop():
     return None
 
 
-def test_device_selection_is_saved_and_mac_stays_available(tmp_path, monkeypatch):
+def test_device_selection_is_phone_only_and_mac_is_rejected(tmp_path, monkeypatch):
     import app_monitor.devices as devices_module
 
-    found = [Device("mac", "本机 Mac 闲鱼", "mac", True),
-             Device("ios:phone-1", "测试 iPhone", "ios", True, "phone-1", "27.2")]
+    found = [Device("ios:phone-1", "测试 iPhone", "ios", True, "phone-1", "27.2")]
     monkeypatch.setattr(api.database, "path", tmp_path / "devices.sqlite3")
     monkeypatch.setattr(api, "refresh_quotes_if_stale", _noop)
     monkeypatch.setattr(api, "discover_devices", lambda: found)
     monkeypatch.setattr(devices_module, "discover_devices", lambda: found)
     with TestClient(api.app) as client:
-        assert client.get("/api/devices").json()["selected"] == ["mac"]
-        assert client.put("/api/devices/selection", json={"ids": ["mac", "ios:phone-1"]}).status_code == 200
-        assert set(client.get("/api/devices").json()["selected"]) == {"mac", "ios:phone-1"}
+        api.database.state_set("smart_config", {"enabled": False})
+        assert client.get("/api/devices").json()["selected"] == []
+        assert client.put("/api/devices/selection", json={"ids": ["ios:phone-1"]}).status_code == 200
+        assert set(client.get("/api/devices").json()["selected"]) == {"ios:phone-1"}
+        assert client.put("/api/devices/selection", json={"ids": ["mac"]}).status_code == 400
         assert client.put("/api/devices/selection", json={"ids": []}).status_code == 400
         assert client.put("/api/devices/selection", json={"ids": ["ios:unknown"]}).status_code == 400
 
@@ -38,6 +39,7 @@ def test_api_flow_rules_targets_and_injected_items(tmp_path, monkeypatch):
     # API 测试会命中虚构商品；绝不能使用本机 .env 中的真实推送渠道。
     monkeypatch.setattr(api.notification_service, "send", fake_send)
     with TestClient(api.app) as client:
+        api.database.state_set("smart_config", {"enabled": False})
         batch_id = add_quotes(api.database, [
             ("XR", "64", "小花", 500), ("15 Pro", "256", "小花", 4000),
             ("15 Pro", "256", "靓机", 4300), ("17 Pro", "256", "小花", 5000),
@@ -124,6 +126,7 @@ def test_series_and_model_selection_cascades_to_all_capacities(tmp_path, monkeyp
     monkeypatch.setattr(api.database, "path", tmp_path / "selection.sqlite3")
     monkeypatch.setattr(api, "refresh_quotes_if_stale", _noop)
     with TestClient(api.app) as client:
+        api.database.state_set("smart_config", {"enabled": False})
         add_quotes(api.database, [
             ("16", "128", "小花", 3000),
             ("17", "256", "小花", 4000),
@@ -184,6 +187,7 @@ def test_quote_deductions_and_reparse_keep_manual_prices(tmp_path, monkeypatch):
     monkeypatch.setattr(api, "refresh_quotes_if_stale", _noop)
     monkeypatch.setattr(api, "backfill_deductions", _noop)
     with TestClient(api.app) as client:
+        api.database.state_set("smart_config", {"enabled": False})
         batch_id = add_quotes(api.database, [("15 Pro", "256", "小花", 4000), ("15 Pro", "256", "靓机", 4300)])
         image = tmp_path / "quote.png"
         image.write_bytes(b"png")

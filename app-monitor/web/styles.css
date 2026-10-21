@@ -625,3 +625,18 @@ dialog::backdrop { background: rgba(10, 20, 16, .45); backdrop-filter: blur(2px)
   .m-last { max-width: 220px; }
   .sidebar-foot { display: none; }
 }
+
+/* Description grading belongs to the monitor rule form and run details. */
+.valuation-controls { padding: 12px 0; border-block: 1px solid var(--line); }
+.valuation-controls > details { margin: 10px 0; }
+.valuation-controls summary { color: var(--brand); cursor: pointer; }
+.valuation-controls .check { display: flex; flex-direction: row; align-items: center; gap: 6px; margin: 8px 0; }
+.valuation-controls input[type=checkbox] { width: auto; }
+.smart-checks { display: flex; flex-wrap: wrap; gap: 6px 12px; }
+.smart-policy { display: grid; gap: 8px; padding: 14px 0; border-bottom: 1px solid var(--line); }
+#valuation-detail { width: min(780px, 94vw); max-height: 88vh; overflow: auto; }
+#valuation-detail pre { white-space: pre-wrap; padding: 12px; background: var(--surface-2); font-size: 13px; }
+#valuation-detail h4 { margin: 16px 0 8px; }
+#valuation-detail table { width: 100%; border-collapse: collapse; font-size: 13px; }
+#valuation-detail th, #valuation-detail td { padding: 8px; text-align: left; vertical-align: top; border-bottom: 1px solid var(--line); }
+#valuation-correction { display: grid; gap: 12px; margin: 12px 0; }

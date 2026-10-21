@@ -374,7 +374,8 @@ def test_share_keeps_copied_id_when_returned_sort_bar_is_hidden(monkeypatch, cli
     else:
         seller = {}
         assert collector._share_item_id(driver, "test", card, actions, seller) == "1091531543430"
-        assert seller == {"seller_name": "测试卖家", "is_fish_shop": True}
+        assert seller["seller_name"] == "测试卖家" and seller["is_fish_shop"] is True
+        assert "description" in seller
         assert any(action["action"] == "取得商品链接" for action in actions)
     assert actions[-1]["action"] == "确认搜索列表"
 

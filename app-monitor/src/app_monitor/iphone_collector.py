@@ -211,6 +211,22 @@ def recognize_seller_badges(png: bytes, source: str, badges: list[ET.Element]) -
     return labels
 
 
+def detail_content(source: str) -> dict[str, Any]:
+    """Capture the complete accessible description, not just the listing summary."""
+    root = ET.fromstring(source)
+    descriptions = list(dict.fromkeys(_text(n) for n in root.iter("XCUIElementTypeTextView")
+                                      if _text(n) and n.get("visible") != "false"))
+    parameters = []
+    for node in root.iter():
+        if _text(node) not in {"商品规格信息", "商品参数"}:
+            continue
+        values = list(dict.fromkeys(_text(child) for child in node.iter()
+                                    if child is not node and _text(child)
+                                    and child.tag in {"XCUIElementTypeStaticText", "XCUIElementTypeTextView"}))
+        parameters.extend(values)
+    return {"description": "\n\n".join(descriptions), "detail_parameters": list(dict.fromkeys(parameters))}
+
+
 def checked_storages(source: str) -> set[str]:
     """The picker exposes its checkmark as a sibling image, not a selected flag."""
     root = ET.fromstring(source)
@@ -947,6 +963,8 @@ class IPhoneCollector:
             if not detail_matches(source, card):
                 raise RuntimeError("详情页标题或价格与候选卡片不一致，已跳过复制")
             actions.append({"action": "核对详情标题和价格", "target": f"¥{card.price:g}", "success": True})
+            if seller_info is not None:
+                seller_info.update(detail_content(source))
             seller = detail_seller(source)
             # Seller header accessibility may become visible shortly after the description.
             for _ in range(2):

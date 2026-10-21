@@ -10,6 +10,14 @@ from app_monitor.service import MonitorService
 from conftest import add_quotes
 
 
+@pytest.fixture(autouse=True)
+def phone_only_fixture(database, monkeypatch):
+    database.state_set("collector_devices", ["ios:test-phone"])
+    database.state_set("smart_config", {"enabled": False})
+    monkeypatch.setattr("app_monitor.service.discover_devices", lambda: [
+        Device("ios:test-phone", "测试 iPhone", "ios", True, "test-phone", "27.2")])
+
+
 class FakeCollector:
     def __init__(self, items=None, error=None, filter_ok=True):
         self.items, self.error, self.filter_ok, self.calls = items or [], error, filter_ok, []
@@ -55,7 +63,16 @@ def setup(database, collector=None, **rules):
     rules.setdefault("search_end", "00:00")  # 测试中全天可搜
     save_rules(database, Rules(**rules))
     notifier = FakeNotifier()
-    return MonitorService(database, collector or FakeCollector(), notifier), notifier
+    fake = collector or FakeCollector()
+    service = MonitorService(database, None, notifier)
+
+    class PhoneAdapter:
+        async def collect(self, udid, version, keyword, city, steps, storages, pages, is_candidate, on_items=None):
+            return await fake.collect(keyword, region_steps=steps, region_hint=city,
+                                      storage_filters=[(value, load_rules(database).storage_steps(value)) for value in storages],
+                                      scroll_pages=pages, on_items=on_items)
+    service.iphone_collector = PhoneAdapter()
+    return service, notifier
 
 
 async def test_run_model_applies_region_and_capacity_filter(database):
@@ -186,8 +203,9 @@ async def test_iphone_filter_failure_keeps_actions_in_failed_run(database, monke
 async def test_title_without_storage_is_rejected_when_filter_failed(database):
     items = [{"item_id": "d", "title": "iPhone 15 Pro 原色 自用", "price": 3400}]
     service, notifier = setup(database, FakeCollector(items, filter_ok=False))
-    result = await service.run_model("15 Pro", "256")
-    assert result["matched"] == 0 and result["decisions"] == []
+    with pytest.raises(RuntimeError, match="筛选失败"):
+        await service.run_model("15 Pro", "256")
+    assert notifier.sent == []
 
 
 async def test_scheduler_walks_each_model_once_with_all_capacities(database):
@@ -279,7 +297,7 @@ async def test_items_are_judged_and_pushed_while_collection_is_still_running(dat
 
     assert seen_during_collection["pushed"] == ["s1"]
     assert seen_during_collection["run_items"] == 1
-    assert seen_during_collection["live"]["stage"] == "读取 256G 第 1/1 屏"
+    assert seen_during_collection["live"]["stage"] == "测试 iPhone · 读取 256G 第 1/1 屏"
     assert seen_during_collection["live"]["matched"] == 1
     assert seen_during_collection["passes"][0]["storage"] == "256"
     assert len(notifier.sent) == 1  # 采集结束后不会重复处理同一商品

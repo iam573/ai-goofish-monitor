@@ -14,7 +14,6 @@ from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from .collector import GoofishCollector
 from .config import ROOT, settings
 from .db import Database, rows_as_dicts, utc_now
 from .devices import discover_devices, selected_devices, set_selected_devices
@@ -41,7 +40,7 @@ from .service import MonitorService, unit_key
 database = Database(settings.database)
 quote_service = QuoteService(database, settings)
 notification_service = NotificationService(settings)
-monitor_service = MonitorService(database, GoofishCollector(settings), notification_service)
+monitor_service = MonitorService(database, None, notification_service)
 scheduler = AsyncIOScheduler(timezone=settings.timezone)
 
 
@@ -137,7 +136,7 @@ async def no_stale_assets(request: Request, call_next):
 async def index() -> HTMLResponse:
     """给脚本和样式加上按文件修改时间生成的版本号，文件一变浏览器就会取新的。"""
     html = (web_dir / "index.html").read_text(encoding="utf-8")
-    for name in ("app.js", "styles.css"):
+    for name in ("app.js", "smart-ui.js", "styles.css"):
         version = int((web_dir / name).stat().st_mtime)
         html = html.replace(f"/assets/{name}", f"/assets/{name}?v={version}")
     return HTMLResponse(html)
@@ -180,7 +179,8 @@ async def overview() -> dict[str, Any]:
         "busy": monitor_service.busy,
         "live": monitor_service.live,
         "last_run": monitor_service._run_dict(last_run) if last_run else None,
-        "track_db_available": settings.track_db.exists(),
+        "collector_mode": "iphone",
+        "smart": monitor_service.smart.public_config(),
         "notification_channels": notification_service.configured_channels,
     }
 
@@ -308,6 +308,10 @@ async def run_target(model: str, storage: str | None = None) -> dict[str, Any]:
 
 
 class ObservationPayload(BaseModel):
+    description: str = Field(default="", max_length=50000)
+    detail_parameters: list[str] = Field(default_factory=list)
+    seller_name: str = ""
+    is_fish_shop: bool | None = None
     item_id: str
     title: str
     price: float = Field(gt=0)
@@ -499,12 +503,15 @@ async def run_detail(run_id: int) -> dict[str, Any]:
             raise HTTPException(404, "搜索记录不存在")
         items = rows_as_dicts(
             connection.execute(
-                "SELECT * FROM run_items WHERE run_id=? ORDER BY matched DESC, position",
+                """SELECT r.*, a.status AS assessment_status, a.notification_status AS assessment_notification,
+                    a.result_json AS assessment_result FROM run_items r LEFT JOIN smart_assessments a ON a.id=r.assessment_id
+                    WHERE r.run_id=? ORDER BY r.matched DESC, r.position""",
                 (run_id,),
             ).fetchall()
         )
     codes: dict[str, int] = {}
     for item in items:
+        item["assessment_result"] = json.loads(item["assessment_result"]) if item.get("assessment_result") else None
         codes[item["code"] or "other"] = codes.get(item["code"] or "other", 0) + 1
     return {**_with_live(monitor_service._run_dict(row)), "items": items, "codes": codes}
 
@@ -531,3 +538,134 @@ async def test_notification() -> dict[str, Any]:
         "configured_channels": notification_service.configured_channels,
         "results": await notification_service.test(),
     }
+
+
+# Smart estimation uses only detail text. Credentials are never returned by these endpoints.
+from .smart import SmartConfig, Facts, Policy, policies_for, evidence_text
+
+
+class SmartConfigPayload(SmartConfig):
+    api_key: str | None = Field(default=None, max_length=1000, exclude=True)
+
+
+@app.get("/api/smart/config")
+async def smart_config():
+    return monitor_service.smart.public_config()
+
+
+@app.put("/api/smart/config")
+async def save_smart_config(payload: SmartConfigPayload):
+    if monitor_service.busy:
+        raise HTTPException(409, "请等当前采集结束后修改判价规则")
+    try:
+        return monitor_service.smart.save_config(SmartConfig.model_validate(payload.model_dump()), payload.api_key)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
+@app.post("/api/smart/test")
+async def test_smart_connection():
+    try:
+        await monitor_service.smart.request_facts(
+            {"title": "模型连接测试", "price": 5000, "description": "iPhone 17，256G，个人自用整机，售价5000元。"}, monitor_service.smart.config())
+    except ValueError as exc:
+        raise HTTPException(502, str(exc)) from exc
+    return {"ok": True}
+
+
+@app.get("/api/smart/policies")
+async def smart_policies(model: str = Query(min_length=1, max_length=40)):
+    rules = load_rules(database)
+    return {"model": model, "category": rules.quote_category,
+            "items": policies_for(database, model, rules.quote_category)}
+
+
+class PolicyUpdate(BaseModel):
+    rule_key: str = Field(min_length=64, max_length=64)
+    policy: Policy
+
+
+@app.put("/api/smart/policies")
+async def save_smart_policies(payload: list[PolicyUpdate], model: str = Query(min_length=1, max_length=40)):
+    if monitor_service.busy:
+        raise HTTPException(409, "请等当前采集结束后修改扣费规则")
+    current = {row["rule_key"]: row for row in policies_for(database, model, load_rules(database).quote_category)}
+    saved = database.state_get("smart_policies", {})
+    for update in payload:
+        if update.rule_key not in current:
+            raise HTTPException(409, "报价备注已更新，请刷新后重新确认")
+        policy = update.policy
+        if policy.reviewed and policy.action != "ignore":
+            if not policy.value.strip():
+                raise HTTPException(422, "已确认规则的触发值不能为空")
+            if policy.operator in {"lt", "le", "gt", "ge"}:
+                import math
+                try:
+                    valid = math.isfinite(float(policy.value))
+                except ValueError:
+                    valid = False
+                if not valid:
+                    raise HTTPException(422, "数值比较条件需要有限数字")
+            if policy.action == "deduct" and current[update.rule_key]["amount_min"] is None:
+                raise HTTPException(422, "没有金额的备注不能直接扣费，请选择降档或忽略")
+        saved[update.rule_key] = policy.model_dump()
+    database.state_set("smart_policies", saved)
+    return await smart_policies(model)
+
+
+@app.get("/api/smart/assessments")
+async def smart_assessments(status: str = "", limit: int = Query(default=100, ge=1, le=500)):
+    if status and status not in {"matched", "pending", "rejected", "analysis_failed"}:
+        raise HTTPException(422, "无效的分析状态")
+    clause = "AND a.status=?" if status else ""
+    with database.connect() as c:
+        rows = c.execute(f"""SELECT a.* FROM smart_assessments a
+            WHERE a.id=(SELECT MAX(b.id) FROM smart_assessments b WHERE b.item_id=a.item_id)
+            {clause} ORDER BY a.id DESC LIMIT ?""", ([status, limit] if status else [limit])).fetchall()
+    return [monitor_service.smart.row(row) for row in rows]
+
+
+@app.get("/api/smart/assessments/{record_id}")
+async def smart_assessment(record_id: int):
+    try:
+        return monitor_service.smart.get(record_id)
+    except KeyError:
+        raise HTTPException(404, "分析记录不存在") from None
+
+
+@app.post("/api/smart/assessments/{record_id}/review")
+async def review_smart_assessment(record_id: int):
+    await smart_assessment(record_id)
+    with database.connect() as c:
+        c.execute("UPDATE smart_assessments SET reviewed=1 WHERE id=?", (record_id,))
+    return await smart_assessment(record_id)
+
+
+async def rerun_smart(record_id: int, manual: Facts | None = None):
+    if monitor_service.busy:
+        raise HTTPException(409, "当前正在采集或分析，请稍后重试")
+    record = await smart_assessment(record_id)
+    if not monitor_service.smart.config().enabled:
+        raise HTTPException(409, "请先启用智能估价（可以使用影子模式）")
+    async with monitor_service._lock:
+        snapshot = record["snapshot"]
+        if manual:
+            try:
+                manual.verify(evidence_text(snapshot))
+            except ValueError as exc:
+                raise HTTPException(422, str(exc)) from exc
+        rules = load_rules(database)
+        updated = await monitor_service.smart.assess(snapshot, rules, snapshot["context_model"],
+                    snapshot["context_storage"], snapshot.get("region_applied", False), force=True, manual=manual)
+        await monitor_service.publish_smart(updated, rules)
+        return monitor_service.smart.get(updated["id"])
+
+
+@app.post("/api/smart/assessments/{record_id}/reanalyze")
+async def reanalyze_smart_assessment(record_id: int):
+    return await rerun_smart(record_id)
+
+
+@app.put("/api/smart/assessments/{record_id}/correction")
+async def correct_smart_assessment(record_id: int, payload: Facts):
+    return await rerun_smart(record_id, payload)

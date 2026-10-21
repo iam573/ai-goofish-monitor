@@ -1,3 +1,4 @@
+import { initSmart } from "./smart-ui.js";
 const state = { products: [], rules: null, overview: null, targets: [], devices: [] };
 const gradeOrder = ["靓机", "小花", "大花", "外爆", "内爆可测"];
 
@@ -75,9 +76,10 @@ async function loadOverview() {
   state.overview = value;
   const rules = value.rules;
   const health = document.querySelector("#health");
-  health.textContent = value.track_db_available ? "服务正常" : "服务正常 · 未找到闲鱼曝光 DB";
+  health.textContent = "服务正常 · iPhone 采集";
+  state.smart = value.smart;
   health.classList.add("online");
-  health.classList.toggle("warn", !value.track_db_available);
+  health.classList.remove("warn");
 
   const noWarranty = value.quotes.find(q => q.category_id === rules.quote_category) || value.quotes[0];
   const quoteFresh = Boolean(noWarranty?.fresh);
@@ -90,7 +92,7 @@ async function loadOverview() {
   const ruleStep = {
     label: "② 监控规则",
     main: `${rules.region_city || "全国"} · 全部 iPhone 机型`,
-    sub: `${rules.quote_category === "100027" ? "有保" : "无保"}${rules.quote_grade}回收价 · 最多高于 ¥${rules.max_over_quote}`,
+    sub: `${rules.quote_category === "100027" ? "有保" : "无保"}${value.smart?.enabled ? " · 自动成色与扣费" : rules.quote_grade}回收价 · 最多高于 ¥${rules.max_over_quote}`,
     tone: "ok",
   };
   const schedule = value.schedule;
@@ -150,7 +152,6 @@ async function loadDevices() {
 }
 
 const deviceIcons = {
-  mac: `<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4.5" width="18" height="12" rx="1.8"/><path d="M8.5 20h7M12 16.5V20"/></svg>`,
   ios: `<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="6.5" y="2.5" width="11" height="19" rx="2.4"/><path d="M10.5 18.5h3"/></svg>`,
 };
 
@@ -159,24 +160,23 @@ function selectedDevices() { return state.devices.filter(device => device.select
 function deviceSummary() {
   const selected = selectedDevices();
   if (!selected.length) return "未选择";
-  if (selected.length === 1) return selected[0].kind === "mac" ? "本机 Mac" : selected[0].name;
-  const phones = selected.filter(device => device.kind !== "mac").length;
-  return selected.some(device => device.kind === "mac") ? `Mac + ${phones} 台 iPhone` : `${phones} 台 iPhone`;
+  if (selected.length === 1) return selected[0].name;
+  return `${selected.length} 台 iPhone`;
 }
 
 function renderDevices() {
   const selected = selectedDevices();
   document.querySelector("#device-options").innerHTML = state.devices.map(device => {
     const order = selected.indexOf(device);
-    const meta = device.kind === "mac" ? "Mac 版闲鱼" : `${escapeHtml(device.os_version ? `iOS ${device.os_version}` : "iPhone")}`;
+    const meta = escapeHtml(device.os_version ? `iOS ${device.os_version}` : "iPhone");
     return `<label class="device-row ${device.connected ? "" : "offline"}">
       <input type="checkbox" value="${escapeHtml(device.id)}" ${device.selected ? "checked" : ""} />
-      <span class="device-glyph">${device.kind === "mac" ? deviceIcons.mac : deviceIcons.ios}</span>
+      <span class="device-glyph">${deviceIcons.ios}</span>
       <span class="device-info"><b>${escapeHtml(device.name)}</b>
         <small>${meta} · <span class="${device.connected ? "online-text" : "warn-text"}">${device.connected ? "已连接" : "未连接"}</span></small></span>
       ${selected.length > 1 && order >= 0 ? `<em class="device-order" title="采集顺序">${order + 1}</em>` : ""}
     </label>`;
-  }).join("") || `<p class="hint">没有检测到设备。</p>`;
+  }).join("") || `<p class="hint">没有检测到 iPhone；Mac 采集已禁用。</p>`;
   document.querySelector("#device-summary").textContent = deviceSummary();
   const dot = document.querySelector("#device-dot");
   dot.className = `dot ${!selected.length ? "bad" : selected.every(device => device.connected) ? "ok" : "warn"}`;
@@ -214,7 +214,7 @@ function isDirty() {
   return ruleFields.some(name => {
     const saved = name === "exclude_keywords" ? splitKeywords(state.rules[name]).join(",") : state.rules[name];
     return numberFields.has(name) ? Number(saved) !== values[name] : String(saved ?? "").trim() !== values[name];
-  });
+  }) || smartUI.isDirty();
 }
 
 function refreshDirty() {
@@ -261,6 +261,7 @@ async function saveRules(event) {
   const button = document.querySelector("#rules-save");
   button.disabled = true;
   try {
+    await smartUI.saveConfig();
     state.rules = await api("/api/rules", { method: "PUT", body: JSON.stringify(rulesPayload(formValues())) });
     fillRules(state.rules);
     toast("规则已保存，下一次搜索生效");
@@ -348,14 +349,16 @@ async function updateRuleHints() {
   }
   field("region_path").placeholder = path ? `留空自动生成：${path}` : "留空自动生成，例如 区域 > 福建 > 厦门 > 查看";
   const devices = selectedDevices();
-  const usesMac = devices.some(device => device.kind === "mac");
   const usesPhone = devices.some(device => device.kind !== "mac");
   document.querySelector("#region-hint").innerHTML = city
-    ? [usesMac && path ? `Mac 端依次点击 <b>${escapeHtml(path)}</b>。` : "",
-       usesPhone ? `iPhone 端优先使用首页「${escapeHtml(city)}」Tab 搜索。` : "",
+    ? [usesPhone ? `iPhone 端优先使用首页「${escapeHtml(city)}」Tab 搜索。` : "",
        `卡片地区明确不是${escapeHtml(city)}的商品不推送。`].join("")
     : "未设置城市：搜索全国，不核对地区。";
 
+  const smartEnabled = Boolean(state.smart?.enabled);
+  field("quote_grade").length && [...field("quote_grade")].forEach(input => { input.disabled = smartEnabled; });
+  const gradeGroup = rulesForm.querySelector('[name="quote_grade"]')?.closest(".field");
+  if (gradeGroup) gradeGroup.hidden = smartEnabled;
   // 判价公式示例
   const over = Math.max(0, values.max_over_quote || 0);
   const ratio = values.min_price_ratio || 0;
@@ -365,10 +368,12 @@ async function updateRuleHints() {
     `<div class="formula-main">推送：<b>${escapeHtml(ratio ? `¥${money(Math.round(sample * ratio))}` : "¥0")}</b> ≤ 挂牌价 ≤ <b>${sourceName}${escapeHtml(values.quote_grade)}价 + ¥${money(over)}</b></div>
      <div class="hint">例：回收报价 ¥${money(sample)} → 挂牌价 ¥${money(sample + over)} 以内推送${ratio ? `，低于 ¥${money(Math.round(sample * ratio))} 视为引流或非整机` : ""}。</div>`;
 
+  if (smartEnabled) document.querySelector("#price-formula").innerHTML = `<div class="formula-main">关键词判成色 → 扣费后回收价 + ¥${money(over)}</div><div class="hint">候选用允许成色的最高价初筛，未说明项按正常处理，矛盾信息列为待确认。低价比例仅标记风险。${state.smart.shadow ? '验证模式：只记录，不发通知。' : ''}</div>`;
+
   // 搜索方式与耗时估算：每次搜索 = 打开搜索 + 区域筛选 + 逐个容量筛选并读「新发」
   const scrolls = Math.max(0, values.scroll_pages || 0);
   document.querySelector("#storage-hint").innerHTML =
-    `每款机型打开一次搜索页，${usesPhone && !usesMac ? "依次勾选各容量并点「确定」" : "依次切换各容量"}，只看「新发」` +
+    `每款机型打开一次搜索页，依次勾选各容量并点「确定」，只看「新发」` +
     (scrolls ? `，每个容量向下翻 ${scrolls} 屏读完第一页。` : `，只读当前一屏。`);
   const { models, capacities, total, allCapacities } = targetCounts();
   const interval = values.model_interval_minutes || 90;
@@ -395,8 +400,8 @@ function renderRuleSentence(values, { models, capacities, interval, round }) {
       用 ${token("devices", deviceSummary(), selectedDevices().length ? "" : "bad")}
       在 ${token("region_city", values.region_city || "全国")}
       搜索 ${token("targets", `${models} 款机型 · ${capacities} 个容量`, models ? "" : "bad")}，
-      挂牌价不超过 ${token("quote_grade", `${sourceName}${values.quote_grade}回收价`)} ${token("max_over_quote", `+ ¥${money(values.max_over_quote || 0)}`)}
-      就推送（排除 ${token("exclude_keywords", `${words} 个关键词`)}）；
+      挂牌价不超过 ${token("quote_grade", `${sourceName}${state.smart?.enabled ? "允许成色最高" : values.quote_grade}回收价`)} ${token("max_over_quote", `+ ¥${money(values.max_over_quote || 0)}`)}
+      ${state.smart?.enabled ? "进入详情按关键词判成色与扣费；" : `就推送（排除 ${token("exclude_keywords", `${words} 个关键词`)}）；`}
       ${token("search_start", `${values.search_start || "--:--"}–${values.search_end || "--:--"}`)}
       内每款机型约 ${token("model_interval_minutes", `${Math.max(interval, round || 0)} 分钟`)}搜一次。
     </p>
@@ -578,7 +583,7 @@ const triggerLabels = { schedule: "定时", manual: "手动", inject: "调试" }
 const codeLabels = {
   matched: "命中", price_high: "价格偏高", region: "地区不符", unrecognized: "无法识别",
   excluded: "排除词", too_cheap: "疑似引流", no_quote: "无报价", other_model: "其他机型", other: "其他",
-  no_link: "价格符合·无链接",
+  no_link: "候选·无链接", pending: "待确认", smart_rejected: "判价不符合", analysis_failed: "分析失败",
 };
 /** 每一轮的名字：按容量筛选时显示容量（「256G」），否则显示按钮名（「新发」）。 */
 function passName(p) {
@@ -586,7 +591,7 @@ function passName(p) {
   return p.device_name ? `${p.device_name} · ${name}` : name;
 }
 
-const codeOrder = ["matched", "no_link", "price_high", "region", "other_model", "unrecognized", "excluded", "too_cheap", "no_quote", "other"];
+const codeOrder = ["matched", "pending", "analysis_failed", "smart_rejected", "no_link", "price_high", "region", "other_model", "unrecognized", "excluded", "too_cheap", "no_quote", "other"];
 
 function unitName(run) {
   return `${run.model}${run.storage ? ` ${displayStorage(run.storage)}` : ""}`;
@@ -648,7 +653,7 @@ function runItem(item, fresh = false) {
   const code = item.code || "other";
   const above = item.code === "price_high" && item.threshold_price != null ? item.price - item.threshold_price : null;
   const badge = item.matched
-    ? `<span class="item-badge hit">命中 · ${quoteDifferenceLabel(item.quote_price, item.price)}</span>${item.new_deal ? `<span class="item-badge">本次推送</span>` : `<span class="item-badge muted">之前已推送</span>`}`
+    ? `<span class="item-badge hit">命中 · ${quoteDifferenceLabel(item.quote_price, item.price)}</span>${item.new_deal ? `<span class="item-badge">本次推送</span>` : `<span class="item-badge muted">${item.assessment_notification === "shadow" ? "仅记录" : "已处理"}</span>`}`
     : `<span class="item-badge ${code}">${codeLabels[code] || code}</span>`;
   const quote = item.quote_price != null
     ? `回收报价 ¥${item.quote_price} · 推送上限 ¥${Math.round(item.threshold_price)}${above != null ? ` · <b class="bad">高出上限 ¥${Math.round(above)}</b>` : ""}`
@@ -664,6 +669,7 @@ function runItem(item, fresh = false) {
         ${item.display_region ? `<span>${escapeHtml(item.display_region)}</span>` : ""}
         ${item.pass_label ? `<span class="pass-tag">${escapeHtml(item.pass_label)}</span>` : ""}
       </div>
+      ${item.assessment_id ? `<button type="button" class="compact secondary" data-assessment-id="${item.assessment_id}">成色与扣费依据</button>` : ""}
       <div class="run-item-reason">${item.matched || item.code === "price_high" ? quote : `${escapeHtml(item.decision || "")}${quote ? ` · ${quote}` : ""}`}</div>
     </div>
     <div class="run-item-price">¥${item.price}</div>
@@ -1269,10 +1275,12 @@ document.querySelector("#test-notification").addEventListener("click", async () 
   } catch (error) { toast(error.message, true); }
 });
 
+const smartUI = initSmart({api, escapeHtml, toast, state, gradeOrder, loadOverview, updateRuleHints, onDirty: refreshDirty});
+
 async function initialize() {
   if (location.hash) showPanel(`${location.hash.slice(1)}-panel`, { load: false });
   try {
-    await Promise.all([loadOverview(), loadRules(), loadDevices()]);
+    await Promise.all([loadOverview(), loadRules(), loadDevices(), smartUI.loadConfig()]);
     await Promise.all([loadDeals(), loadTargets(), loadQuoteBatches(), loadQuotes()]);
   } catch (error) {
     document.querySelector("#health").textContent = "连接失败";

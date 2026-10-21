@@ -28,7 +28,7 @@ class Device:
 
 
 def discover_devices() -> list[Device]:
-    devices = [Device(MAC_DEVICE, "本机 Mac 闲鱼", "mac", True)]
+    devices: list[Device] = []
     try:
         completed = subprocess.run(
             ["xcrun", "devicectl", "list", "devices", "--json-output", "-"],
@@ -54,14 +54,14 @@ def discover_devices() -> list[Device]:
 
 
 def selected_devices(database: Database) -> list[str]:
-    value = database.state_get(SELECTION_KEY, [MAC_DEVICE])
+    value = database.state_get(SELECTION_KEY, [])
     if not isinstance(value, list):
-        return [MAC_DEVICE]
-    return list(dict.fromkeys(str(item) for item in value if item == MAC_DEVICE or str(item).startswith("ios:")))
+        return []
+    return list(dict.fromkeys(str(item) for item in value if str(item).startswith("ios:")))
 
 
 def set_selected_devices(database: Database, ids: list[str]) -> list[str]:
-    known = {device.id for device in discover_devices()}
+    known = {device.id for device in discover_devices() if device.kind == "ios"}
     selected = list(dict.fromkeys(ids))
     if not selected:
         raise ValueError("至少选择一台采集设备")

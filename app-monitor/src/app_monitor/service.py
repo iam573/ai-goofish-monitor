@@ -10,13 +10,15 @@ from dataclasses import replace
 from datetime import datetime, timedelta
 from typing import Any
 
-from .collector import CollectResult, GoofishCollector
+from .collector import CollectResult
 from .db import Database, utc_now
+from .config import settings as default_settings
+from .smart import SmartService, candidate_decision, load_config
 from .devices import MAC_DEVICE, discover_devices, selected_devices
 from .iphone_collector import IPhoneCollector
 from .matching import MatchDecision, evaluate
 from .notifications import NotificationService, notification_result_text
-from .quotes import quote_reference
+from .quotes import quote_reference, latest_entries
 from .rules import (
     Rules,
     eligible_quotes,
@@ -89,12 +91,14 @@ class MonitorService:
     def __init__(
         self,
         database: Database,
-        collector: GoofishCollector,
+        collector: Any,
         notifications: NotificationService,
     ):
         self.database = database
         self.collector = collector
-        self.iphone_collector = IPhoneCollector(collector.settings) if hasattr(collector, "settings") else None
+        self.settings = getattr(collector, "settings", default_settings)
+        self.iphone_collector = IPhoneCollector(self.settings)
+        self.smart = SmartService(database, self.settings)
         self.notifications = notifications
         self._lock = asyncio.Lock()
         # 正在进行的搜索：run_id、当前步骤、已看到 / 命中件数，供后台实时显示
@@ -117,6 +121,8 @@ class MonitorService:
         }
         if not rules.enabled:
             state["reason"] = "监控已暂停"
+        elif not selected_devices(self.database):
+            state["reason"] = "请选择已连接的 iPhone；Mac 采集已禁用"
         elif not units:
             state["reason"] = "没有可搜索的机型，请先同步报价"
         elif not in_search_window(rules, now):
@@ -353,35 +359,28 @@ class MonitorService:
         combined = CollectResult(items=[])
         failures = []
         successes = 0
-        quotes = eligible_quotes(self.database, rules)
+        smart = load_config(self.database)
+        quotes = latest_entries(self.database, rules.quote_category) if smart.enabled else eligible_quotes(self.database, rules)
 
         def is_candidate(item: dict[str, Any], region_applied: bool, storage_hint: str) -> bool:
-            decision = evaluate(item, rules, quotes, region_applied, storage_hint, model)
+            decision = (candidate_decision(item, rules, quotes, smart, region_applied, storage_hint, model)
+                        if smart.enabled else evaluate(item, rules, quotes, region_applied, storage_hint, model))
             return decision.matched and decision.storage == storage_hint and storage_hint in storages
 
         for device_id in selected:
             device = available.get(device_id)
             label = device.name if device else device_id
             try:
-                if device_id == MAC_DEVICE:
-                    part = await self.collector.collect(
-                        keyword, region_steps=rules.region_steps,
-                        region_hint=rules.region_city,
-                        storage_filters=[(value, rules.storage_steps(value)) for value in storages],
-                        scroll_pages=rules.scroll_pages,
-                        on_items=stream.for_device(device_id, label) if stream else None,
-                    )
-                else:
-                    if device is None or not device.connected:
-                        raise RuntimeError("iPhone 未连接；已保留勾选，重连后可继续使用")
-                    if self.iphone_collector is None:
-                        raise RuntimeError("iPhone 采集器未配置")
-                    part = await self.iphone_collector.collect(
-                        device.udid, device.os_version, keyword, rules.region_city,
-                        rules.region_steps, storages, rules.scroll_pages, is_candidate,
-                        on_items=stream.for_device(device_id, label) if stream else None,
-                    )
-                if device_id == MAC_DEVICE or any(not entry.get("error") for entry in part.passes):
+                if not device_id.startswith("ios:") or (device and device.kind != "ios"):
+                    raise RuntimeError("仅支持 iPhone；Mac 采集已禁用")
+                if device is None or not device.connected:
+                    raise RuntimeError("iPhone 未连接；已保留勾选，重连后可继续使用")
+                part = await self.iphone_collector.collect(
+                    device.udid, device.os_version, keyword, rules.region_city,
+                    rules.region_steps, storages, rules.scroll_pages, is_candidate,
+                    on_items=stream.for_device(device_id, label) if stream else None,
+                )
+                if any(not entry.get("error") for entry in part.passes):
                     successes += 1
                 combined.items.extend({**item, "source_device": device_id} for item in part.items)
                 for entry in part.passes:
@@ -423,7 +422,10 @@ class MonitorService:
             region = str(card.get("display_region") or "")
             item = {"title": title, "price": price, "display_region": region,
                     "item_url": "", "publish_time": None, "tags": []}
-            decision = evaluate(item, rules, quotes, bool(meta.get("region_applied")), storage_hint, model)
+            smart = load_config(self.database)
+            decision = (candidate_decision(item, rules, latest_entries(self.database, rules.quote_category), smart,
+                                           bool(meta.get("region_applied")), storage_hint, model)
+                        if smart.enabled else evaluate(item, rules, quotes, bool(meta.get("region_applied")), storage_hint, model))
             if decision.matched:
                 reason = card.get("link_error") or (
                     f"标题容量（{decision.storage}）与当前容量筛选不一致，未进详情取链接" if storage_hint else "未进详情取链接"
@@ -482,6 +484,8 @@ class MonitorService:
         run_id: int | None = None,
         expected_model: str | None = None,
     ) -> dict[str, Any]:
+        if load_config(self.database).enabled:
+            return await self._process_smart_items(items, rules, keyword, region_applied, storage_hint, run_id, expected_model)
         quotes = eligible_quotes(self.database, rules)
         matched = notified = 0
         decisions = []
@@ -529,6 +533,96 @@ class MonitorService:
                 )
         return {"observed": len(items), "matched": matched, "notified": notified, "decisions": decisions}
 
+    async def _process_smart_items(self, items, rules, keyword, region_applied, storage_hint, run_id, expected_model):
+        config = load_config(self.database)
+        quotes = latest_entries(self.database, rules.quote_category)
+        matched = notified = 0
+        decisions = []
+        for raw in items:
+            created = False
+            record = None
+            item = self._normalize_item(raw, keyword)
+            broad = candidate_decision(item, rules, quotes, config, region_applied, storage_hint, expected_model)
+            if not broad.matched:
+                decision = broad
+            else:
+                if self.live:
+                    self.live["stage"] = f"分析详情与扣费 · {item['item_id']}"
+                logger.info("本地规则/AI复核开始 item_id=%s model=%s storage=%s", item["item_id"], broad.model, broad.storage)
+                record = await self.smart.assess(item, rules, broad.model, broad.storage, region_applied)
+                decision = self.smart_decision(record)
+                created, sent = await self.publish_smart(record, rules)
+                matched += int(created)
+                notified += int(sent)
+                logger.info("本地规则/AI复核结束 item_id=%s status=%s reason=%s", item["item_id"], record["status"], decision.reason)
+            self._save_item(item, decision)
+            if run_id is not None:
+                label = raw.get("source_storage") or storage_hint
+                self._save_run_item(run_id, label, item, decision, bool(broad.matched and created), record["id"] if record else None)
+            decisions.append({"item_id": item["item_id"], "title": item["title"], "price": item["price"],
+                              "matched": decision.matched, "reason": decision.reason, "code": decision.code})
+        return {"observed": len(items), "matched": matched, "notified": notified, "decisions": decisions}
+
+    @staticmethod
+    def smart_decision(record):
+        value, item = record["result"], record["snapshot"]
+        low = value.get("value_low")
+        return MatchDecision(
+            value["status"] == "matched", value["reason"], value["model"], value["storage"],
+            quote_entry_id=value.get("quote_entry_id"), quote_price=low,
+            threshold_price=value.get("threshold_low"),
+            expected_margin=low - float(item["price"]) if low is not None else None,
+            region=item.get("display_region"),
+            code={"matched": "matched", "pending": "pending", "rejected": "smart_rejected",
+                  "analysis_failed": "analysis_failed"}[value["status"]],
+        )
+
+    async def publish_smart(self, record, rules):
+        """Delivery dedup is separate from assessments, including one pending → matched upgrade."""
+        value = record["result"]
+        item = self._normalize_item(record["snapshot"], "")
+        decision = self.smart_decision(record)
+        self._save_item(item, decision)
+        if value.get("shadow") or value["status"] not in {"pending", "matched"} or value["status"] == "pending" and not value.get("notify_pending", True):
+            state = "shadow" if value.get("shadow") else "none"
+            with self.database.connect() as c:
+                c.execute("UPDATE smart_assessments SET notification_status=? WHERE id=?", (state, record["id"]))
+            return False, False
+        tier = value["status"]
+        with self.database.connect() as c:
+            c.execute("BEGIN IMMEDIATE")
+            higher = c.execute("SELECT 1 FROM smart_notifications WHERE item_id=? AND tier='matched' AND status IN ('sent','sending')",
+                               (item["item_id"],)).fetchone()
+            existing = c.execute("SELECT status FROM smart_notifications WHERE item_id=? AND tier=?", (item["item_id"], tier)).fetchone()
+            legacy = c.execute("SELECT 1 FROM deals WHERE item_id=? AND notification_status='sent'", (item["item_id"],)).fetchone()
+            if higher or legacy or existing and existing[0] in {"sent", "sending"}:
+                c.execute("UPDATE smart_assessments SET notification_status='duplicate' WHERE id=?", (record["id"],))
+                return False, False
+            c.execute("INSERT OR REPLACE INTO smart_notifications(item_id,tier,status,updated_at) VALUES(?,?,'sending',?)",
+                      (item["item_id"], tier, utc_now()))
+        grade_rules = replace(rules, quote_grade=value.get("grade") or rules.quote_grade)
+        deal_id = self._save_deal(item, decision, grade_rules)
+        try:
+            response = await self.notifications.send({**item, "model": value["model"], "storage": value["storage"],
+                "quote_price": value.get("value_low"), "quote_grade": value.get("grade"),
+                "smart_assessment": value, "assessment_facts": record["facts"],
+                "quote_reference": self._quote_reference(value["model"], value["storage"], grade_rules)}, decision.reason)
+            sent = bool(response) and any(channel.get("success") for channel in response.values())
+            detail = notification_result_text(response)
+        except Exception:
+            sent, detail = False, "通知发送失败"
+        state = "sent" if sent else "failed"
+        with self.database.connect() as c:
+            c.execute("UPDATE smart_notifications SET status=?,updated_at=?,result=? WHERE item_id=? AND tier=?",
+                      (state, utc_now(), detail, item["item_id"], tier))
+            c.execute("UPDATE smart_assessments SET notification_status=?,notification_result=? WHERE id=?",
+                      (state, detail, record["id"]))
+            if deal_id:
+                c.execute("UPDATE deals SET notification_status=?, notification_result=? WHERE id=?", (state, detail, deal_id))
+            elif tier == "matched":
+                c.execute("UPDATE deals SET notification_status=?, notification_result=? WHERE item_id=?", (state, detail, item["item_id"]))
+        return bool(deal_id), sent
+
     def _quote_reference(self, model: str | None, storage: str | None, rules: Rules) -> dict[str, Any] | None:
         """推送里的完整参考价；查询失败不影响推送。"""
         if not model or not storage:
@@ -558,6 +652,8 @@ class MonitorService:
             "keyword": str(item.get("keyword") or fallback_keyword),
             "title": title,
             "price": price,
+            "description": str(item.get("description") or ""),
+            "detail_parameters": item.get("detail_parameters") if isinstance(item.get("detail_parameters"), list) else [],
             "publish_time": item.get("publish_time"),
             "display_region": str(item.get("display_region") or ""),
             "seller_name": str(item.get("seller_name") or "").strip(),
@@ -610,6 +706,7 @@ class MonitorService:
         item: dict[str, Any],
         decision: MatchDecision,
         new_deal: bool,
+        assessment_id: int | None = None,
     ) -> None:
         """记录本次搜索看到的这件商品，供运行记录逐条查看。"""
         with self.database.connect() as connection:
@@ -618,15 +715,15 @@ class MonitorService:
                 INSERT OR REPLACE INTO run_items(
                     run_id, item_id, pass_label, position, title, price, display_region, item_url,
                     publish_time, model, storage, quote_price, threshold_price, expected_margin,
-                    matched, code, decision, new_deal
-                ) VALUES (?, ?, ?, (SELECT COUNT(*) FROM run_items WHERE run_id=?), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    matched, code, decision, new_deal, assessment_id
+                ) VALUES (?, ?, ?, (SELECT COUNT(*) FROM run_items WHERE run_id=?), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     run_id, item["item_id"], pass_label, run_id, item["title"], item["price"],
                     item["display_region"], item["item_url"], item["publish_time"],
                     decision.model, decision.storage, decision.quote_price, decision.threshold_price,
                     decision.expected_margin, int(decision.matched), decision.code, decision.reason,
-                    int(new_deal),
+                    int(new_deal), assessment_id,
                 ),
             )
 

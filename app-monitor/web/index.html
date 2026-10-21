@@ -81,7 +81,7 @@
                 </button>
                 <div class="picker-menu" id="device-menu" role="dialog" aria-label="采集设备" hidden>
                   <div class="picker-menu-head">
-                    <div><b>采集设备</b><span class="hint">可多选，按列表顺序逐台采集，商品按 ID 去重</span></div>
+                    <div><b>采集设备</b><span class="hint">仅支持 iPhone，可多选；商品按 ID 去重</span></div>
                     <button type="button" class="icon-btn" id="refresh-devices" title="重新检测设备" aria-label="重新检测设备">
                       <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8 8 0 1 0-2.3 5.7"/><path d="M20 5v6h-6"/></svg>
                     </button>
@@ -142,7 +142,7 @@
                   </label>
                   <p class="hint" id="region-hint"></p>
                   <details class="advanced" id="region-advanced">
-                    <summary>高级：Mac 端区域点击路径</summary>
+                    <summary>高级：区域点击路径</summary>
                     <label><input name="region_path" placeholder="留空自动生成" /></label>
                     <p class="hint">用 <b>&gt;</b> 分隔每一步，<b>?</b> 开头的步骤找不到时跳过。闲鱼已经记住该城市时会自动跳过。</p>
                   </details>
@@ -173,6 +173,29 @@
                     <label>过低价比例
                       <span class="affix"><input name="min_price_ratio" type="number" min="0" max="0.99" step="0.05" /><em>× 报价</em></span>
                     </label>
+                  </div>
+                  <div id="valuation-controls" class="valuation-controls">
+                    <label class="check"><input name="valuation_enabled" type="checkbox">按描述关键词自动判成色与扣费</label>
+                    <p id="valuation-summary" class="hint"></p>
+                    <details><summary>成色关键词与收货范围</summary><div id="valuation-keywords"></div>
+                      <label>接受的成色</label><div id="valuation-grades" class="smart-checks"></div>
+                      <label>明确出现这些问题时不收</label><div id="valuation-blocked" class="smart-checks"></div>
+                      <label class="check"><input name="valuation_notify_pending" type="checkbox">也推送可能划算的待确认商品</label>
+                      <p class="hint">未写电池、拆修等信息，默认正常、不扣费；具体瑕疵优先于“99新”。待确认推送会说明不确定项。</p>
+                    </details>
+                    <details><summary>报价扣费与备注规则</summary><p class="hint">明确的电池分档、换屏、水印等规则自动匹配报价。不能识别且可能适用的备注列为待确认；不会编造扣费金额。</p>
+                      <label>机型<input id="valuation-policy-model" placeholder="例如 17 / 15 Pro"></label><button type="button" id="valuation-policy-load" class="secondary compact">加载报价备注</button>
+                      <div id="valuation-policy-rows"></div><button id="valuation-policy-save" type="button" class="secondary compact">保存本机型扣费规则</button>
+                    </details>
+                    <details><summary>可选 AI 二次复核</summary>
+                      <label class="check"><input name="valuation_ai_enabled" type="checkbox">对本地规则选出的候选再做 AI 复核</label>
+                      <label>API 基础地址<input name="valuation_base_url" placeholder="https://服务地址/v1"></label>
+                      <label>模型名称<input name="valuation_model" placeholder="填写服务支持的模型名称"></label>
+                      <label>API Key<input name="valuation_api_key" type="password" autocomplete="new-password" placeholder="未接入模型时留空"></label>
+                      <p class="hint">兼容 Chat Completions；没有接入模型时完全使用本地规则。启用AI后调用失败会记录，不冒充复核通过。密钥只写本地 .env，不回显。</p>
+                      <button id="valuation-test" type="button" class="secondary compact">测试已保存的模型连接</button>
+                    </details>
+                    <details><summary>验证模式</summary><label class="check"><input name="valuation_shadow" type="checkbox">仅记录，不发本地规则或AI通知</label></details>
                   </div>
                   <div class="formula" id="price-formula"></div>
                   <div class="field">
@@ -311,6 +334,11 @@
             <section id="run-detail" class="card run-detail" aria-live="polite"></section>
           </div>
         </section>
+
+        <dialog id="valuation-detail"><header class="page-head"><h3 id="valuation-detail-title"></h3><button id="valuation-detail-close" type="button" class="secondary">关闭</button></header><div id="valuation-detail-body"></div>
+          <details><summary>修正本件商品的判断</summary><p class="hint">仅修正这一件商品；判断依据填写商品原文。未写的信息仍按正常处理。</p><div id="valuation-correction"></div><button id="valuation-correct-save" type="button">保存修正并重新计价</button></details>
+          <div class="dialog-actions"><button id="valuation-reanalyze" type="button">重新按当前规则判价</button></div>
+        </dialog>
       </main>
     </div>
 
