@@ -578,6 +578,7 @@ const triggerLabels = { schedule: "定时", manual: "手动", inject: "调试" }
 const codeLabels = {
   matched: "命中", price_high: "价格偏高", region: "地区不符", unrecognized: "无法识别",
   excluded: "排除词", too_cheap: "疑似引流", no_quote: "无报价", other_model: "其他机型", other: "其他",
+  no_link: "价格符合·无链接",
 };
 /** 每一轮的名字：按容量筛选时显示容量（「256G」），否则显示按钮名（「新发」）。 */
 function passName(p) {
@@ -585,7 +586,7 @@ function passName(p) {
   return p.device_name ? `${p.device_name} · ${name}` : name;
 }
 
-const codeOrder = ["matched", "price_high", "region", "other_model", "unrecognized", "excluded", "too_cheap", "no_quote", "other"];
+const codeOrder = ["matched", "no_link", "price_high", "region", "other_model", "unrecognized", "excluded", "too_cheap", "no_quote", "other"];
 
 function unitName(run) {
   return `${run.model}${run.storage ? ` ${displayStorage(run.storage)}` : ""}`;
@@ -624,7 +625,7 @@ async function loadRuns({ quiet = false } = {}) {
       const count = run.item_count || run.observed;
       const passes = tone === "running"
         ? (run.live?.stage || "搜索中…")
-        : (run.passes || []).map(p => `${passName(p)} ${p.error ? "✕" : p.observed}`).join(" · ");
+        : (run.passes || []).map(p => `${passName(p)} ${p.error ? "✕" : (p.cards ?? p.observed)}`).join(" · ");
       const status = tone === "fail" ? `<span class="pill bad">失败</span>`
         : tone === "running" ? `<span class="pill live"><i></i>搜索中 · ${count || 0} 件</span>${run.hit_count ? `<span class="pill hit">命中 ${run.hit_count}</span>` : ""}`
         : `<span class="pill">${count} 件</span>${run.hit_count ? `<span class="pill hit">命中 ${run.hit_count}</span>` : ""}${tone === "warn" ? `<span class="pill warn">警告</span>` : ""}`;
@@ -654,7 +655,9 @@ function runItem(item, fresh = false) {
     : "";
   return `<article class="run-item ${item.matched ? "hit" : ""} ${fresh ? "fresh" : ""}">
     <div class="run-item-main">
-      <a class="run-item-title" href="${escapeHtml(item.item_url)}" target="_blank" rel="noreferrer">${escapeHtml(item.title)}</a>
+      ${item.item_url
+        ? `<a class="run-item-title" href="${escapeHtml(item.item_url)}" target="_blank" rel="noreferrer">${escapeHtml(item.title)}</a>`
+        : `<span class="run-item-title" title="列表卡片，没有取商品链接">${escapeHtml(item.title)}</span>`}
       <div class="run-item-meta">
         ${badge}
         ${item.model ? `<span>${escapeHtml(item.model)} ${escapeHtml(displayStorage(item.storage))}</span>` : ""}
@@ -690,8 +693,9 @@ async function loadRunDetail(id, { quiet = false } = {}) {
   else if (run.ok !== 0 && run.region) steps.push(stepChip(Boolean(run.region_applied), `区域 ${run.region}`, run.region_applied ? "已在 App 内切换" : "未切换，只核对卡片地区"));
   if (run.ok !== 0 && run.storage) steps.push(stepChip(Boolean(run.filter_applied), `容量 ${displayStorage(run.storage)}`, run.filter_applied ? "已在 App 内筛选" : "未筛选，按标题识别容量"));
   for (const p of run.passes || []) {
-    const detail = p.error || (p.cards != null ? `页面卡片 ${p.cards}，曝光记录 ${p.exposures}，关联 ${p.observed}` : "");
-    steps.push(stepChip(p.error ? false : true, `${passName(p)} ${p.error ? "失败" : `${p.observed} 件`}`, detail));
+    const detail = p.error || (p.candidates != null ? `列表卡片 ${p.cards}，符合条件的候选 ${p.candidates}，取到链接 ${p.observed}`
+      : p.cards != null ? `页面卡片 ${p.cards}，曝光记录 ${p.exposures}，关联 ${p.observed}` : "");
+    steps.push(stepChip(p.error ? false : true, `${passName(p)} ${p.error ? "失败" : `${p.cards ?? p.observed} 件`}`, detail));
   }
   const codes = run.codes || {};
   const total = run.items.length;

@@ -458,6 +458,9 @@ th.num, td.num { text-align: right; }
 .item-badge.muted { font-weight: 500; }
 .item-badge.price_high { background: var(--warn-soft); color: var(--warn); }
 .item-badge.region, .item-badge.other_model { background: var(--info-soft); color: var(--info); }
+.item-badge.no_link { background: var(--brand-soft); color: var(--brand); box-shadow: inset 0 0 0 1px var(--brand-line); }
+span.run-item-title { cursor: default; }
+span.run-item-title:hover { color: var(--ink); text-decoration: none; }
 .item-badge.excluded, .item-badge.too_cheap { background: var(--bad-soft); color: var(--bad); }
 .pass-tag { padding: 0 6px; border: 1px solid var(--line); border-radius: 5px; }
 .run-log { margin-top: 14px; padding-top: 10px; border-top: 1px solid var(--line-soft); }

@@ -70,6 +70,7 @@ async def refresh_quotes_if_stale() -> None:
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     database.initialize()
+    monitor_service.close_interrupted_runs()
     last_hour = min(23, settings.quote_hour + 3)
     scheduler.add_job(
         refresh_quotes_if_stale,

@@ -305,3 +305,43 @@ async def test_item_stream_accepts_items_from_iphone_thread():
     await asyncio.to_thread(worker.join)
     await stream.close()
     assert received == [("0", "ios:abc", "256"), ("1", "ios:abc", "256"), ("2", "ios:abc", "256")]
+
+
+async def test_cards_without_links_are_recorded_but_never_pushed(database):
+    class CardCollector(FakeCollector):
+        async def collect(self, keyword, region_steps=None, region_hint="", storage_filters=None,
+                          scroll_pages=0, on_items=None):
+            meta = {"storage": "256", "region_applied": True, "filter_applied": True}
+            on_items([], cards=[
+                {"title": "iPhone 15 Pro 256G 国行", "price": 5200, "display_region": "厦门"},  # 价格偏高
+                {"title": "iPhone 15 Pro 256G 国行 自用", "price": 3600, "display_region": "厦门",
+                 "link_error": "分享面板没有出现"},  # 价格符合但没取到链接
+            ], **meta)
+            hit = {"item_id": "h1", "title": "iPhone 15 Pro 256G 国行 电池90", "price": 3500,
+                   "display_region": "厦门", "source_storage": "256", "source_pass": "新发"}
+            on_items([dict(hit)], **meta)
+            return CollectResult(items=[hit], region_applied=True, filter_applied=True,
+                                 passes=[{"label": "新发", "storage": "256", "filter_applied": True,
+                                          "observed": 1, "cards": 3, "error": None}])
+
+    service, notifier = setup(database, CardCollector(), region_city="厦门", disabled_models=["15 Pro|512"])
+    await service.run_model("15 Pro")
+
+    with database.connect() as connection:
+        rows = connection.execute("SELECT item_id, item_url, matched, code, decision FROM run_items ORDER BY position").fetchall()
+    assert [(row["matched"], row["code"]) for row in rows] == [(0, "price_high"), (0, "no_link"), (1, "matched")]
+    assert rows[0]["item_id"].startswith("card:") and rows[0]["item_url"] == ""
+    assert "分享面板没有出现" in rows[1]["decision"]
+    assert [item_id for item_id, _ in notifier.sent] == ["h1"]
+    with database.connect() as connection:
+        assert connection.execute("SELECT COUNT(*) FROM observed_items WHERE item_id LIKE 'card:%'").fetchone()[0] == 0
+
+
+def test_interrupted_runs_are_closed_on_startup(database):
+    service, _ = setup(database)
+    with database.connect() as connection:
+        connection.execute("INSERT INTO search_runs(model, keyword, trigger, started_at) VALUES ('15 Pro', 'iPhone 15 Pro', 'schedule', '2026-10-21T05:00:00+00:00')")
+    assert service.close_interrupted_runs() == 1
+    with database.connect() as connection:
+        row = connection.execute("SELECT ok, error FROM search_runs").fetchone()
+    assert row["ok"] == 0 and "中断" in row["error"]

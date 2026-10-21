@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
+from dataclasses import replace
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -231,6 +233,9 @@ class MonitorService:
                         live_passes.append({**meta["pass_info"], "device": meta.get("device", MAC_DEVICE),
                                             "device_name": meta.get("device_name")})
                         self._save_live_passes(run_id, live_passes)
+                    if meta.get("cards"):
+                        recorded = self._record_cards(run_id, meta["cards"], rules, meta, model)
+                        self.live["observed"] += recorded
                     fresh = [item for item in items if item.get("item_id") and item["item_id"] not in processed]
                     if not fresh:
                         return
@@ -394,6 +399,50 @@ class MonitorService:
         if not successes:
             raise CollectionFailure(combined.region_error or "没有可用的采集设备", combined)
         return combined
+
+    def _record_cards(
+        self, run_id: int, cards: list[dict[str, Any]], rules: Rules, meta: dict[str, Any], model: str,
+    ) -> int:
+        """把没有商品链接的列表卡片也记进运行记录：不推送，只用来核对这次搜索看到了什么。
+
+        iPhone 端只给符合条件的候选进详情取链接，其余卡片走这里；Mac 端是没对上曝光记录的卡片。
+        """
+        storage = meta.get("storage")
+        storage_hint = storage if meta.get("filter_applied") else None
+        quotes = eligible_quotes(self.database, rules)
+        label = (storage if str(storage).endswith("T") else f"{storage}G") if storage else meta.get("label")
+        recorded = 0
+        for card in cards:
+            try:
+                price = float(card["price"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            title = str(card.get("title") or "").strip()
+            if not title:
+                continue
+            region = str(card.get("display_region") or "")
+            item = {"title": title, "price": price, "display_region": region,
+                    "item_url": "", "publish_time": None, "tags": []}
+            decision = evaluate(item, rules, quotes, bool(meta.get("region_applied")), storage_hint, model)
+            if decision.matched:
+                reason = card.get("link_error") or (
+                    f"标题容量（{decision.storage}）与当前容量筛选不一致，未进详情取链接" if storage_hint else "未进详情取链接"
+                )
+                decision = replace(decision, matched=False, code="no_link", reason=f"价格符合，但没拿到商品链接：{reason}")
+            digest = hashlib.sha1(f"{storage}|{title}|{price}|{region}".encode("utf-8")).hexdigest()[:12]
+            item["item_id"] = f"card:{digest}"
+            self._save_run_item(run_id, label, item, decision, False)
+            recorded += 1
+        return recorded
+
+    def close_interrupted_runs(self) -> int:
+        """服务启动时：上次退出时还没结束的搜索标记为中断，避免一直显示「搜索中」。"""
+        with self.database.connect() as connection:
+            cursor = connection.execute(
+                "UPDATE search_runs SET ok=0, finished_at=?, error=? WHERE ok IS NULL",
+                (utc_now(), "服务重启或退出，本次搜索中断；已读到的商品保留在下方"),
+            )
+        return cursor.rowcount
 
     def _save_live_passes(self, run_id: int, passes: list[dict[str, Any]]) -> None:
         """搜索进行中，每完成一个容量就把该轮结果写进记录，后台可以实时看到。"""

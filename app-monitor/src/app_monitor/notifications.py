@@ -78,106 +78,198 @@ class NotificationService:
                     }
         return results
 
+    # ------------------------------------------------------------------ 消息排版
+
+    @staticmethod
+    def _money(value: Any) -> str:
+        number = float(value)
+        return f"{round(number):,}" if abs(number - round(number)) < 0.01 else f"{number:,.2f}"
+
+    @staticmethod
+    def _category(item: dict[str, Any]) -> str:
+        model = str(item.get("model") or "").strip()
+        storage = str(item.get("storage") or "").strip()
+        return f"iPhone {model} {display_storage(storage)}" if model and storage else str(item["title"]).strip()
+
+    @staticmethod
+    def _difference(item: dict[str, Any]) -> tuple[str, str]:
+        """(完整说法, 简短说法)，例如 ("比回收价高 ¥100", "+¥100")。"""
+        quote = item.get("quote_price")
+        if quote is None:
+            return "", ""
+        money = NotificationService._money
+        difference = float(item["price"]) - float(quote)
+        if difference > 0:
+            return f"比回收价高 ¥{money(difference)}", f"+¥{money(difference)}"
+        if difference < 0:
+            return f"比回收价低 ¥{money(-difference)}", f"−¥{money(-difference)}"
+        return "与回收价持平", "±0"
+
+    @staticmethod
+    def _title(item: dict[str, Any]) -> str:
+        """通知标题：机型容量 + 挂牌价 + 与回收价的差，在通知列表里一眼能看出值不值。"""
+        if not (item.get("model") and item.get("storage")):
+            return str(item["title"]).strip()
+        title = f"{NotificationService._category(item)} ¥{NotificationService._money(item['price'])}"
+        difference, _ = NotificationService._difference(item)
+        return f"{title} · {difference}" if difference else title
+
+    @staticmethod
+    def _quote_label(item: dict[str, Any]) -> str:
+        reference = item.get("quote_reference") or {}
+        source = str(reference.get("category_name") or "").replace("苹果", "")
+        grade = str(item.get("quote_grade") or reference.get("grade") or "").strip()
+        return "·".join(value for value in (source, grade) if value)
+
+    @staticmethod
+    def _deduction_rows(item: dict[str, Any]) -> list[tuple[str, str, str]]:
+        """扣费项：(名称, 扣多少, 扣后回收价)。扣后回收价 = 参考成色回收价 − 该项扣费。"""
+        reference = item.get("quote_reference") or {}
+        money = NotificationService._money
+        base = item.get("quote_price")
+        rows = []
+        for value in reference.get("deductions") or []:
+            low = float(value["amount_min"])
+            high = float(value.get("amount_max") or low)
+            if value.get("open_ended"):
+                amount, after = f"−{money(low)} 起", (f"≤ {money(float(base) - low)}" if base is not None else "")
+            elif high > low:
+                # 全角「～」：避免 Markdown 把成对的 ~ 当成删除线
+                amount = f"−{money(low)}～{money(high)}"
+                after = f"{money(float(base) - high)}～{money(float(base) - low)}" if base is not None else ""
+            else:
+                amount, after = f"−{money(low)}", (money(float(base) - low) if base is not None else "")
+            rows.append((str(value["name"]), amount, after))
+        return rows
+
     @staticmethod
     def _format_message(
         item: dict[str, Any], reason: str, mobile_url: str, image_urls: list[str]
     ) -> tuple[str, str]:
-        product_title = str(item["title"]).strip()
-        model = str(item.get("model") or "").strip()
-        storage = str(item.get("storage") or "").strip()
-        category = f"iPhone {model} {display_storage(storage)}" if model and storage else product_title
-        lines = [product_title, "", *NotificationService._detail_lines(item, reason)]
-        reference = NotificationService._reference_lines(item)
-        if reference:
-            lines.extend(("", *reference))
-        item_url = str(item.get("item_url") or "")
-        if mobile_url or item_url:
-            lines.extend(("", f"打开商品：{mobile_url or item_url}"))
-        if item_url and mobile_url and item_url != mobile_url:
-            lines.append(f"网页链接：{item_url}")
-        if image_urls:
-            lines.extend(("", f"![商品图片]({image_urls[0]})"))
-        return category, "\n".join(lines)
-
-    @staticmethod
-    def _detail_lines(item: dict[str, Any], reason: str) -> list[str]:
-        price = float(item["price"])
-        lines = [f"挂牌价：¥{price:g}"]
-        quote = item.get("quote_price")
-        if quote is not None:
-            quote_price = float(quote)
-            grade = str(item.get("quote_grade") or "").strip()
-            lines.append(f"{grade}回收报价：¥{quote_price:g}")
-            difference = price - quote_price
-            if difference > 0:
-                lines.append(f"挂牌价高于回收报价：¥{difference:g}")
-            elif difference < 0:
-                lines.append(f"挂牌价低于回收报价：¥{-difference:g}")
-            else:
-                lines.append("挂牌价与回收报价持平")
-        elif reason:
-            lines.append(f"原因：{reason}")
+        """纯文本（ntfy / Bark）：分块、对齐，手机通知里也好读。"""
+        money = NotificationService._money
+        lines = [str(item["title"]).strip(), ""]
+        price = f"¥{money(item['price'])}"
+        if item.get("quote_price") is not None:
+            difference, _ = NotificationService._difference(item)
+            label = NotificationService._quote_label(item)
+            lines.append(f"💰 挂牌 {price} ｜ 回收 ¥{money(item['quote_price'])}{f'（{label}）' if label else ''}")
+            lines.append(f"📊 {difference}")
+        else:
+            lines.append(f"💰 挂牌 {price}")
+            if reason:
+                lines.append(f"ℹ️ {reason}")
         region = str(item.get("display_region") or item.get("region") or "").strip()
         if region:
-            lines.append(f"地区：{region}")
-        return lines
+            lines.append(f"📍 {region}")
 
-    @staticmethod
-    def _reference_lines(item: dict[str, Any]) -> list[str]:
-        """完整参考价：各成色报价、另一份报价同成色价、逐项扣费金额和报价单说明。"""
-        reference = item.get("quote_reference")
-        if not reference:
-            return []
-        date = str(reference.get("quote_date") or "")[5:]
-        lines = [f"参考报价：{reference['category_name']}{f'（{date}）' if date else ''}"]
+        item_url = str(item.get("item_url") or "")
+        if mobile_url or item_url:
+            lines.extend(("", f"🔗 打开商品：{mobile_url or item_url}"))
+        if item_url and mobile_url and item_url != mobile_url:
+            lines.append(f"💻 网页链接：{item_url}")
+        if image_urls:
+            lines.extend(("", f"![商品图片]({image_urls[0]})"))
+
+        # 参考价（各成色、扣费项、说明）放在最后
+        reference = item.get("quote_reference") or {}
         grades = reference.get("grades") or []
         if grades:
-            lines.append("各成色：" + " · ".join(
-                f"{value['grade']} ¥{float(value['price']):g}" + ("（参考）" if value["grade"] == reference.get("grade") else "")
+            date = str(reference.get("quote_date") or "")[5:]
+            lines.extend(("", f"📋 各成色回收价（{reference.get('category_name', '')}{f' {date}' if date else ''}）"))
+            lines.append(" ｜ ".join(
+                f"{value['grade']} {money(value['price'])}{' ✓' if value['grade'] == reference.get('grade') else ''}"
                 for value in grades
             ))
-        if reference.get("other_price") is not None:
-            lines.append(f"{reference['other_category_name']} · {reference.get('grade', '')}：¥{float(reference['other_price']):g}")
-        deductions = reference.get("deductions") or []
+            if reference.get("other_price") is not None:
+                other = str(reference.get("other_category_name") or "").replace("苹果", "")
+                lines.append(f"{other}·{reference.get('grade', '')} {money(reference['other_price'])}")
+        deductions = NotificationService._deduction_rows(item)
         if deductions:
-            lines.append("扣费项：")
-            for value in deductions:
-                low, high = float(value["amount_min"]), float(value.get("amount_max") or value["amount_min"])
-                amount = f"−¥{low:g}" + (" 起" if value.get("open_ended") else f"~{high:g}" if high > low else "")
-                lines.append(f"· {value['name']} {amount}")
+            lines.extend(("", "🔧 扣费项（→ 扣后回收价）"))
+            lines.extend(f"· {name}  {amount}{f' → {after}' if after else ''}" for name, amount, after in deductions)
         elif grades:
-            lines.append("扣费项：报价单未识别到")
+            lines.extend(("", "🔧 扣费项：报价单未识别到"))
         notes = reference.get("notes") or []
         if notes:
-            lines.append("说明：" + "；".join(notes))
-        return lines
+            lines.append(f"💬 {'；'.join(notes)}")
+        return NotificationService._title(item), "\n".join(lines)
 
     @staticmethod
     def _format_webhook_content(
         item: dict[str, Any], reason: str, mobile_url: str, image_urls: list[str]
     ) -> str:
-        # 当前 Webhook 模板使用 Markdown；两个尾随空格让价格等字段真正换行。
-        product_title = re.sub(r"([\\`*_{}\[\]()#+.!|>~-])", r"\\\1", str(item["title"]).strip())
+        """Markdown（PushPlus 等）：标题行 + 价格表 + 链接 + 图片，最后是参考价（成色表、扣费表、说明）。"""
+        money = NotificationService._money
+
+        def escape(value: Any) -> str:
+            return re.sub(r"([\\`*_{}\[\]()#+.!|>~-])", r"\\\1", str(value).strip())
+
+        def cell(value: Any) -> str:
+            return str(value).replace("|", "/")
+
         item_url = str(item.get("item_url") or "")
         main_url = mobile_url or item_url
-        title_line = f"[**{product_title}**]({main_url})" if main_url else f"**{product_title}**"
-        details = NotificationService._detail_lines(item, reason)
-        details[0] = f"**{details[0]}**"
-        blocks = [title_line, "  \n".join(details)]
-        reference = NotificationService._reference_lines(item)
-        if reference:
-            reference[0] = f"**{reference[0]}**"
-            blocks.append("  \n".join(reference))
+        product_title = escape(item["title"])
+        blocks = [f"### [{product_title}]({main_url})" if main_url else f"### {product_title}"]
+
+        region = str(item.get("display_region") or item.get("region") or "").strip()
+        if item.get("quote_price") is not None:
+            _, short = NotificationService._difference(item)
+            label = NotificationService._quote_label(item) or "参考"
+            blocks.append(
+                f"| 挂牌价 | 回收价（{cell(label)}） | 差价 |\n| :-: | :-: | :-: |\n"
+                f"| **¥{money(item['price'])}** | ¥{money(item['quote_price'])} | **{short}** |"
+            )
+            if region:
+                blocks.append(f"📍 {cell(region)}")
+        else:
+            lines = [f"**挂牌价：¥{money(item['price'])}**"]
+            if reason:
+                lines.append(f"原因：{reason}")
+            if region:
+                lines.append(f"地区：{region}")
+            blocks.append("  \n".join(lines))
+
         links = []
         if main_url:
-            label = "📱 手机端打开" if mobile_url and mobile_url != item_url else "打开商品"
-            links.append(f"[{label}]({main_url})")
+            links.append(f"[📱 手机打开]({main_url})" if mobile_url and mobile_url != item_url else f"[🔗 打开商品]({main_url})")
         if item_url and item_url != main_url:
             links.append(f"[💻 网页打开]({item_url})")
         if links:
-            blocks.append(" · ".join(links))
+            blocks.append(" ｜ ".join(links))
         if image_urls:
             blocks.append(f"![商品主图]({image_urls[0]})")
+
+        # 参考价（各成色、扣费项、说明）放在最后，用分隔线和上面的商品信息隔开
+        reference_start = len(blocks)
+        reference = item.get("quote_reference") or {}
+        grades = reference.get("grades") or []
+        if grades:
+            date = str(reference.get("quote_date") or "")[5:]
+            blocks.append(f"**📋 各成色回收价**（{reference.get('category_name', '')}{f' {date}' if date else ''}）")
+            headers = [value["grade"] for value in grades]
+            values = [
+                f"**{money(value['price'])}**" if value["grade"] == reference.get("grade") else money(value["price"])
+                for value in grades
+            ]
+            if reference.get("other_price") is not None:
+                headers.append(f"{str(reference.get('other_category_name') or '').replace('苹果', '')}·{reference.get('grade', '')}")
+                values.append(money(reference["other_price"]))
+            blocks.append(
+                f"| {' | '.join(map(cell, headers))} |\n| {' | '.join(':-:' for _ in headers)} |\n| {' | '.join(values)} |"
+            )
+        deductions = NotificationService._deduction_rows(item)
+        if deductions:
+            rows = "\n".join(f"| {cell(name)} | {amount} | {after} |" for name, amount, after in deductions)
+            blocks.append(f"**🔧 扣费项**\n\n| 项目 | 扣费 | 扣后回收价 |\n| :-- | --: | --: |\n{rows}")
+        elif grades:
+            blocks.append("**🔧 扣费项**：报价单未识别到")
+        notes = reference.get("notes") or []
+        if notes:
+            blocks.append(f"> 💬 {'；'.join(cell(note) for note in notes)}")
+        if len(blocks) > reference_start:
+            blocks.insert(reference_start, "---")
         return "\n\n".join(blocks)
 
     async def _send_webhook(

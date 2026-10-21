@@ -454,7 +454,11 @@ class IPhoneCollector:
                                 card_samples.append({"title": card.title, "price": card.price,
                                                      "display_region": card.region})
                             raw = {"title": card.title, "price": card.price, "display_region": card.region}
+                            card_meta = {"storage": storage, "region_applied": result.region_applied,
+                                         "filter_applied": True}
                             if not is_candidate(raw, result.region_applied, storage):
+                                # 不符合条件的卡片不进详情取链接，但也记进运行记录，方便核对「看到了什么」
+                                emit_safely(on_items, cards=[dict(raw)], **card_meta)
                                 continue
                             candidates += 1
                             try:
@@ -463,6 +467,7 @@ class IPhoneCollector:
                                 logger.warning("iPhone 候选分享失败 title=%s error=%s", card.title[:40], exc)
                                 actions.append({"action": "复制候选链接", "target": card.title[:40],
                                                 "success": False, "error": _brief_error(exc)})
+                                emit_safely(on_items, cards=[{**raw, "link_error": _brief_error(exc)}], **card_meta)
                                 if not is_search_results(driver.page_source):
                                     raise RuntimeError("分享失败后未回到搜索列表，停止本机采集") from exc
                                 continue
@@ -479,6 +484,8 @@ class IPhoneCollector:
                                                 "success": True})
                                 logger.info("iPhone 候选关联 item_id=%s price=%s title=%s",
                                             item_id, card.price, card.title[:60])
+                            else:
+                                emit_safely(on_items, cards=[{**raw, "link_error": "分享内容里没有商品 ID"}], **card_meta)
                 except Exception as exc:
                     error = _brief_error(exc)
                     actions.append({"action": "容量筛选或采集", "target": storage,

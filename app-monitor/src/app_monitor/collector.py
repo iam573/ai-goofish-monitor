@@ -802,6 +802,16 @@ class GoofishCollector:
             exposures, _ = await asyncio.to_thread(self.exposures.read_after, start_row, keyword)
             items = tag(self._correlate(exposures, cards))
             emit_new(items, f"{storage_label} 读取完成")
+            linked = {item["title"] for item in items}
+            unlinked = [card for card in cards if card.title not in linked]
+            if unlinked:
+                # 页面上看到了、但没对上曝光记录的卡片：没有商品链接，只记进运行记录供核对
+                emit_safely(
+                    on_items,
+                    cards=[{"title": card.title, "price": card.price, "display_region": card.region,
+                            "link_error": "列表卡片没有对上曝光记录，拿不到商品链接"} for card in unlinked],
+                    storage=storage or None, region_applied=result.region_applied, filter_applied=bool(filter_steps),
+                )
             for item in items:
                 existing = merged.get(item["item_id"])
                 if existing is None:
