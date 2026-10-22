@@ -25,6 +25,81 @@ def good_parse(path):
     return [QuoteEntry('17','256','靓机',5200)],[]
 
 
+async def test_new_quote_api_sends_public_context_without_login_headers(database, monkeypatch):
+    import httpx
+
+    calls = []
+    def respond(request):
+        calls.append(request)
+        if request.url.path.endswith('/getQuoteImage'):
+            return httpx.Response(200, json={'code': 200, 'data': 'https://cdn.example.test/20261022/latest.png'})
+        if request.url.path.endswith('/categoryTree'):
+            return httpx.Response(200, json={'code': 200, 'data': [
+                {'categoryId': '100025', 'categoryName': '苹果无保', 'status': 1},
+            ]})
+        return httpx.Response(200, content=b'image' * 300, headers={'Content-Type': 'image/png'})
+
+    client_type = httpx.AsyncClient
+    transport = httpx.MockTransport(respond)
+    monkeypatch.setattr(httpx, 'AsyncClient', lambda **kwargs: client_type(transport=transport, **kwargs))
+    quote_settings = replace(settings, database=database.path,
+                             quote_api_root='https://api.zuphone.com/biji-product/api/home',
+                             quote_app_id='wx5d70a654307f7bbf', quote_platform='weapp-lite-aiji-report')
+    service = QuoteService(database, quote_settings)
+    monkeypatch.setattr(service.parser, 'parse_image', good_parse)
+    assert (await service.sync('100025', '苹果无保'))['entry_count'] == 1
+    assert (await service.categories())[0]['category_id'] == '100025'
+    for request in calls:
+        assert not any(name in request.headers for name in ['Cookie', 'Authorization', 'wzw-access-token'])
+        if request.url.host == 'api.zuphone.com':
+            assert request.url.params['appid'] == quote_settings.quote_app_id
+            assert request.url.params['platform'] == quote_settings.quote_platform
+            assert request.headers['wzw-app-id'] == quote_settings.quote_app_id
+            assert request.headers['wzw-client-type'] == quote_settings.quote_platform
+        else:
+            assert 'wzw-app-id' not in request.headers
+    assert calls[0].url.params['categoryId'] == '100025'
+
+
+@pytest.mark.parametrize('new_url,new_content,changed', [
+    ('https://example.test/20261022/revised.png', b'new-image', True),
+    ('https://example.test/20261022/revised.png', b'original-image', False),
+    ('https://example.test/20261022/original.png', b'new-image', True),
+])
+async def test_intraday_checks_follow_latest_url_and_compare_image_content(
+    database, service, monkeypatch, new_url, new_content, changed,
+):
+    from app_monitor.quotes import latest_entries
+
+    monkeypatch.setattr('app_monitor.quotes.APPLE_PHONE_CATEGORIES', {'100025': '苹果无保'})
+    revision = {'url': 'https://example.test/20261022/original.png', 'content': b'original-image', 'price': 5200}
+    requests = []
+    parses = []
+    async def payload(*args, **kwargs):
+        requests.append(kwargs['params']['categoryId'])
+        return {'data': revision['url']}
+    async def download(url):
+        assert url == revision['url']
+        return revision['content']
+    def parse(path):
+        parses.append(path)
+        return [QuoteEntry('17', '256', '靓机', revision['price'])], []
+    monkeypatch.setattr(service, '_get_json', payload)
+    monkeypatch.setattr(service, '_download', download)
+    monkeypatch.setattr(service.parser, 'parse_image', parse)
+    first = (await service.sync_if_stale())[0]
+    assert quote_status(database)[0]['fresh']
+    revision.update(url=new_url, content=new_content, price=4900)
+    second = (await service.sync_if_stale())[0]
+    assert second['updated'] is changed
+    assert requests == ['100025', '100025']
+    assert len(parses) == (2 if changed else 1)
+    assert latest_downloaded_batch(database, '100025')['image_url'] == new_url
+    assert latest_entries(database, '100025')[0]['price'] == (4900 if changed else 5200)
+    assert (first['batch_id'] != second['batch_id']) is changed
+    assert database.state_get('quote_last_check')['results'][0]['updated'] is changed
+
+
 async def test_first_sync_parses_then_only_valid_nonempty_data_is_unchanged(database,service,monkeypatch):
     calls=[]
     def parse(path):calls.append(path);return good_parse(path)

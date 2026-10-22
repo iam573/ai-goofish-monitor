@@ -9,6 +9,20 @@ async def _noop():
     return None
 
 
+def test_quote_schedule_continues_after_the_morning_window(monkeypatch):
+    from dataclasses import replace
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    monkeypatch.setattr(api, 'settings', replace(api.settings, quote_hour=9, quote_minute=0,
+                                                timezone='Asia/Shanghai'))
+    trigger = api.quote_refresh_trigger()
+    zone = ZoneInfo('Asia/Shanghai')
+    assert trigger.get_next_fire_time(None, datetime(2026, 10, 22, 13, 5, tzinfo=zone)) == datetime(2026, 10, 22, 13, 30, tzinfo=zone)
+    assert trigger.get_next_fire_time(None, datetime(2026, 10, 22, 23, 20, tzinfo=zone)) == datetime(2026, 10, 22, 23, 30, tzinfo=zone)
+    assert not api.quote_time_reached(datetime(2026, 10, 22, 8, 59, tzinfo=zone))
+
+
 def test_device_selection_is_phone_only_and_mac_is_rejected(tmp_path, monkeypatch):
     import app_monitor.devices as devices_module
 

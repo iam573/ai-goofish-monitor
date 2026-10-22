@@ -89,7 +89,7 @@ async function loadOverview() {
     sub: noWarranty?.parse_status === "failed" ? "图片已下载，报价识别失败，请查看每日报价"
       : noWarranty?.parse_status === "parsing" ? "图片已下载，正在识别报价"
       : noWarranty?.parse_status === "needs_review" ? "图片已下载，尚未识别到有效报价"
-      : quoteFresh ? `今天已更新 · 每天 ${value.quote_schedule} 起检查` : `等待今天的报价 · 每天 ${value.quote_schedule} 起检查`,
+      : quoteFresh ? `今天已同步 · ${value.quote_schedule} 起每30分钟持续检查` : `沿用最近报价 · ${value.quote_schedule} 起每30分钟持续检查`,
     tone: quoteFresh ? "ok" : "warn",
   };
   const ruleStep = {

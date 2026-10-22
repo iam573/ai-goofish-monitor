@@ -223,8 +223,9 @@ flowchart LR
 
 ### 11.1 报价刷新
 
-- 报价接口不是闲鱼的，每天早上更新。`APP_MONITOR_QUOTE_HOUR:MINUTE`（默认 09:00）起每 30 分钟检查一次，持续 3 小时；
-- 某分类当天已经抓到新图片（`fetched_at` 为今天）即视为最新，不再下载。报价图片 URL 中的日期可能比实际晚一天，不能单独依赖；
+- 报价来源为 `api.zuphone.com/biji-product/api/home`，使用公开 appid、platform 及对应 wzw 请求头，不保存或发送登录 Token；接口根地址及公开上下文可通过 APP_MONITOR_QUOTE_API_ROOT、APP_MONITOR_QUOTE_APP_ID、APP_MONITOR_QUOTE_PLATFORM 配置。
+- `APP_MONITOR_QUOTE_HOUR:MINUTE`（默认 09:00）起每 30 分钟检查一次至当天结束，不因当天已有报价而跳过日内更新；两类请求间隔3秒。
+- 每次从接口取得当前图片 URL 并按下载内容的 SHA-256 去重，URL 换址但内容相同不重复 OCR；同址换图也能发现。图片 URL 日期仅用于展示，不能单独据此判断最新版本。
 - 服务在报价时间之后启动时，会立即补做一次检查。
 
 ### 11.2 规则与搜索目标

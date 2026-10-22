@@ -35,6 +35,9 @@ class Settings:
     database: Path = _path_env("APP_MONITOR_DATABASE", "data/app-monitor.sqlite3")
     quote_hour: int = int(os.environ.get("APP_MONITOR_QUOTE_HOUR", "9"))
     quote_minute: int = int(os.environ.get("APP_MONITOR_QUOTE_MINUTE", "0"))
+    quote_api_root: str = os.environ.get("APP_MONITOR_QUOTE_API_ROOT", "https://api.zuphone.com/biji-product/api/home").rstrip("/")
+    quote_app_id: str = os.environ.get("APP_MONITOR_QUOTE_APP_ID", "wx5d70a654307f7bbf").strip()
+    quote_platform: str = os.environ.get("APP_MONITOR_QUOTE_PLATFORM", "weapp-lite-aiji-report").strip()
     bundle_id: str = os.environ.get("GOOFISH_BUNDLE_ID", "com.taobao.fleamarket")
     track_db: Path = _path_env(
         "GOOFISH_TRACK_DB",

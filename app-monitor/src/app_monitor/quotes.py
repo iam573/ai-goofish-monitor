@@ -20,7 +20,6 @@ from .swift_runtime import run_swift
 
 logger = logging.getLogger(__name__)
 
-API_ROOT = "https://api.ajhuishou.com/ajhuishou-product/api/home"
 APPLE_NO_WARRANTY_CATEGORY = "100025"
 APPLE_WARRANTY_CATEGORY = "100027"
 APPLE_PHONE_CATEGORIES = {
@@ -401,7 +400,7 @@ class QuoteService:
         self._lock = asyncio.Lock()
 
     async def categories(self) -> list[dict[str, str]]:
-        payload = await self._get_json(f"{API_ROOT}/categoryTree")
+        payload = await self._get_json(f"{self.settings.quote_api_root}/categoryTree")
         leaves: list[dict[str, str]] = []
 
         def visit(nodes: Any) -> None:
@@ -430,7 +429,7 @@ class QuoteService:
 
     async def _sync(self, category_id: str, category_name: str | None = None) -> dict[str, Any]:
         payload = await self._get_json(
-            f"{API_ROOT}/getQuoteImage", params={"categoryId": category_id}
+            f"{self.settings.quote_api_root}/getQuoteImage", params={"categoryId": category_id}
         )
         image_url = payload.get("data")
         parsed = urlparse(image_url if isinstance(image_url, str) else "")
@@ -597,23 +596,12 @@ class QuoteService:
                 results.append({"category_id": category_id, **await self.sync(category_id, category_name)})
             except Exception as exc:
                 results.append({"category_id": category_id, "error": str(exc)})
+        self.database.state_set("quote_last_check", {"at": utc_now(), "results": results})
         return results
 
     async def sync_if_stale(self, today: str | None = None) -> list[dict[str, Any]]:
-        """只同步今天还没有拿到新报价的分类；供每日定时和启动补偿使用。"""
-        today = today or datetime.now().astimezone().date().isoformat()
-        results = []
-        for category_id, category_name in APPLE_PHONE_CATEGORIES.items():
-            latest = latest_downloaded_batch(self.database, category_id)
-            if latest and is_fresh(latest, today):
-                results.append({"category_id": category_id, "updated": False, "fresh": True})
-                continue
-            try:
-                results.append({"category_id": category_id, **await self.sync(category_id, category_name)})
-            except Exception as exc:
-                results.append({"category_id": category_id, "error": str(exc)})
-        self.database.state_set("quote_last_check", {"at": utc_now(), "results": results})
-        return results
+        """兼容旧入口；即使今日已有报价也重新检查，避免漏掉日内换图。"""
+        return await self.sync_all()
 
     def _entry_count(self, batch_id: int) -> int:
         with self.database.connect() as connection:
@@ -629,9 +617,15 @@ class QuoteService:
         for attempt in range(3):
             try:
                 async with httpx.AsyncClient(timeout=20, follow_redirects=True) as client:
-                    response = await client.get(
-                        url, params=params, headers={"User-Agent": "GoofishAppMonitor/0.1"}
-                    )
+                    response = await client.get(url, params={
+                        "appid": self.settings.quote_app_id,
+                        "platform": self.settings.quote_platform,
+                        **(params or {}),
+                    }, headers={
+                        "User-Agent": "GoofishAppMonitor/0.1",
+                        "wzw-app-id": self.settings.quote_app_id,
+                        "wzw-client-type": self.settings.quote_platform,
+                    })
                     response.raise_for_status()
                     payload = response.json()
                 if payload.get("code") == 200:

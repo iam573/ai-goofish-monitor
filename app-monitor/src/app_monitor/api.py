@@ -61,19 +61,22 @@ async def backfill_deductions() -> None:
 
 
 async def refresh_quotes_if_stale() -> None:
-    """报价每天早上更新：到点后每 30 分钟检查一次，拿到当天报价就不再下载。"""
+    """从配置时间起持续检查至当天结束，不因已取得报价而跳过日内修订。"""
     if quote_time_reached():
         await quote_service.sync_if_stale()
+
+
+def quote_refresh_trigger() -> CronTrigger:
+    return CronTrigger(hour=f"{settings.quote_hour}-23", minute="*/30", timezone=settings.timezone)
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     database.initialize()
     monitor_service.close_interrupted_runs()
-    last_hour = min(23, settings.quote_hour + 3)
     scheduler.add_job(
         refresh_quotes_if_stale,
-        CronTrigger(hour=f"{settings.quote_hour}-{last_hour}", minute="*/30", timezone=settings.timezone),
+        quote_refresh_trigger(),
         id="daily-quotes",
         replace_existing=True,
         max_instances=1,

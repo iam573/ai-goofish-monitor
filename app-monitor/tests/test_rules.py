@@ -80,7 +80,7 @@ def test_search_keyword_overrides():
     assert search_keyword("17 Air") == "iPhone Air"
 
 
-async def test_sync_if_stale_skips_categories_fetched_today(database):
+async def test_quote_checks_continue_even_after_a_successful_sync_today(database):
     from app_monitor.config import settings
     from app_monitor.quotes import QuoteService, quote_status
 
@@ -94,7 +94,7 @@ async def test_sync_if_stale_skips_categories_fetched_today(database):
 
     service.sync = fake_sync
     await service.sync_if_stale(datetime.now().astimezone().date().isoformat())
-    assert synced == ["100027"]
+    assert synced == ["100025", "100027"]
     assert quote_status(database)[0]["fresh"] is True
 
 

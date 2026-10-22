@@ -338,3 +338,41 @@ SSH 检查新服务器：运行版本已由用户更新至019392d；两类报价
 修复：明确的模拟设备仍排除；缺少 reality 时，只有 iOS 平台、iPhone 产品型号及 UDID 齐全才纳入列表。连接状态兼容两种结构，配对未完成不能显示在线；页面和运行失败信息显示配对中/未配对原因。测试覆盖旧结构、待配对、已连接、断开、未信任、模拟器及 iPad，完整测试为204 passed，前端语法检查通过。
 
 用户完成 Xcode/手机配对后，远端实测 paired、tunnel connected、开发者模式 enabled、DDI 服务可用，Xcode 首次启动组件检查成功。已备份并更新远端设备发现、状态展示及采集错误说明三个文件，再优雅重启空闲服务；本轮未触发商品搜索或推送。远端仍未安装项目 Appium/XCUITest 驱动，也没有配置 WDA bundle ID 或预构建目录；设备发现成功不代表自动化会话已验证。Swift SDK 启动器的本地改动仍未部署。
+
+## 27. 新服务器 Appium 与 XCUITest 安装（2026-10-21）
+
+按用户要求在远端执行项目 npm ci，安装 Appium 3.8.0 和项目固定的 XCUITest 12.13.3。原有 Node 23.11.0 不满足 Appium 的版本范围，另从 Node 官方下载并校验 SHA256，将 Node 24.22.0 Intel macOS 运行时放入忽略的 .runtime/node，不替换系统 Node。项目启动脚本 PATH 也指向此运行时。
+
+通过用户级 LaunchAgent fun.iam573.goofish.appium 启动服务，监听 127.0.0.1:4723，配置登录启动和退出重启，日志保存在 .runtime/appium.log。实际 /status 返回 ready=true、版本 3.8.0；已安装驱动列表确认 xcuitest 12.13.3，doctor 退出成功且无必需修复，仅提示可选的模拟器 applesimutils。
+
+已打开安装驱动附带的 WDA Xcode 工程，但远端有效签名身份为0，登录钥匙串中也没有 Apple Development/iPhone Developer 证书，尚不能签名安装 WDA，未建立真机自动化会话。已请求用户在 Xcode 添加 Apple 账号并配置开发证书；需完成签名、构建、设备信任和会话回归后才能确认商品采集可用。未复制 Apple 账号凭据、未触发商品搜索或推送，安装与服务配置不进入 Git。
+
+## 28. 新服务器 WDA 构建前置检查（2026-10-22）
+
+用户配置 Xcode 账号后可读到开发团队，但 SSH 用户及桌面用户上下文均仍显示0个代码签名身份；解锁登录钥匙串后结果相同。手机起初为已配对、开发模式开启、开发隧道连接，Appium /status 继续为 ready=true。WDA 无签名构建及自动签名构建均未进入编译阶段，xcodebuild 报运行目标不可用：iOS 26.2 is not installed。
+
+系统能列出 iOS 26.2 SDK，其目录与元数据也存在，但并不能证明平台支持已就绪。以管理员运行 runFirstLaunch 以及 runFirstLaunch -checkForNewerComponents 后，后者显示 Install Succeeded，重新检查编译目标仍报相同错误。显式指定 -sdk iphoneos 也不能解决。试验启用首次启动的 iOS 平台选项无效后已恢复原值；downloadPlatform 实际选择了模拟器下载，已在约255MB时取消，没有完成模拟器安装。已请求用户检查 Xcode Settings → Components → Platform Support 的 iOS 状态。
+
+已在忽略的远端 .runtime 保存可重试的 build-wda.sh、构建日志和状态记录；WDA 工程的 runner 使用本项目独立 bundle ID，原始工程已备份。尚未生成或安装可用 WDA，也未写入生产 IOS_WDA_BUNDLE_ID、未建立真机会话。未复制签名私钥、Apple 账号凭据或触发商品搜索推送；后续需先解决平台可用性，再验证自动签名及真机会话。
+
+## 29. 新服务器 WDA 签名、安装与监控接入验证（2026-10-22）
+
+用户补齐 Xcode 平台支持后，真实 iPhone 已出现在 WebDriverAgentRunner 可用编译目标中。自动签名生成了可用 Apple Development 身份。首次构建把服务器 CPATH=/usr/local/include 等宿主环境带入交叉编译，清除相关变量后仍有旧的依赖扫描结果；在新的独立 DerivedData 目录重新构建后完成源码编译。随后 codesign 报 errSecInternalComponent，交互解锁登录钥匙串后独立签名测试通过，增量 build-for-testing 最终退出0、TEST BUILD SUCCEEDED。未保存钥匙串密码或导出私钥。
+
+WDA runner 的 bundle ID 为 fun.iam573.goofish.WebDriverAgentRunner.xctrunner，codesign --verify --deep --strict 通过，devicectl 真机安装成功。Appium 成功创建并关闭验证会话；首次 WDA 无线数据授权弹窗处理后，确认手机未锁屏，闲鱼 bundle 已在前台，并可读取实际搜索列表中的标题、价格、地区与容量筛选元素（页面可见节点129个）。本轮未验证候选详情复制链接或实际推送。
+
+已将 IOS_WDA_BUNDLE_ID 和 IOS_WDA_DERIVED_DATA_PATH 写入远端忽略的 .env，后者使用 .runtime/wda-clean-derived-data，重启空闲监控服务后设备接口显示已连接且已选中。通过生产 API 发起16 Plus 128G验证，已完成关键词与福建→厦门地区筛选，但运行63随后被另一次服务重启中断；历史记录明确标记中断，没有记为成功。观察用户新发起的 iPhone 16 手动运行64，已进入128G第2/4屏，实时已读2件、命中0件，仍在采集中，不能据此声称整轮与所有容量均已完成。
+
+Appium 服务继续由用户级 LaunchAgent 运行；本轮只修改部署配置和忽略的构建产物，没有改动采集业务代码。当前服务器 notification_channels 为空，尚不能发送通知。连接验证会话已释放，没有额外发起第二条并行监控或复制登录凭据。
+
+## 30. 报价接口迁移与日内持续检查（2026-10-22）
+
+用户提供新接口后，从新服务器验证旧 api.ajhuishou.com 仍返回路径20261019的图片；新接口为 api.zuphone.com/biji-product/api/home，platform 为 weapp-lite-aiji-report。不带公开上下文返回 HTTP 500；仅带 wzw-app-id 与 wzw-client-type 两个公开头，以及 appid/platform/categoryId 参数，即可返回路径20261021的新图。categoryTree 也验证成功，两类分类ID仍为100025、100027。验证及生产请求均未使用用户提供的 access-token，未保存或转发到图片 CDN。
+
+代码改为新接口默认值，根地址、appid、platform 可在 .env 配置。启动与定时检查不再因当天已有报价跳过；默认09:00起每30分钟检查至23:30，两类同步间隔3秒，并记录最后检查结果。每次获取接口当前URL并比较下载内容的SHA-256，换址同图不重复OCR，同址换图也会生成新批次；失败批次仍可恢复。
+
+新增公开请求上下文、禁止登录头传播、分类树、当天换图、换址同图、同址换图及下午/夜间调度回归；原“今天同步后跳过”的测试改为继续检查。完整测试209 passed，前端语法及git diff --check通过。接口示例已更新，不包含登录Token。
+
+远端已备份并部署报价、配置、定时器、UI及Swift OCR启动器相关源码，保留既有设备与采集修复。Xcode安装后的Swift为6.2.4，当前SDK接口由6.2.3构建；Foundation/Vision/AppKit实际导入成功后，将OCR专用SDK及服务启动脚本的SDK覆盖值切至当前Xcode路径。通过新接口同步并实际识别：无保批次3为538条报价/570条扣费，有保批次4为214条报价/92条扣费，两批parsed且无解析错误，旧批次保留。先更新数据，等商品运行69正常结束（ok=1、无错误）并确认服务空闲后才优雅重启，没有中断该轮搜索。
+
+重启后通过运行中的后台 POST /api/quotes/sync 验证：两类均返回原批次3/4、updated=false、parsed，条目仍为538/214，未重复OCR；报价来源均为cdn.zuphone.com，页面静态脚本的持续检查文案已生效。记录保存在忽略的 .runtime，源码改动尚未提交。
