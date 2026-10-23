@@ -117,6 +117,9 @@ def test_model_selection_is_cleared_checked_and_committed(monkeypatch):
 ])
 def test_unconfirmed_model_does_not_succeed(monkeypatch, selected, committed, message):
     monkeypatch.setattr("app_monitor.iphone_collector.time.sleep", lambda _: None)
+    wait = IPhoneCollector._wait_for_source
+    monkeypatch.setattr(IPhoneCollector, "_wait_for_source", staticmethod(
+        lambda driver, ready, failure: wait(driver, ready, failure, timeout=0)))
     with pytest.raises(RuntimeError, match=message):
         IPhoneCollector(Settings())._apply_model(Driver(selected, committed), "iPhone 16")
 

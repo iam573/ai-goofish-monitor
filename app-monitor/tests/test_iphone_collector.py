@@ -137,7 +137,7 @@ def test_badge_ocr_crops_logical_bounds_and_removes_temporary_image(monkeypatch)
             assert crop.size == (264, 114)  # Badge + two points padding, scaled to screenshot, then enlarged.
         return SimpleNamespace(returncode=0, stdout="0\t0\t0\t1\t1\t鱼小铺\n")
 
-    monkeypatch.setattr("app_monitor.iphone_collector.subprocess.run", recognize)
+    monkeypatch.setattr("app_monitor.swift_runtime.subprocess.run", recognize)
     badges = list(ET.fromstring(source).iter("XCUIElementTypeImage"))
     assert recognize_seller_badges(png.getvalue(), source, badges) == {(136, 108, 40, 15): "鱼小铺"}
     assert files and all(not path.exists() for path in files)
@@ -334,7 +334,7 @@ def test_return_clicks_detail_back_once_and_accepts_collapsed_result_bar(monkeyp
     assert "收起" in actions[-1]["method"]
 
 
-@pytest.mark.parametrize("clipboard", ["https://www.goofish.com/item?id=1091531543430", "copy-marker"])
+@pytest.mark.parametrize("clipboard", ["https://www.goofish.com/item?id=1091531543430", "copy-marker", "native_confirmation"])
 def test_share_keeps_copied_id_when_returned_sort_bar_is_hidden(monkeypatch, clipboard):
     card = PhoneCard("iPhone 17 512G 个人自用", 3200, "湖里区", 220, 700)
 
@@ -357,7 +357,12 @@ def test_share_keeps_copied_id_when_returned_sort_bar_is_hidden(monkeypatch, cli
             return [Element()]
 
         def execute_script(self, *args):
-            pass
+            if clipboard == "native_confirmation" and args[0] == "mobile: tap":
+                assert args[1]["y"] == 727  # Label in the bottom of this control.
+                self.page_source = '''<XCUIElementTypeApplication>
+                  <XCUIElementTypeOther visible="true"
+                    name="【闲鱼】https://www.goofish.com/item?id=1091531543430 点击链接直接打开" />
+                </XCUIElementTypeApplication>'''
 
     driver = Driver()
     collector = IPhoneCollector(Settings())
@@ -365,9 +370,14 @@ def test_share_keeps_copied_id_when_returned_sort_bar_is_hidden(monkeypatch, cli
     monkeypatch.setattr(collector, "_ensure_foreground", lambda *args: None)
     monkeypatch.setattr(collector, "_close_share_sheet", lambda d: setattr(d, "page_source", scrolled_result_source()))
     monkeypatch.setattr("app_monitor.iphone_collector.detail_matches", lambda *args: True)
-    monkeypatch.setattr("app_monitor.iphone_collector._prepare_pasteboard", lambda _: "copy-marker")
-    monkeypatch.setattr("app_monitor.iphone_collector._pasteboard", lambda _: clipboard)
+    monkeypatch.setattr("app_monitor.iphone_collector._prepare_pasteboard", lambda _, **kwargs: "copy-marker")
+    def read_clipboard(*args, **kwargs):
+        assert clipboard != "native_confirmation", "A fresh native confirmation should need no clipboard read"
+        return clipboard
+    monkeypatch.setattr("app_monitor.iphone_collector._pasteboard", read_clipboard)
     monkeypatch.setattr("app_monitor.iphone_collector.time.sleep", lambda _: None)
+    wait = collector._wait_for_source
+    monkeypatch.setattr(collector, "_wait_for_source", lambda *args: wait(*args, timeout=0))
     actions = []
     if clipboard == "copy-marker":
         with pytest.raises(RuntimeError, match="剪贴板未产生新链接"):
@@ -616,8 +626,10 @@ def test_share_waits_for_identity_and_preserves_failed_comparison(monkeypatch,de
     monkeypatch.setattr(collector,'_find',lambda *args:Element())
     monkeypatch.setattr(collector,'_return_to_results',lambda *args:returns.append(True))
     monkeypatch.setattr('app_monitor.iphone_collector.time.sleep',lambda _:None)
-    monkeypatch.setattr('app_monitor.iphone_collector._prepare_pasteboard',lambda _:copies.append(True) or 'marker')
-    monkeypatch.setattr('app_monitor.iphone_collector._pasteboard',lambda _:'https://www.goofish.com/item?id=1091531543430')
+    monkeypatch.setattr('app_monitor.iphone_collector._prepare_pasteboard',lambda _, **kwargs:copies.append(True) or 'marker')
+    monkeypatch.setattr('app_monitor.iphone_collector._pasteboard',lambda _, **kwargs:'https://www.goofish.com/item?id=1091531543430')
+    wait = collector._wait_for_source
+    monkeypatch.setattr(collector, "_wait_for_source", lambda *args: wait(*args, timeout=0))
     actions=[]
     if delayed:
         assert collector._share_item_id(driver,'test',card,actions)=='1091531543430'

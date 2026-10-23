@@ -318,15 +318,21 @@ input[type=checkbox] { width: 16px; height: 16px; margin: 0; padding: 0; accent-
 
 /* ---------- 命中商品 ---------- */
 .deal-list { display: flex; flex-direction: column; }
-.deal { display: flex; justify-content: space-between; align-items: center; gap: 18px; padding: 14px 20px; border-top: 1px solid var(--line-soft); transition: background .12s; }
+.deal-filter { margin-bottom: 14px; }
+.deal-filter [data-deal-count] { margin-left: 4px; font-variant-numeric: tabular-nums; opacity: .7; }
+.deal { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: start; gap: 10px 18px; padding: 14px 20px; border-top: 1px solid var(--line-soft); transition: background .12s; }
 .deal:first-child { border-top: 0; }
 .deal:hover { background: var(--surface-2); }
 .deal-main { min-width: 0; }
-.deal-title { display: block; color: var(--ink); font-size: 15px; font-weight: 600; text-decoration: none; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.deal-title { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; color: var(--ink); font-size: 15px; font-weight: 600; line-height: 1.5; text-decoration: none; overflow: hidden; overflow-wrap: anywhere; }
 .deal-title:hover { color: var(--brand); text-decoration: underline; }
 .deal-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; margin-top: 6px; color: var(--muted); font-size: 12px; }
 .tag { padding: 2px 8px; border-radius: 6px; background: var(--surface-3); color: var(--ink-2); font-weight: 500; }
 .tag.strong { background: var(--brand-soft); color: var(--brand); font-weight: 700; }
+.deal-status.confirmed { background: var(--brand-soft); color: var(--brand); }
+.deal-status.pending, .margin.pending { background: var(--warn-soft); color: var(--warn); }
+.deal-note { margin-top: 8px; color: var(--muted); font-size: 12px; line-height: 1.6; overflow-wrap: anywhere; }
+.deal-footer { grid-column: 1 / -1; justify-self: end; }
 .push { color: var(--brand); font-weight: 600; }
 .push.bad { color: var(--bad); }
 .push.muted { color: var(--muted); font-weight: 500; }
@@ -516,16 +522,20 @@ th.num, td.num { text-align: right; }
 .run-item.fresh.hit { animation: fresh-hit 2.4s ease; }
 @keyframes fresh-in { from { background: var(--info-soft); } to { background: transparent; } }
 @keyframes fresh-hit { 0%, 30% { box-shadow: 0 0 0 3px var(--brand-line); } 100% { box-shadow: 0 0 0 0 transparent; } }
-.run-item { display: flex; justify-content: space-between; gap: 14px; padding: 16px; border: 1px solid var(--line-soft); border-radius: 10px; background: var(--surface); }
+.run-item { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: start; gap: 8px 14px; padding: 16px; border: 1px solid var(--line-soft); border-radius: 10px; background: var(--surface); }
 .run-item.hit { margin: 3px 0; border: 1px solid var(--brand-line); border-left: 4px solid var(--brand); border-radius: 10px; background: var(--brand-soft); }
-.run-item-main { min-width: 0; flex: 1; }
+.run-item-main { min-width: 0; }
 .run-item-title { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; color: var(--ink); font-size: 14px; font-weight: 600; line-height: 1.45; text-decoration: none; }
 .run-item-title:hover { color: var(--brand); text-decoration: underline; }
 .run-item-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; margin-top: 6px; color: var(--muted); font-size: 12px; }
 .run-item-reason { margin-top: 4px; color: var(--muted); font-size: 12px; }
+.run-item-quote-detail { margin-top: 3px; }
 .run-item-reason b.bad { font-weight: 650; }
 .run-item-price { flex: none; font-size: 17px; font-weight: 750; font-variant-numeric: tabular-nums; }
 .run-item.hit .run-item-price { color: var(--brand); }
+.run-item-footer { grid-column: 1 / -1; justify-self: end; }
+button.run-item-evidence { display: inline-flex; align-items: center; gap: 5px; padding: 5px 8px; min-height: 28px; border-color: var(--line-soft); border-radius: 7px; background: var(--surface-2); color: var(--ink-2); font-size: 12px; font-weight: 500; line-height: 1.4; white-space: nowrap; }
+button.run-item-evidence:hover { filter: none; background: var(--brand-soft); border-color: var(--brand-line); color: var(--brand); }
 .item-badge { padding: 1px 8px; border-radius: 6px; background: var(--surface-3); color: var(--muted); font-weight: 650; }
 .item-badge.hit { background: var(--brand); color: var(--brand-ink); }
 .item-badge.muted { font-weight: 500; }
@@ -639,6 +649,8 @@ dialog::backdrop { background: rgba(10, 20, 16, .45); backdrop-filter: blur(2px)
 .est-final span { color: var(--muted); font-size: 12px; }
 .est-final strong { color: var(--brand); font-size: 26px; line-height: 1.1; font-variant-numeric: tabular-nums; }
 @media (max-width: 560px) {
+  .deal { padding: 12px; gap: 8px; }
+  .deal-price strong { font-size: 18px; }
   .run-detail { padding: 16px; }
   .run-model-name h2 { font-size: 25px; }
   .run-result-stats { justify-content: space-between; gap: 6px; }
@@ -690,7 +702,7 @@ dialog::backdrop { background: rgba(10, 20, 16, .45); backdrop-filter: blur(2px)
   .page-head h1 { font-size: 20px; }
   .page-actions { align-self: flex-start; }
   .field-row, .field-row.three { grid-template-columns: 1fr; }
-  .deal { flex-direction: column; align-items: stretch; gap: 8px; padding: 14px 16px; }
+  .deal { grid-template-columns: minmax(0, 1fr); align-items: stretch; gap: 8px; padding: 14px 16px; }
   .deal-title { white-space: normal; }
   .deal-price { flex-direction: row; align-items: center; justify-content: space-between; }
   #quote-model-filter { width: 100%; }
@@ -721,6 +733,9 @@ dialog::backdrop { background: rgba(10, 20, 16, .45); backdrop-filter: blur(2px)
 .smart-checks { display: flex; flex-wrap: wrap; gap: 6px 12px; }
 .smart-policy { display: grid; gap: 8px; padding: 14px 0; border-bottom: 1px solid var(--line); }
 #valuation-detail { width: min(780px, 94vw); max-height: 88vh; overflow: auto; }
+.valuation-dialog-head { display: flex; align-items: flex-start; gap: 16px; margin-bottom: 18px; padding-bottom: 14px; border-bottom: 1px solid var(--line-soft); }
+.valuation-dialog-head h3 { flex: 1; min-width: 0; font-size: 16px; line-height: 1.5; overflow-wrap: anywhere; }
+.valuation-dialog-head .icon-btn { flex: none; }
 #valuation-detail pre { white-space: pre-wrap; padding: 12px; background: var(--surface-2); font-size: 13px; }
 #valuation-detail h4 { margin: 16px 0 8px; }
 #valuation-detail table { width: 100%; border-collapse: collapse; font-size: 13px; }

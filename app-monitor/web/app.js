@@ -127,27 +127,68 @@ async function loadOverview() {
 
 /* ------------------------------------------------------------------ 命中商品 */
 
+const dealView = { status: "", items: [], loadVersion: 0 };
+
 async function loadDeals() {
-  const deals = await api("/api/deals");
+  const version = ++dealView.loadVersion;
+  const [deals, assessments] = await Promise.all([
+    api("/api/deals"), api("/api/smart/assessments?status=pending&limit=500"),
+  ]);
+  if (version !== dealView.loadVersion) return;
+  const confirmedIds = new Set(deals.map(deal => String(deal.item_id)));
+  const pending = assessments.filter(record => record.snapshot?.item_url && !confirmedIds.has(String(record.item_id))).map(record => {
+    const value = record.result, item = record.snapshot;
+    const reasons = (value.uncertainties || []).filter(reason => value.grade || reason !== "未取得确定成色的报价，使用候选上限");
+    return {
+      ...item, item_price: item.price, model: value.model, storage: value.storage, grade: value.grade,
+      status: "pending", quote_price: null, quote_upper: value.value_high,
+      assessment_id: record.id, matched_at: record.created_at,
+      notification_status: record.notification_status, reason: reasons.join("；") || value.reason,
+    };
+  });
+  dealView.items = [...deals.map(deal => ({ ...deal, status: "matched" })), ...pending]
+    .sort((a, b) => (Date.parse(b.matched_at) || 0) - (Date.parse(a.matched_at) || 0));
+  renderDeals();
+}
+
+function renderDeals() {
+  const counts = { "": dealView.items.length, matched: 0, pending: 0 };
+  for (const item of dealView.items) counts[item.status] += 1;
+  document.querySelectorAll("#deal-filter button").forEach(button => {
+    const active = button.dataset.dealStatus === dealView.status;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-pressed", String(active));
+    button.querySelector("[data-deal-count]").textContent = counts[button.dataset.dealStatus];
+  });
+  const deals = dealView.items.filter(item => !dealView.status || item.status === dealView.status);
   document.querySelector("#deal-list").innerHTML = deals.length ? deals.map(deal => {
-    const push = { sent: ["已推送", ""], failed: ["推送失败", "bad"], disabled: ["未配置推送", "muted"], pending: ["待推送", "muted"] }[deal.notification_status] || [deal.notification_status, "muted"];
-    return `<article class="deal">
+    const pending = deal.status === "pending";
+    const push = { sent: ["已推送", ""], failed: ["推送失败", "bad"], disabled: ["未配置推送", "muted"],
+      none: ["未推送", "muted"], shadow: ["仅记录", "muted"], duplicate: ["已处理", "muted"],
+      sending: ["推送中", "muted"], pending: ["待推送", "muted"] }[deal.notification_status];
+    const quote = pending
+      ? `${deal.grade || "成色待确认"} · ${deal.quote_upper != null ? `参考上限 ¥${money(deal.quote_upper)}` : "回收估值待确认"}`
+      : `${deal.grade || "参考"}回收估值 ¥${money(deal.quote_price)}`;
+    return `<article class="deal ${pending ? "is-pending" : ""}">
       <div class="deal-main">
         <a class="deal-title" href="${escapeHtml(deal.item_url)}" target="_blank" rel="noreferrer">${escapeHtml(deal.title)}</a>
         <div class="deal-meta">
+          <span class="tag deal-status ${pending ? "pending" : "confirmed"}">${pending ? "待确认" : "已确认"}</span>
           <span class="tag strong">iPhone ${escapeHtml(deal.model)} · ${escapeHtml(displayStorage(deal.storage))}</span>
           ${deal.region || deal.display_region ? `<span class="tag">${escapeHtml(deal.region || deal.display_region)}</span>` : ""}
-          <span>${escapeHtml(deal.grade)}回收报价 ¥${deal.quote_price}</span>
+          <span>${escapeHtml(quote)}</span>
           <span>${shortTime(deal.matched_at)}</span>
-          <span class="push ${push[1]}">${push[0]}</span>
+          ${push ? `<span class="push ${push[1]}">${push[0]}</span>` : ""}
         </div>
+        ${pending && deal.reason ? `<div class="deal-note">待确认：${escapeHtml(deal.reason)}</div>` : ""}
       </div>
       <div class="deal-price">
         <strong>¥${deal.item_price}</strong>
-        <span class="margin">${quoteDifferenceLabel(deal.quote_price, deal.item_price)}</span>
+        <span class="margin ${pending ? "pending" : ""}">${pending ? "估值待确认" : quoteDifferenceLabel(deal.quote_price, deal.item_price)}</span>
       </div>
+      ${deal.assessment_id ? `<div class="deal-footer"><button type="button" class="run-item-evidence" data-assessment-id="${deal.assessment_id}">成色与扣费依据 <span aria-hidden="true">›</span></button></div>` : ""}
     </article>`;
-  }).join("") : `<div class="empty">还没有命中的商品。<br /><span class="hint">报价和规则设好后，系统会在搜索时段内自动轮流搜索各机型。</span></div>`;
+  }).join("") : `<div class="empty">${dealView.status === "pending" ? "暂无待确认商品" : dealView.status === "matched" ? "暂无已确认商品" : "暂无已确认或待确认商品"}<br /><span class="hint">搜索发现符合价格条件的商品后会显示在这里。</span></div>`;
 }
 
 /* ------------------------------------------------------------------ 规则 */
@@ -679,6 +720,32 @@ function stepChip(ok, label, detail) {
   return `<span class="step-chip ${ok === true ? "ok" : ok === false ? "bad" : ""}" title="${escapeHtml(detail || "")}">${icon} ${escapeHtml(label)}</span>`;
 }
 
+function runItemQuote(item) {
+  const value = item.assessment_result;
+  const basis = value ? "detail" : item.quote_basis || (item.code === "no_link" ? "candidate" : "fixed");
+  const grade = value?.grade || item.quote_grade;
+  const gradeLabel = escapeHtml(grade || (basis === "detail" ? "成色待确认" : "成色未记录"));
+  const amount = number => `¥${money(number)}`;
+  const limit = value?.threshold_low ?? item.threshold_price;
+  const threshold = limit != null ? ` · ${basis === "candidate" ? "初筛" : "推送"}上限 ${amount(limit)}` : "";
+  if (basis === "detail") {
+    const low = value?.value_low ?? item.quote_price;
+    const high = value?.value_high ?? low;
+    const range = low != null ? (high != null && high !== low ? `${amount(low)}–${amount(high)}` : amount(low))
+      : high != null ? `≤ ${amount(high)}（待确认）` : "待确认";
+    const details = [];
+    if (value?.base_price != null) details.push(`基础报价 ${amount(value.base_price)}`);
+    for (const deduction of value?.deductions || []) {
+      const fee = deduction.min === deduction.max ? amount(deduction.min) : `${amount(deduction.min)}–${amount(deduction.max)}`;
+      details.push(`${escapeHtml(deduction.name)} −${fee}${deduction.open_ended ? "起" : ""}`);
+    }
+    return `${gradeLabel} · 调整后回收价 ${range}${threshold}${details.length ? `<div class="run-item-quote-detail">${details.join(" · ")}</div>` : ""}`;
+  }
+  if (item.quote_price == null) return "";
+  const label = basis === "candidate" ? "初筛参考价" : "固定参考回收价";
+  return `${gradeLabel} · ${label} ${amount(item.quote_price)}${threshold}${basis === "candidate" ? " · 尚未完成详情判价" : ""}`;
+}
+
 function runItem(item, fresh = false) {
   const code = item.code || "other";
   const above = item.code === "price_high" && item.threshold_price != null ? item.price - item.threshold_price : null;
@@ -687,9 +754,7 @@ function runItem(item, fresh = false) {
     : `<span class="item-badge ${code}">${codeLabels[code] || code}</span>`;
   const notificationLabels = { sent: "已推送", failed: "推送失败", shadow: "仅记录", duplicate: "已处理", sending: "推送中" };
   const notification = notificationLabels[item.assessment_notification];
-  const quote = item.quote_price != null
-    ? `回收报价 ¥${item.quote_price} · 推送上限 ¥${Math.round(item.threshold_price)}${above != null ? ` · <b class="bad">高出上限 ¥${Math.round(above)}</b>` : ""}`
-    : "";
+  const quote = runItemQuote(item);
   return `<article class="run-item ${item.matched ? "hit" : ""} ${fresh ? "fresh" : ""}">
     <div class="run-item-main">
       ${item.item_url
@@ -702,10 +767,16 @@ function runItem(item, fresh = false) {
         ${item.display_region ? `<span>${escapeHtml(item.display_region)}</span>` : ""}
         ${item.pass_label && normalizeCapacity(item.pass_label) !== normalizeCapacity(item.storage) ? `<span class="pass-tag">采集 ${escapeHtml(item.pass_label)}</span>` : ""}
       </div>
-      ${item.assessment_id ? `<button type="button" class="compact secondary" data-assessment-id="${item.assessment_id}">成色与扣费依据</button>` : ""}
-      <div class="run-item-reason">${item.matched || item.code === "price_high" ? quote : `${escapeHtml(item.decision || "")}${quote ? ` · ${quote}` : ""}`}</div>
+      ${quote ? `<div class="run-item-reason">${quote}${above != null ? ` · <b class="bad">高出上限 ¥${Math.round(above)}</b>` : ""}</div>` : ""}
+      ${!item.matched && item.code !== "price_high" ? `<div class="run-item-reason">${escapeHtml(item.decision || "")}</div>` : ""}
     </div>
     <div class="run-item-price">¥${item.price}</div>
+    ${item.assessment_id ? `<div class="run-item-footer">
+      <button type="button" class="run-item-evidence" data-assessment-id="${item.assessment_id}">
+        <span>成色与扣费依据</span>
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9 6 6 6-6 6" /></svg>
+      </button>
+    </div>` : ""}
   </article>`;
 }
 
@@ -1052,6 +1123,13 @@ async function saveQuoteEditor(event) {
 
 const loaders = { deals: loadDeals, targets: loadTargets, runs: loadRuns };
 
+document.querySelector("#deal-filter").addEventListener("click", event => {
+  const button = event.target.closest("[data-deal-status]");
+  if (!button) return;
+  dealView.status = button.dataset.dealStatus;
+  renderDeals();
+});
+
 document.querySelector("#run-filter").addEventListener("click", event => {
   const button = event.target.closest("button");
   if (!button) return;
@@ -1391,7 +1469,7 @@ document.querySelector("#test-notification").addEventListener("click", async () 
   } catch (error) { toast(error.message, true); }
 });
 
-const smartUI = initSmart({api, escapeHtml, toast, state, gradeOrder, loadOverview, updateRuleHints, onDirty: refreshDirty});
+const smartUI = initSmart({api, escapeHtml, toast, state, gradeOrder, loadOverview, loadDeals, updateRuleHints, onDirty: refreshDirty});
 
 async function initialize() {
   if (location.hash) showPanel(`${location.hash.slice(1)}-panel`, { load: false });

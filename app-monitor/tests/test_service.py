@@ -381,3 +381,30 @@ async def test_seller_metadata_survives_processing_and_persistence(database, sho
                                    (item["item_id"],)).fetchone()
     assert saved["seller_name"] == "测试卖家"
     assert saved["is_fish_shop"] == shop
+
+
+def test_run_quote_snapshot_keeps_initial_grade_after_rules_change(database):
+    service, notifier = setup(database, region_city="厦门")
+    add_quotes(database, [("15 Pro", "256", "靓机", 4500), ("15 Pro", "256", "小花", 4000)])
+    database.state_set("smart_config", {"enabled": True})
+    with database.connect() as connection:
+        run_id = connection.execute("INSERT INTO search_runs(model, keyword, started_at) VALUES ('15 Pro', 'iPhone 15 Pro', '2026-10-23')").lastrowid
+    service._record_cards(run_id, [{"title": "iPhone 15 Pro 256G 轻微划痕", "price": 3900,
+                                   "display_region": "厦门", "link_error": "复制失败"}],
+                          load_rules(database), {"storage": "256", "filter_applied": True, "region_applied": True}, "15 Pro")
+    database.state_set("smart_config", {"enabled": True, "accepted_grades": ["小花"]})
+    with database.connect() as connection:
+        row = dict(connection.execute("SELECT * FROM run_items WHERE run_id=?", (run_id,)).fetchone())
+    assert row["quote_grade"] == "靓机" and row["quote_basis"] == "candidate"
+    assert row["quote_price"] == 4500 and row["assessment_id"] is None and row["code"] == "no_link"
+    assert notifier.sent == []
+
+
+def test_detail_quote_keeps_assessed_grade_and_adjusted_price(database):
+    service, _ = setup(database)
+    decision = service.smart_decision({"snapshot": {"price": 3600}, "result": {
+        "status": "matched", "reason": "电池扣费后满足条件", "model": "15 Pro", "storage": "256",
+        "grade": "小花", "base_price": 4000, "value_low": 3700, "threshold_low": 3900,
+    }})
+    assert decision.quote_grade == "小花" and decision.quote_basis == "detail"
+    assert decision.quote_price == 3700 and decision.threshold_price == 3900

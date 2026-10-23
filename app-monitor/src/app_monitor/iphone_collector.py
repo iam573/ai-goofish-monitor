@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import html
 import io
 import logging
 import re
-import subprocess
 import tempfile
 import time
 import uuid
@@ -30,9 +30,14 @@ logger = logging.getLogger(__name__)
 _PRICE = re.compile(r"^[¥￥]\s*([1-9]\d{1,6}(?:\.\d{1,2})?)\s*(?:元)?$")
 _PRICE_OTHER = re.compile(r"^([1-9]\d{1,6}(?:\.\d{1,2})?)\s*元$")
 _URL = re.compile(r"https?://[^\s<>\"']+")
+_SHARE_HOSTS = {"m.tb.cn", "www.goofish.com", "h5.m.goofish.com"}
 _ITEM_ID = re.compile(r"(?:[?&](?:id|itemId|item_id)=)(\d{8,})")
 _IGNORED = {"新发", "综合", "价格", "筛选", "区域", "刚刚发布", "包邮", "验货宝", "想要", "搜索"}
 _STORAGE_LABEL = re.compile(r"^(?:\d+GB|\d+TB)$")
+
+
+class _PageWaitTimeout(RuntimeError):
+    pass
 
 
 @dataclass(frozen=True)
@@ -122,6 +127,18 @@ def item_id_from_share(share_text: str, page_html: str) -> str:
             item_id = _ITEM_ID.search(match.group(0))
             if item_id:
                 return item_id.group(1)
+    return ""
+
+
+def share_confirmation_text(source: str) -> str:
+    """Read only the App's visible copy-confirmation text, never a hidden link."""
+    for node in ET.fromstring(source).iter():
+        text = _text(node)
+        if (node.tag not in {"XCUIElementTypeOther", "XCUIElementTypeStaticText", "XCUIElementTypeTextView"}
+                or node.get("visible") != "true" or "【闲鱼】" not in text or "点击链接" not in text):
+            continue
+        if any(urlparse(url).hostname in _SHARE_HOSTS for url in _URL.findall(text)):
+            return text
     return ""
 
 
@@ -500,28 +517,83 @@ def _brief_error(exc: Exception) -> str:
     return (str(exc).splitlines()[0] or type(exc).__name__)[:400]
 
 
-def _pasteboard(udid: str) -> str:
-    process = subprocess.run(
-        ["xcrun", "devicectl", "device", "pasteboard", "paste", "--device", udid],
-        capture_output=True, text=True, timeout=12, check=True,
-    )
-    return process.stdout.strip()
+def _pasteboard(driver: Any, *, settings: Settings, content: str | None = None) -> str:
+    """WDA must be foreground to access the real device clipboard on iOS 17.
+
+    Temporarily disable XCTest's idle wait when activating its own runner, then
+    verify the actual foreground app. Always restore Goofish and the prior wait.
+    Clipboard contents must never be included in errors or logs.
+    """
+    runner = settings.ios_wda_bundle_id.removesuffix(".xctrunner") + ".xctrunner"
+    if not settings.ios_wda_bundle_id:
+        raise RuntimeError("手机剪贴板不可用：未配置 WDA bundle ID")
+    try:
+        idle_timeout = driver.get_settings().get("waitForIdleTimeout", 0.5)
+
+        def activate(bundle_id: str) -> None:
+            driver.execute_script("mobile: activateApp", {"bundleId": bundle_id})
+            deadline = time.monotonic() + 5
+            while driver.execute_script("mobile: activeAppInfo").get("bundleId") != bundle_id:
+                if time.monotonic() >= deadline:
+                    raise RuntimeError("剪贴板操作未确认应用前台状态")
+                time.sleep(0.15)
+
+        try:
+            driver.update_settings({"waitForIdleTimeout": 0})
+            activate(runner)
+            if content is not None:
+                driver.execute_script("mobile: setClipboard", {
+                    "contentType": "plaintext",
+                    "content": base64.b64encode(content.encode("utf-8")).decode("ascii"),
+                })
+            encoded = driver.execute_script("mobile: getClipboard", {"contentType": "plaintext"})
+            if not isinstance(encoded, str):
+                raise ValueError("Unexpected clipboard response")
+            return base64.b64decode(encoded, validate=True).decode("utf-8")
+        finally:
+            try:
+                activate(settings.bundle_id)
+            finally:
+                driver.update_settings({"waitForIdleTimeout": idle_timeout})
+    except Exception as exc:
+        raise RuntimeError("手机剪贴板读写失败，请检查 WDA 连接及手机粘贴权限；本件未取得链接") from exc
 
 
-def _prepare_pasteboard(udid: str) -> str:
+def _prepare_pasteboard(driver: Any, *, settings: Settings) -> str:
     # A fresh marker verifies this copy action even if the same product was
     # copied on a previous run. Never accept a stale share URL as a new copy.
     marker = f"app-monitor-copy-{uuid.uuid4().hex}"
-    subprocess.run(
-        ["xcrun", "devicectl", "device", "pasteboard", "copy", "--device", udid],
-        input=marker, capture_output=True, text=True, timeout=12, check=True,
-    )
+    if _pasteboard(driver, settings=settings, content=marker) != marker:
+        raise RuntimeError("手机剪贴板标记写入后回读不一致，已跳过复制以免使用旧链接")
     return marker
 
 
 class IPhoneCollector:
     def __init__(self, settings: Settings):
         self.settings = settings
+
+    @staticmethod
+    def _wait_for_source(
+        driver: Any, ready: Callable[[str], bool], failure: str,
+        *, timeout: float = 8, interval: float = 0.15,
+    ) -> str:
+        """条件满足立即返回该快照；超时仅作为失败上限，不固定等待。"""
+        started = time.monotonic()
+        deadline = started + timeout
+        polls = 0
+        while True:
+            source = driver.page_source
+            polls += 1
+            try:
+                if ready(source):
+                    logger.debug("iPhone 页面条件满足 elapsed=%.3fs polls=%s", time.monotonic() - started, polls)
+                    return source
+            except ET.ParseError:
+                pass  # 转场期间的空快照不作为成功依据。
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise _PageWaitTimeout(f"{failure}（等待 {timeout:g} 秒超时）")
+            time.sleep(min(interval, remaining))
 
     async def collect(
         self, udid: str, os_version: str, keyword: str, region_hint: str,
@@ -556,6 +628,8 @@ class IPhoneCollector:
             "appium:updatedWDABundleId": self.settings.ios_wda_bundle_id,
             "appium:wdaLocalPort": 8101,
             "appium:newCommandTimeout": 300,
+            "appium:waitForIdleTimeout": 0.5,
+            "appium:settings": {"waitForIdleTimeout": 0.5, "animationCoolOffTimeout": 0.3},
         }
         if os_version:
             capabilities["appium:platformVersion"] = os_version
@@ -710,10 +784,13 @@ class IPhoneCollector:
     def _find(driver: Any, name: str, types: tuple[str, ...] = ()) -> Any | None:
         from appium.webdriver.common.appiumby import AppiumBy
 
-        for element in driver.find_elements(AppiumBy.IOS_PREDICATE, f"name == '{name}' OR label == '{name}'"):
-            if (not types or element.get_attribute("type") in types) and element.is_displayed():
-                return element
-        return None
+        quoted = name.replace("\\", "\\\\").replace("'", "\\'")
+        query = f"(name == '{quoted}' OR label == '{quoted}') AND visible == true"
+        if types:
+            query += " AND type IN {" + ", ".join(f"'{kind}'" for kind in types) + "}"
+        # 可见性和类型交给同一次原生查询，避免逐个元素再次跨设备读属性。
+        elements = driver.find_elements(AppiumBy.IOS_PREDICATE, query)
+        return next(iter(elements), None)
 
     @staticmethod
     def _close_share_sheet(driver: Any) -> None:
@@ -1022,7 +1099,8 @@ class IPhoneCollector:
                     "fromY": int(sort.get("y") or 0) + 45, "toY": int(sort.get("y") or 0) + 45,
                 })
                 source = driver.page_source
-            source = driver.page_source
+            source = self._wait_for_source(driver, lambda xml: _model_picker_bounds(xml) is not None,
+                                           "品牌机型面板未出现，未继续采集")
         bounds = _model_picker_bounds(source)
         if bounds is None:
             raise RuntimeError("品牌机型面板未出现，未继续采集")
@@ -1059,31 +1137,33 @@ class IPhoneCollector:
             self._scroll_model_picker(driver, bounds, "up")
         else:
             raise RuntimeError(f"苹果品牌下未找到精确机型「{keyword}」，未继续采集")
-        source = driver.page_source
+        def selected_model_ready(xml: str) -> bool:
+            return (_model_picker_bounds(xml) is not None
+                    and {normalize_search_text(name) for name in checked_models(xml, driver.get_screenshot_as_png())}
+                    == {normalize_search_text(keyword)})
+
+        source = self._wait_for_source(driver, selected_model_ready, f"机型勾选校验失败：期望 {keyword}")
         bounds = _model_picker_bounds(source)
         if bounds is None:
             raise RuntimeError("选择机型后未找到确认面板")
-        selected = checked_models(source, driver.get_screenshot_as_png())
-        if {normalize_search_text(name) for name in selected} != {normalize_search_text(keyword)}:
-            raise RuntimeError(f"机型勾选校验失败：期望 {keyword}，实际 {sorted(selected)}")
         clicked.append(f"已校验 {keyword}")
         self._tap_node(driver, bounds[1])
         clicked.append("确定")
-        for _ in range(6):
-            source = driver.page_source
-            chip = model_filter_chip(source)
-            if (chip is not None and _model_picker_bounds(source) is None
+        def model_applied(xml: str) -> bool:
+            chip = model_filter_chip(xml)
+            return (chip is not None and _model_picker_bounds(xml) is None
                     and (_text(chip) == "苹果/Apple"
-                         or normalize_search_text(_text(chip)) == normalize_search_text(keyword))):
-                return clicked
-            time.sleep(0.4)
-        raise RuntimeError(f"提交后未确认精确机型「{keyword}」，未继续采集")
+                         or normalize_search_text(_text(chip)) == normalize_search_text(keyword)))
+        self._wait_for_source(driver, model_applied, f"提交后未确认精确机型「{keyword}」，未继续采集")
+        return clicked
 
     def _apply_storage(self, driver: Any, storage: str) -> list[str]:
         from appium.webdriver.common.appiumby import AppiumBy
 
         target = f"{storage}B" if storage.endswith("T") else f"{storage}GB"
         current, restored = self._reveal_storage_chip(driver)
+        if current == target:
+            return [*restored, f"已确认 {target}"]
         sort = self._find(driver, "新发", ("XCUIElementTypeStaticText",))
         sort_y = sort.rect["y"] if sort else -1000
         choices = driver.find_elements(AppiumBy.IOS_PREDICATE, f"name == '{current}' OR label == '{current}'")
@@ -1094,31 +1174,32 @@ class IPhoneCollector:
             raise RuntimeError(f"找不到容量入口「{current}」")
         entrance.click()
         clicked = [*restored, current]
-        if self._find(driver, "确定", ("XCUIElementTypeButton",)) is None:
-            raise RuntimeError("点击容量入口后未出现筛选面板")
-        for previous in sorted(checked_storages(driver.page_source) - {target}):
+        def picker_open(xml: str) -> bool:
+            return any(_text(n) == "确定" and n.get("visible") == "true"
+                       for n in ET.fromstring(xml).iter("XCUIElementTypeButton"))
+        source = self._wait_for_source(driver, picker_open, "点击容量入口后未出现筛选面板")
+        for previous in sorted(checked_storages(source) - {target}):
             selected = self._find(driver, previous, ("XCUIElementTypeStaticText",))
             if selected is None:
                 raise RuntimeError(f"无法取消旧容量「{previous}」")
             selected.click()
             clicked.append(f"取消 {previous}")
-        if target not in checked_storages(driver.page_source):
+            source = self._wait_for_source(driver, lambda xml: picker_open(xml) and previous not in checked_storages(xml),
+                                           f"无法确认取消旧容量「{previous}」")
+        if target not in checked_storages(source):
             option = self._find(driver, target, ("XCUIElementTypeStaticText",))
             if option is None:
                 raise RuntimeError(f"容量选项「{target}」未出现")
             option.click()
             clicked.append(target)
-        selected = checked_storages(driver.page_source)
-        if selected != {target}:
-            raise RuntimeError(f"容量勾选校验失败：期望 {target}，实际 {sorted(selected)}")
+            source = self._wait_for_source(driver, lambda xml: picker_open(xml) and checked_storages(xml) == {target},
+                                           f"容量勾选校验失败：期望 {target}")
         self._find(driver, "确定", ("XCUIElementTypeButton",)).click()
         clicked.append("确定")
-        for _ in range(12):
-            if result_bar_label(driver.page_source, target):
-                logger.info("iPhone 容量已应用 storage=%s clicked=%s", target, clicked)
-                return clicked
-            time.sleep(0.4)
-        raise RuntimeError(f"点击确定后列表未显示「{target}」")
+        self._wait_for_source(driver, lambda xml: not picker_open(xml) and result_bar_label(xml, target),
+                              f"点击确定后列表未显示「{target}」")
+        logger.info("iPhone 容量已应用 storage=%s clicked=%s", target, clicked)
+        return clicked
 
     def _return_to_results(self, driver: Any, actions: list[dict[str, Any]]) -> None:
         self._ensure_foreground(driver, actions)
@@ -1207,6 +1288,15 @@ class IPhoneCollector:
             shop_label = {True: "是", False: "否", None: "未识别"}[seller["is_fish_shop"]]
             actions.append({"action": "读取卖家信息", "target": f"{seller['seller_name'] or '未识别'} · 鱼小铺：{shop_label}",
                             "method": seller_method, "success": bool(seller["seller_name"])})
+            marker = _prepare_pasteboard(driver, settings=self.settings)
+            # Foreground clipboard access temporarily switches away from Goofish.
+            # Recheck identity and locate the share button again after returning.
+            self._wait_for_source(driver, lambda xml: detail_matches(xml, card),
+                                  "剪贴板准备后详情身份发生变化，已跳过复制")
+            share = self._find(driver, "分享按钮")
+            if share is None:
+                raise RuntimeError("剪贴板准备后找不到分享按钮")
+            actions.append({"action": "准备手机剪贴板", "target": "本次复制标记已核验", "success": True})
             share.click()
             actions.append({"action": "打开分享面板", "target": "分享按钮", "success": True})
             copy = None
@@ -1218,25 +1308,33 @@ class IPhoneCollector:
                 time.sleep(0.3)
             if copy is None:
                 raise RuntimeError("分享菜单没有复制链接")
-            marker = _prepare_pasteboard(udid)
-            # Share-sheet icons are present in the AX tree but XCUITest marks
-            # them invisible; a coordinate tap on the located icon works.
+            if share_confirmation_text(driver.page_source):
+                raise RuntimeError("分享面板仍有旧的复制确认文案，已跳过以免关联旧商品")
+            # The icon's image centre does not trigger this App version. The
+            # label is within the bottom of the same bounded AX share control.
             rect = copy.rect
             driver.execute_script("mobile: tap", {
                 "x": int(rect["x"] + rect["width"] / 2),
-                "y": int(rect["y"] + rect["height"] / 2),
+                "y": int(rect["y"] + rect["height"] * 0.9),
             })
-            time.sleep(0.4)
-            after = ""
-            for _ in range(4):
-                after = _pasteboard(udid)
-                if after and marker not in after:
-                    break
-                time.sleep(0.3)
+            try:
+                copied_source = self._wait_for_source(
+                    driver, lambda xml: bool(share_confirmation_text(xml)), "未读到本次复制确认文案",
+                )
+                after = share_confirmation_text(copied_source)
+                actions.append({"action": "读取分享确认文案", "target": "本次可见确认框", "success": True})
+            except _PageWaitTimeout:
+                # Other App versions may copy without showing accessible text.
+                after = ""
+                for _ in range(4):
+                    after = _pasteboard(driver, settings=self.settings)
+                    if after and marker not in after:
+                        break
+                    time.sleep(0.3)
             if not after or marker in after:
                 raise RuntimeError("手机剪贴板未产生新链接")
             short_urls = [url.rstrip("，。)）") for url in _URL.findall(after)
-                          if urlparse(url).hostname in {"m.tb.cn", "www.goofish.com", "h5.m.goofish.com"}]
+                          if urlparse(url).hostname in _SHARE_HOSTS]
             if not short_urls:
                 raise RuntimeError("复制内容中没有闲鱼分享链接")
             direct = item_id_from_share(after, "")

@@ -42,7 +42,8 @@ def deduction(low=300,high=300,open_ended=False):
 def test_candidate_uses_highest_accepted_grade_and_not_fixed_grade(database):
     quotes=quote_setup(database); rules=Rules(quote_grade='小花',region_city='厦门')
     assert not evaluate(ITEM,rules,eligible_quotes(database,rules)).matched
-    assert candidate_decision(ITEM,rules,quotes,SmartConfig(),True,'256','17').matched
+    candidate = candidate_decision(ITEM,rules,quotes,SmartConfig(),True,'256','17')
+    assert candidate.matched and candidate.quote_grade == '靓机' and candidate.quote_basis == 'candidate'
     assert candidate_decision({**ITEM,'price':1},rules,quotes,SmartConfig(),True,'256','17').matched
     assert not candidate_decision({**ITEM,'price':5500},rules,quotes,SmartConfig(),True,'256','17').matched
     assert not candidate_decision({**ITEM,'display_region':'北京'},rules,quotes,SmartConfig(),True,'256','17').matched
@@ -167,7 +168,8 @@ def test_pending_notification_shows_bounds_and_seller_not_profit(database):
     item={**ITEM,'model':'17','storage':'256','smart_assessment':value,'assessment_facts':f.model_dump()}
     title,body=NotificationService._format_message(item,'','',[])
     assert title=='【待确认】iPhone 17 256G'
-    assert '候选回收价上限' in body and '不代表实际回收价' in body
+    assert '成色待确认' in body and '回收参考：≤ ¥5200（候选上限，待确认）' in body
+    assert '低于估值' not in body and '成色无法确定' not in body
     assert '小鱼（鱼小铺）' in body and '利润' not in body
 
 

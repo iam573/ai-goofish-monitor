@@ -53,12 +53,17 @@
           <header class="page-head">
             <div>
               <h1>命中商品</h1>
-              <p>挂牌价在推送上限以内、地区和机型都核对通过的商品。点击标题去闲鱼查看。</p>
+              <p>集中查看已确认商品和待核实的候选。待确认展示参考上限，点击依据核对详情。</p>
             </div>
             <div class="page-actions">
               <button class="secondary compact" data-refresh="deals">刷新</button>
             </div>
           </header>
+          <div id="deal-filter" class="segmented deal-filter" role="group" aria-label="按判价状态筛选商品">
+            <button type="button" data-deal-status="" class="active" aria-pressed="true">全部 <span data-deal-count="">0</span></button>
+            <button type="button" data-deal-status="matched" aria-pressed="false">已确认 <span data-deal-count="matched">0</span></button>
+            <button type="button" data-deal-status="pending" aria-pressed="false">待确认 <span data-deal-count="pending">0</span></button>
+          </div>
           <div class="card flush">
             <div id="deal-list" class="deal-list"></div>
           </div>
@@ -338,7 +343,14 @@
           </div>
         </section>
 
-        <dialog id="valuation-detail"><header class="page-head"><h3 id="valuation-detail-title"></h3><button id="valuation-detail-close" type="button" class="secondary">关闭</button></header><div id="valuation-detail-body"></div>
+        <dialog id="valuation-detail" aria-labelledby="valuation-detail-title">
+          <header class="valuation-dialog-head">
+            <h3 id="valuation-detail-title"></h3>
+            <button id="valuation-detail-close" type="button" class="icon-btn" aria-label="关闭成色与扣费依据" title="关闭">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18" /></svg>
+            </button>
+          </header>
+          <div id="valuation-detail-body"></div>
           <details><summary>修正本件商品的判断</summary><p class="hint">仅修正这一件商品；判断依据填写商品原文。未写的信息仍按正常处理。</p><div id="valuation-correction"></div><button id="valuation-correct-save" type="button">保存修正并重新计价</button></details>
           <div class="dialog-actions"><button id="valuation-reanalyze" type="button">重新按当前规则判价</button></div>
         </dialog>

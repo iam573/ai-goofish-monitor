@@ -572,6 +572,7 @@ class MonitorService:
         return MatchDecision(
             value["status"] == "matched", value["reason"], value["model"], value["storage"],
             quote_entry_id=value.get("quote_entry_id"), quote_price=low,
+            quote_grade=value.get("grade"), quote_basis="detail",
             threshold_price=value.get("threshold_low"),
             expected_margin=low - float(item["price"]) if low is not None else None,
             region=item.get("display_region"),
@@ -717,15 +718,15 @@ class MonitorService:
                 INSERT OR REPLACE INTO run_items(
                     run_id, item_id, pass_label, position, title, price, display_region, item_url,
                     publish_time, model, storage, quote_price, threshold_price, expected_margin,
-                    matched, code, decision, new_deal, assessment_id
-                ) VALUES (?, ?, ?, (SELECT COUNT(*) FROM run_items WHERE run_id=?), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    matched, code, decision, new_deal, assessment_id, quote_grade, quote_basis
+                ) VALUES (?, ?, ?, (SELECT COUNT(*) FROM run_items WHERE run_id=?), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     run_id, item["item_id"], pass_label, run_id, item["title"], item["price"],
                     item["display_region"], item["item_url"], item["publish_time"],
                     decision.model, decision.storage, decision.quote_price, decision.threshold_price,
                     decision.expected_margin, int(decision.matched), decision.code, decision.reason,
-                    int(new_deal), assessment_id,
+                    int(new_deal), assessment_id, decision.quote_grade, decision.quote_basis,
                 ),
             )
 

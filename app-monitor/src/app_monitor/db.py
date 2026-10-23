@@ -190,7 +190,9 @@ class Database:
                     "seller_name": "TEXT NOT NULL DEFAULT ''", "is_fish_shop": "INTEGER",
                 },
             )
-            _add_columns(connection, "run_items", {"assessment_id": "INTEGER"})
+            _add_columns(connection, "run_items", {
+                "assessment_id": "INTEGER", "quote_grade": "TEXT", "quote_basis": "TEXT",
+            })
             _add_columns(
                 connection,
                 "search_runs",

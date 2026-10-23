@@ -240,7 +240,7 @@ def candidate_decision(item: dict, rules: Rules, quotes: list[dict], config: Sma
     if result.code == "unrecognized" and expected_model and storage_hint and explicit_storage in {None, storage_hint}:
         context = {**item, "title": f"iPhone {expected_model} {storage_hint}G"}
         result = evaluate(context, broad, list(maxima.values()), region_applied, storage_hint, expected_model)
-    return result
+    return replace(result, quote_basis="candidate")
 
 
 def price_facts(item: dict, facts: Facts, quotes: list[dict], policies: list[dict],

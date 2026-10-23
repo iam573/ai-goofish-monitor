@@ -121,46 +121,55 @@ class NotificationService:
             elif reason:
                 lines.append(f"原因：{reason}")
         region = str(item.get("display_region") or item.get("region") or "").strip()
-        if region:
+        smart = bool(item.get("smart_assessment"))
+        if region and not smart:
             lines.append(f"地区：{region}")
         seller = str(item.get("seller_name") or "").strip()
         if seller or "is_fish_shop" in item:
             if markdown:
                 seller = re.sub(r"([\\`*_{}\[\]()#+.!|>~-])", r"\\\1", seller)
             suffix = "（鱼小铺）" if item.get("is_fish_shop") is True else ""
-            lines.append(f"卖家：{seller or '未识别'}{suffix}")
+            seller_line = f"卖家：{seller or '未识别'}{suffix}"
+            lines.append(f"{region} · {seller_line}" if smart and region else seller_line)
+        elif smart and region:
+            lines.append(f"地区：{region}")
         return lines
 
     @staticmethod
     def _smart_lines(item, markdown=False):
         value = item["smart_assessment"]
         escape = lambda text: re.sub(r"([\\`*_{}\[\]()#+.!|>~-])", r"\\\1", str(text)) if markdown else str(text)
-        method = "本地规则 + AI复核" if value.get("ai_reviewed") else "本地规则"
-        lines = [f"挂牌价：¥{float(item['price']):g}", f"判价方式：{method}（按描述，未验机）",
-                 f"判断成色：{value.get('grade') or '待确认'}"]
-        if value.get("defaults"):
-            lines.append("未说明的电池、拆修等按正常处理，未扣费")
-        evidence = (item.get("assessment_facts") or {}).get("grade_evidence")
-        if evidence:
-            lines.append(f"成色依据：{escape(evidence)}")
-        if value.get("base_price") is not None:
-            lines.append(f"基础回收价：¥{value['base_price']:g}")
-        for row in value.get("deductions", []):
-            amount = f"¥{row['min']:g}" if row['min'] == row['max'] else f"¥{row['min']:g}～{row['max']:g}"
-            lines.append(f"扣费：{escape(row['name'])} −{amount}{'起' if row.get('open_ended') else ''}")
+        grade = value.get("grade")
+        lines = [f"挂牌价：¥{float(item['price']):g} · {escape(grade)}（按描述）" if grade
+                 else f"挂牌价：¥{float(item['price']):g} · 成色待确认"]
         low, high = value.get("value_low"), value.get("value_high")
-        if low is not None:
-            price = f"¥{low:g}" if low == high else f"¥{low:g}～{high:g}"
-            lines.append(f"调整后回收价：{price}")
+        if low is not None and grade and value.get("status") != "pending":
+            price = f"¥{low:g}" if high is None or low == high else f"¥{low:g}～{high:g}"
             difference = float(item['price']) - low
-            lines.append(f"挂牌价高于保守回收价 ¥{difference:g}，需要议价" if difference > 0 else f"挂牌价低于保守回收价 ¥{-difference:g}")
+            comparison = (f"需议价 ¥{difference:g}" if difference > 0 else
+                          f"低于{'保守' if high is not None and low != high else ''}估值 ¥{-difference:g}" if difference < 0 else "与估值持平")
+            lines.append(f"回收估值：{price} · {comparison}")
         elif high is not None:
-            lines.append(f"候选回收价上限：¥{high:g}（信息未齐，不代表实际回收价）")
-        lines.append(f"允许议价金额：¥{value['max_over_quote']:g}")
-        if value.get("threshold_low") is not None:
-            lines.append(f"保守推送上限：¥{value['threshold_low']:g}")
-        if value.get("uncertainties"):
-            lines.append("待确认：" + escape("；".join(value["uncertainties"])))
+            lines.append(f"回收参考：≤ ¥{high:g}（候选上限，待确认）")
+        else:
+            lines.append("回收估值：待确认")
+        if value.get("deductions"):
+            deductions = []
+            for row in value["deductions"]:
+                amount = f"¥{row['min']:g}" if row['min'] == row['max'] else f"¥{row['min']:g}～{row['max']:g}"
+                deductions.append(f"{escape(row['name'])} −{amount}{'起' if row.get('open_ended') else ''}")
+            base = f"基础 ¥{value['base_price']:g} · " if value.get("base_price") is not None else ""
+            lines.append(f"扣费：{base}{'；'.join(deductions)}")
+        uncertainties = []
+        for reason in value.get("uncertainties", []):
+            if not grade and reason in {"成色无法确定", "未取得确定成色的报价，使用候选上限"}:
+                continue  # Already explicit in the heading and candidate ceiling.
+            if reason == "未取得确定成色的报价，使用候选上限":
+                reason = "该成色暂无对应报价"
+            if reason not in uncertainties:
+                uncertainties.append(reason)
+        if uncertainties:
+            lines.append("待确认：" + escape("；".join(uncertainties)))
         return lines
 
     @staticmethod
@@ -202,12 +211,13 @@ class NotificationService:
         # 参考价放在最后；标题写明是哪个机型容量的参考价
         reference = item.get("quote_reference") or {}
         grades = reference.get("grades") or []
+        selected_grade = item["smart_assessment"].get("grade") if item.get("smart_assessment") else reference.get("grade")
         subject = NotificationService._reference_subject(item)
         if grades:
             date = str(reference.get("quote_date") or "")[5:]
             lines.extend(("", f"📋 {subject}各成色回收价（{reference.get('category_name', '')}{f' {date}' if date else ''}）"))
             lines.append(" ｜ ".join(
-                f"{value['grade']} {money(value['price'])}{' ✓' if value['grade'] == reference.get('grade') else ''}"
+                f"{value['grade']} {money(value['price'])}{' ✓' if value['grade'] == selected_grade else ''}"
                 for value in grades
             ))
             if reference.get("other_price") is not None:
@@ -256,6 +266,7 @@ class NotificationService:
         # 参考价放在最后，只有这里用表格
         reference = item.get("quote_reference") or {}
         grades = reference.get("grades") or []
+        selected_grade = item["smart_assessment"].get("grade") if item.get("smart_assessment") else reference.get("grade")
         subject = NotificationService._reference_subject(item)
         tail: list[str] = []
         if grades:
@@ -263,7 +274,7 @@ class NotificationService:
             tail.append(f"**📋 {subject}各成色回收价**（{reference.get('category_name', '')}{f' {date}' if date else ''}）")
             headers = [value["grade"] for value in grades]
             values = [
-                f"**{money(value['price'])}**" if value["grade"] == reference.get("grade") else money(value["price"])
+                f"**{money(value['price'])}**" if value["grade"] == selected_grade else money(value["price"])
                 for value in grades
             ]
             if reference.get("other_price") is not None:

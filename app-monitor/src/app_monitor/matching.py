@@ -34,6 +34,8 @@ class MatchDecision:
     region: str | None = None
     # 结论分类，供运行记录筛选：matched / price_high / too_cheap / region / unrecognized / excluded / no_quote / other_model
     code: str = ""
+    quote_grade: str | None = None
+    quote_basis: str = "fixed"
 
 
 def extract_storage(title: str) -> str | None:
@@ -204,6 +206,7 @@ def evaluate(
         model=model,
         storage=storage,
         quote_entry_id=int(quote["id"]),
+        quote_grade=quote["grade"],
         quote_price=quote_price,
         threshold_price=threshold,
         expected_margin=margin,

@@ -1,4 +1,4 @@
-export function initSmart({api,escapeHtml,toast,state,gradeOrder,loadOverview,updateRuleHints,onDirty}) {
+export function initSmart({api,escapeHtml,toast,state,gradeOrder,loadOverview,loadDeals,updateRuleHints,onDirty}) {
   const root=document.querySelector('#valuation-controls');
   const input=name=>root.querySelector(`[name="valuation_${name}"]`);
   const e=value=>escapeHtml(value).replace(/"/g,'&quot;').replace(/'/g,'&#39;');
@@ -59,8 +59,8 @@ export function initSmart({api,escapeHtml,toast,state,gradeOrder,loadOverview,up
     document.querySelector('#valuation-detail').showModal();
   }
   document.querySelector('#valuation-detail-close').addEventListener('click',()=>document.querySelector('#valuation-detail').close());
-  document.querySelector('#run-detail').addEventListener('click',event=>{const button=event.target.closest('[data-assessment-id]');if(button)openRecord(Number(button.dataset.assessmentId)).catch(err=>toast(err.message,true));});
-  const action=async(path,options={})=>{const updated=await api(`/api/smart/assessments/${record.id}/${path}`,{method:'POST',...options});document.querySelector('#valuation-detail').close();await openRecord(updated.id);toast('已重新判价');};
+  for(const list of document.querySelectorAll('#run-detail, #deal-list'))list.addEventListener('click',event=>{const button=event.target.closest('[data-assessment-id]');if(button)openRecord(Number(button.dataset.assessmentId)).catch(err=>toast(err.message,true));});
+  const action=async(path,options={})=>{const updated=await api(`/api/smart/assessments/${record.id}/${path}`,{method:'POST',...options});document.querySelector('#valuation-detail').close();await Promise.all([openRecord(updated.id),loadDeals(),loadOverview()]);toast('已重新判价');};
   document.querySelector('#valuation-reanalyze').addEventListener('click',()=>action('reanalyze').catch(err=>toast(err.message,true)));
   document.querySelector('#valuation-correct-save').addEventListener('click',()=>{const facts={...record.facts,grade:document.querySelector('#valuation-correct-grade').value||null,grade_evidence:document.querySelector('#valuation-correct-evidence').value,uncertainties:document.querySelector('#valuation-correct-unknowns').value.split('\n').filter(Boolean)};action('correction',{method:'PUT',body:JSON.stringify(facts)}).catch(err=>toast(err.message,true));});
   return{loadConfig,saveConfig,isDirty};
