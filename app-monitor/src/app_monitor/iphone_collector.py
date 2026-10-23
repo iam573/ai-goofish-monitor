@@ -299,6 +299,84 @@ def active_storage_chip(source: str) -> str | None:
     return _text(node) if node is not None else None
 
 
+def model_filter_chip(source: str) -> ET.Element | None:
+    """品牌入口或已选机型只从结果页第二行标签识别，排除搜索词与商品标题。"""
+    root = ET.fromstring(source)
+    nodes = list(root.iter("XCUIElementTypeStaticText"))
+    sort = next((n for n in nodes if _text(n) == "新发" and n.get("visible") == "true"), None)
+    if sort is None:
+        return None
+    app = next(root.iter("XCUIElementTypeApplication"), root)
+    width = int(app.get("width") or 0)
+    return next((n for n in nodes if n.get("visible") == "true"
+                 and int(sort.get("y") or 0) + 20 <= int(n.get("y") or 0) <= int(sort.get("y") or 0) + 70
+                 and 0 <= int(n.get("x") or 0)
+                 and (not width or int(n.get("x") or 0) + int(n.get("width") or 0) <= width)
+                 and (_text(n) in {"品牌", "品牌机型", "品牌型号", "苹果/Apple"}
+                      or re.fullmatch(r"iPhone\s*(?:\d{1,2}|X[RS]?|SE|Air)(?:[\w\s]*)", _text(n), re.I))), None)
+
+
+def _model_picker_bounds(source: str) -> tuple[ET.Element, ET.Element] | None:
+    root = ET.fromstring(source)
+    apple = next((n for n in root.iter("XCUIElementTypeStaticText")
+                  if _text(n) == "苹果/Apple" and n.get("visible") == "true"), None)
+    confirm = next((n for n in root.iter("XCUIElementTypeButton")
+                    if _text(n) == "确定" and n.get("visible") == "true"), None)
+    return (apple, confirm) if apple is not None and confirm is not None else None
+
+
+def model_picker_option(source: str, keyword: str) -> ET.Element | None:
+    bounds = _model_picker_bounds(source)
+    if bounds is None:
+        return None
+    apple, confirm = bounds
+    root = ET.fromstring(source)
+    for cell in root.iter("XCUIElementTypeCell"):
+        if (cell.get("visible") != "true"
+                or int(cell.get("x") or 0) < int(apple.get("x") or 0) + int(apple.get("width") or 0)
+                or int(cell.get("y") or 0) < int(apple.get("y") or 0)
+                or int(cell.get("y") or 0) + int(cell.get("height") or 0) > int(confirm.get("y") or 0)):
+            continue
+        for node in cell.iter("XCUIElementTypeStaticText"):
+            if node.get("visible") == "true" and normalize_search_text(_text(node)) == normalize_search_text(keyword):
+                return node
+    return None
+
+
+def checked_models(source: str, screenshot: bytes) -> set[str]:
+    """机型黄底选中态未暴露给 AX；仅检查已定位的面板单元格，不保存截图。"""
+    bounds = _model_picker_bounds(source)
+    if bounds is None:
+        return set()
+    apple, confirm = bounds
+    root = ET.fromstring(source)
+    app = next(root.iter("XCUIElementTypeApplication"), root)
+    width, height = int(app.get("width") or 0), int(app.get("height") or 0)
+    if not width or not height:
+        return set()
+    selected = set()
+    with Image.open(io.BytesIO(screenshot)) as raw:
+        image = raw.convert("RGB")
+        sx, sy = image.width / width, image.height / height
+        for cell in root.iter("XCUIElementTypeCell"):
+            x, y, w, h = (int(cell.get(k) or 0) for k in ("x", "y", "width", "height"))
+            if (cell.get("visible") != "true" or w <= 6 or h <= 6
+                    or x < int(apple.get("x") or 0) + int(apple.get("width") or 0)
+                    or y < int(apple.get("y") or 0) or y + h > int(confirm.get("y") or 0)):
+                continue
+            labels = [_text(n) for n in cell.iter("XCUIElementTypeStaticText")
+                      if n.get("visible") == "true" and _text(n).lower().startswith("iphone")
+                      and "系列" not in _text(n)]
+            if len(labels) != 1:
+                continue
+            patch = image.crop((int((x + 3) * sx), int((y + 3) * sy),
+                                int((x + w - 3) * sx), int((y + h - 3) * sy))).resize((24, 12))
+            yellow = sum(r >= 190 and g >= 150 and b <= 110 and r >= g * .9 for r, g, b in patch.getdata())
+            if yellow / (24 * 12) >= .3:
+                selected.add(labels[0])
+    return selected
+
+
 def has_result_sort_bar(source: str) -> bool:
     """Retain page identity even when scrolling makes the sort row invisible."""
     nodes = list(ET.fromstring(source).iter("XCUIElementTypeStaticText"))
@@ -524,6 +602,18 @@ class IPhoneCollector:
                     result.passes.append({"label": "新发", "storage": None, "observed": 0,
                                           "error": error, "actions": setup_actions})
                     return result  # Never collect nationwide cards as if the city filter succeeded.
+            try:
+                emit_safely(on_items, stage=f"iPhone 筛选机型 {keyword}")
+                clicked = self._apply_model(driver, keyword)
+                setup_actions.append({"action": "机型筛选", "target": keyword,
+                                      "clicked": clicked, "success": True})
+            except Exception as exc:
+                error = _brief_error(exc)
+                setup_actions.append({"action": "机型筛选", "target": keyword,
+                                      "success": False, "error": error})
+                add_pass({"label": "新发", "storage": None, "observed": 0,
+                          "error": error, "actions": setup_actions, "model_applied": False})
+                return result
             for storage in storages:
                 storage_label = storage if storage.endswith("T") else f"{storage}G"
                 emit_safely(on_items, stage=f"iPhone 切换容量 {storage_label}", storage=storage)
@@ -601,6 +691,7 @@ class IPhoneCollector:
                 add_pass({
                     "label": "新发", "storage": storage, "filter_applied": error is None,
                     "region_applied": result.region_applied, "observed": len(pass_items),
+                    "model_applied": True,
                     "cards": len(seen), "candidates": candidates, "actions": actions,
                     "card_samples": card_samples, "cards_truncated": len(seen) > len(card_samples),
                     "items": pass_items[:25], "items_total": len(pass_items),
@@ -882,6 +973,111 @@ class IPhoneCollector:
                 break
             time.sleep(0.6)
         raise RuntimeError(f"恢复筛选栏后仍找不到存储容量入口（下滑{vertical_attempts}次，横向{horizontal_attempts}次）")
+
+    @staticmethod
+    def _tap_node(driver: Any, node: ET.Element) -> None:
+        driver.execute_script("mobile: tap", {
+            "x": int(node.get("x") or 0) + int(node.get("width") or 0) / 2,
+            "y": int(node.get("y") or 0) + int(node.get("height") or 0) / 2,
+        })
+
+    @staticmethod
+    def _scroll_model_picker(driver: Any, bounds: tuple[ET.Element, ET.Element], direction: str) -> None:
+        apple, confirm = bounds
+        x = (int(apple.get("x") or 0) + int(apple.get("width") or 0)
+             + int(confirm.get("x") or 0) + int(confirm.get("width") or 0)) / 2
+        top = int(apple.get("y") or 0) + 80
+        bottom = int(confirm.get("y") or 0) - 45
+        driver.execute_script("mobile: dragFromToForDuration", {
+            "duration": 0.35, "fromX": x, "toX": x,
+            "fromY": bottom if direction == "up" else top,
+            "toY": top if direction == "up" else bottom,
+        })
+        time.sleep(0.4)
+
+    def _apply_model(self, driver: Any, keyword: str) -> list[str]:
+        """精确核对面板选中态，并确认提交后的品牌标签已生效。"""
+        source = driver.page_source
+        clicked = []
+        if _model_picker_bounds(source) is None:
+            for _ in range(4):
+                chip = model_filter_chip(source)
+                if chip is not None:
+                    if normalize_search_text(_text(chip)) == normalize_search_text(keyword):
+                        return [f"已确认 {_text(chip)}"]
+                    self._tap_node(driver, chip)
+                    clicked.append(_text(chip))
+                    break
+                root = ET.fromstring(source)
+                sort = next((n for n in root.iter("XCUIElementTypeStaticText")
+                             if _text(n) == "新发" and n.get("visible") == "true"), None)
+                if sort is None:
+                    raise RuntimeError("结果页排序栏不可见，无法定位品牌机型入口")
+                app = next(root.iter("XCUIElementTypeApplication"), root)
+                width = int(app.get("width") or 0)
+                if width <= 0:
+                    raise RuntimeError("无法确定筛选标签栏宽度")
+                driver.execute_script("mobile: dragFromToForDuration", {
+                    "duration": 0.3, "fromX": width - 20, "toX": 20,
+                    "fromY": int(sort.get("y") or 0) + 45, "toY": int(sort.get("y") or 0) + 45,
+                })
+                source = driver.page_source
+            source = driver.page_source
+        bounds = _model_picker_bounds(source)
+        if bounds is None:
+            raise RuntimeError("品牌机型面板未出现，未继续采集")
+        self._tap_node(driver, bounds[0])
+        clicked.append("苹果/Apple")
+        # 「全部」可消除上次勾选，防止再次点击当前机型反而取消选中。
+        for _ in range(7):
+            source = driver.page_source
+            bounds = _model_picker_bounds(source)
+            if bounds is None:
+                raise RuntimeError("品牌机型面板意外关闭")
+            apple, confirm = bounds
+            all_option = next((n for n in ET.fromstring(source).iter("XCUIElementTypeButton")
+                               if _text(n) == "全部" and n.get("visible") == "true"
+                               and int(n.get("x") or 0) >= int(apple.get("x") or 0) + int(apple.get("width") or 0)
+                               and int(apple.get("y") or 0) <= int(n.get("y") or 0) < int(confirm.get("y") or 0)), None)
+            if all_option is not None:
+                self._tap_node(driver, all_option)
+                clicked.append("全部")
+                break
+            self._scroll_model_picker(driver, bounds, "down")
+        else:
+            raise RuntimeError("无法清空品牌面板中的旧机型")
+        for _ in range(7):
+            source = driver.page_source
+            option = model_picker_option(source, keyword)
+            if option is not None:
+                self._tap_node(driver, option)
+                clicked.append(_text(option))
+                break
+            bounds = _model_picker_bounds(source)
+            if bounds is None:
+                raise RuntimeError("机型选项面板意外关闭")
+            self._scroll_model_picker(driver, bounds, "up")
+        else:
+            raise RuntimeError(f"苹果品牌下未找到精确机型「{keyword}」，未继续采集")
+        source = driver.page_source
+        bounds = _model_picker_bounds(source)
+        if bounds is None:
+            raise RuntimeError("选择机型后未找到确认面板")
+        selected = checked_models(source, driver.get_screenshot_as_png())
+        if {normalize_search_text(name) for name in selected} != {normalize_search_text(keyword)}:
+            raise RuntimeError(f"机型勾选校验失败：期望 {keyword}，实际 {sorted(selected)}")
+        clicked.append(f"已校验 {keyword}")
+        self._tap_node(driver, bounds[1])
+        clicked.append("确定")
+        for _ in range(6):
+            source = driver.page_source
+            chip = model_filter_chip(source)
+            if (chip is not None and _model_picker_bounds(source) is None
+                    and (_text(chip) == "苹果/Apple"
+                         or normalize_search_text(_text(chip)) == normalize_search_text(keyword))):
+                return clicked
+            time.sleep(0.4)
+        raise RuntimeError(f"提交后未确认精确机型「{keyword}」，未继续采集")
 
     def _apply_storage(self, driver: Any, storage: str) -> list[str]:
         from appium.webdriver.common.appiumby import AppiumBy

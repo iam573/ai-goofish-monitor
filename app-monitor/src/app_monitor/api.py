@@ -61,13 +61,13 @@ async def backfill_deductions() -> None:
 
 
 async def refresh_quotes_if_stale() -> None:
-    """从配置时间起持续检查至当天结束，不因已取得报价而跳过日内修订。"""
+    """每天同步一次；启动时仅补同步当天尚未成功的分类。"""
     if quote_time_reached():
         await quote_service.sync_if_stale()
 
 
 def quote_refresh_trigger() -> CronTrigger:
-    return CronTrigger(hour=f"{settings.quote_hour}-23", minute="*/30", timezone=settings.timezone)
+    return CronTrigger(hour=settings.quote_hour, minute=settings.quote_minute, timezone=settings.timezone)
 
 
 @asynccontextmanager
@@ -495,6 +495,37 @@ def _with_live(run: dict[str, Any]) -> dict[str, Any]:
     if live and live.get("run_id") == run.get("id") and run.get("ok") is None:
         run["live"] = {key: live[key] for key in ("stage", "observed", "matched")}
     return run
+
+
+@app.get("/api/run-groups")
+async def run_groups(
+    status: str | None = Query(default=None, pattern="^(hit|failed|warn)$"),
+) -> list[dict[str, Any]]:
+    """按机型汇总记录；命中按累计筛选，失败与警告按最近一轮筛选。"""
+    with database.connect() as connection:
+        rows = connection.execute(f"""
+            WITH runs AS ({_RUN_COUNTS}), grouped AS (
+            SELECT model, MAX(id) AS latest_id,
+                COUNT(*) AS run_count, SUM(MAX(item_count, observed)) AS item_count,
+                SUM(hit_count) AS hit_count, SUM(new_count) AS new_count,
+                SUM(ok IS NULL) AS running_count, SUM(ok=0) AS failed_count,
+                SUM(ok=1 AND error IS NOT NULL) AS warn_count
+            FROM runs GROUP BY model
+            )
+            SELECT grouped.*, latest.started_at,
+                CASE WHEN latest.ok IS NULL THEN 'running'
+                     WHEN latest.ok=0 THEN 'failed'
+                     WHEN latest.error IS NOT NULL THEN 'warn'
+                     ELSE 'completed' END AS latest_status
+            FROM grouped JOIN search_runs latest ON latest.id=grouped.latest_id
+            ORDER BY grouped.latest_id DESC
+        """).fetchall()
+    groups = rows_as_dicts(rows)
+    if status == "hit":
+        return [group for group in groups if group["hit_count"]]
+    if status in {"failed", "warn"}:
+        return [group for group in groups if group["latest_status"] == status]
+    return groups
 
 
 @app.get("/api/runs/{run_id}")

@@ -226,6 +226,7 @@ def test_collection_skips_region_picker_only_after_search_confirmation(monkeypat
     monkeypatch.setattr(collector, "_search", lambda *args: inherited)
     region_calls = []
     monkeypatch.setattr(collector, "_apply_region", lambda *args: region_calls.append(args) or ["区域", "厦门", "查看"])
+    monkeypatch.setattr(collector, "_apply_model", lambda *args: ["iPhone 17", "确定"])
     monkeypatch.setattr(collector, "_apply_storage", lambda *args: ["256GB", "确定"])
     monkeypatch.setattr(collector, "_sort_new", lambda *args: None)
     result = collector._collect("test", "", "iPhone 17", "厦门", ["区域", "厦门", "查看"],
@@ -522,6 +523,7 @@ def test_candidate_rejection_continues_scrolling_when_returned_sort_bar_is_hidde
     ])
     collector = IPhoneCollector(Settings(ios_wda_bundle_id="test.wda"))
     monkeypatch.setattr(collector, "_search", lambda *args: True)
+    monkeypatch.setattr(collector, "_apply_model", lambda *args: ["iPhone 17", "确定"])
     monkeypatch.setattr(collector, "_apply_storage", lambda *args: ["512GB", "确定"])
     monkeypatch.setattr(collector, "_sort_new", lambda *args: None)
 

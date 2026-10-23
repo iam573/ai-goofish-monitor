@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="color-scheme" content="light dark" />
-    <title>闲鱼捡漏监控</title>
+    <title>Goofish</title>
     <link rel="stylesheet" href="/assets/styles.css" />
   </head>
   <body>
@@ -14,8 +14,8 @@
         <div class="brand">
           <span class="brand-mark" aria-hidden="true">鱼</span>
           <div>
-            <strong>闲鱼捡漏监控</strong>
-            <span>Goofish App Monitor</span>
+            <strong>Goofish</strong>
+            <span>App Monitor</span>
           </div>
         </div>
 
@@ -318,7 +318,7 @@
           <header class="page-head">
             <div>
               <h1>运行记录</h1>
-              <p>每次搜索看到了哪些商品、哪件命中、其余为什么没推送。</p>
+              <p>先选机型，再查看每轮搜索；按容量和判定结果快速找到商品。</p>
             </div>
             <div class="page-actions">
               <button class="secondary compact" data-refresh="runs">刷新</button>
@@ -326,9 +326,12 @@
           </header>
           <div class="runs-layout">
             <aside class="card run-list-card">
-              <div id="run-filter" class="segmented run-filter" role="group" aria-label="筛选搜索记录">
-                <button type="button" data-status="" class="active">全部</button><button type="button" data-status="hit">有命中</button><button type="button" data-status="warn">有警告</button><button type="button" data-status="failed">失败</button>
+              <div class="run-list-heading"><h2>机型</h2><span id="run-model-count">全部运行记录</span></div>
+              <label class="run-model-search" for="run-model-search"><span class="sr-only">搜索运行记录中的机型</span><input id="run-model-search" type="search" placeholder="搜索机型，如 16 Pro" autocomplete="off" /></label>
+              <div id="run-filter" class="segmented run-filter" role="group" aria-label="按累计命中或最近一轮状态筛选机型">
+                <button type="button" data-status="" class="active">全部</button><button type="button" data-status="hit">有命中</button><button type="button" data-status="warn">最近警告</button><button type="button" data-status="failed">最近失败</button>
               </div>
+              <p class="run-list-hint">命中为累计，警告与失败为最近一轮</p>
               <div id="run-list" class="run-list"></div>
             </aside>
             <section id="run-detail" class="card run-detail" aria-live="polite"></section>

@@ -7,6 +7,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterator
 
+from .model_names import normalize_model, strip_hardware_code
 
 SCHEMA = """
 PRAGMA journal_mode=WAL;
@@ -205,6 +206,7 @@ class Database:
                   AND item_url <> 'https://www.goofish.com/item?id=' || item_id
                 """
             )
+            _remove_hardware_codes(connection)
 
     @contextmanager
     def connect(self) -> Iterator[sqlite3.Connection]:
@@ -234,6 +236,52 @@ class Database:
                 """,
                 (key, json.dumps(value, ensure_ascii=False), now),
             )
+
+
+def _remove_hardware_codes(connection: sqlite3.Connection) -> None:
+    """修复已入库的 OCR 型号代码；保留报价手动修正和命中的报价引用。"""
+    for row in connection.execute("SELECT * FROM quote_entries").fetchall():
+        if strip_hardware_code(row["model"]) == row["model"]:
+            continue
+        model = normalize_model(row["model"])
+        target = connection.execute(
+            "SELECT * FROM quote_entries WHERE batch_id=? AND model=? AND storage=? AND grade=?",
+            (row["batch_id"], model, row["storage"], row["grade"]),
+        ).fetchone()
+        if target:
+            if row["source"] == "manual" and target["source"] != "manual":
+                connection.execute(
+                    "UPDATE quote_entries SET price=?,source=?,enabled=?,updated_at=? WHERE id=?",
+                    (row["price"], row["source"], row["enabled"], row["updated_at"], target["id"]),
+                )
+            connection.execute("UPDATE deals SET quote_entry_id=? WHERE quote_entry_id=?", (target["id"], row["id"]))
+            connection.execute("DELETE FROM quote_entries WHERE id=?", (row["id"],))
+        else:
+            connection.execute("UPDATE quote_entries SET model=? WHERE id=?", (model, row["id"]))
+    for table in ("quote_deductions", "search_runs", "run_items", "observed_items", "deals"):
+        names = connection.execute(f"SELECT DISTINCT model FROM {table} WHERE model IS NOT NULL").fetchall()
+        for row in names:
+            old = row["model"]
+            if strip_hardware_code(old) == old:
+                continue
+            model = normalize_model(old)
+            connection.execute(f"UPDATE {table} SET model=? WHERE model=?", (model, old))
+            if table in ("search_runs", "observed_items"):
+                connection.execute(
+                    f"UPDATE {table} SET keyword=? WHERE model=? AND keyword=?",
+                    (f"iPhone {model}", model, f"iPhone {old}"),
+                )
+    row = connection.execute("SELECT value FROM app_state WHERE key='rules'").fetchone()
+    if row:
+        rules = json.loads(row["value"])
+        disabled = rules.get("disabled_models", [])
+        cleaned = []
+        for key in disabled:
+            model, sep, storage = key.partition("|")
+            cleaned.append((normalize_model(model) if strip_hardware_code(model) != model else model) + sep + storage)
+        if cleaned != disabled:
+            rules["disabled_models"] = sorted(set(cleaned))
+            connection.execute("UPDATE app_state SET value=? WHERE key='rules'", (json.dumps(rules, ensure_ascii=False),))
 
 
 def _add_columns(connection: sqlite3.Connection, table: str, columns: dict[str, str]) -> None:

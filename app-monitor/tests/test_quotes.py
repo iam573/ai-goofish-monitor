@@ -1,3 +1,5 @@
+import pytest
+
 from app_monitor.quotes import OCRToken, QuoteImageParser, normalize_model, normalize_storage
 
 
@@ -6,6 +8,33 @@ def test_normalizers_handle_common_ocr_variants():
     assert normalize_storage("IT") == "1T"
     assert normalize_model("15PRO MAX") == "15 Pro Max"
     assert normalize_model("17 AIR") == "17 Air"
+
+
+@pytest.mark.parametrize("name,expected", [
+    ("iPhone 15 Plus A3096", "15 Plus"),
+    ("15 PLUS（A3096）", "15 Plus"),
+    ("15 PlusA3096", "15 Plus"),
+    ("15 Plus| A3096", "15 Plus"),
+    ("15 Plus|", "15 Plus"),
+    ("16 PRO MAX (a3296)", "16 Pro Max"),
+    ("17 AIR", "17 Air"),
+    ("16e", "16e"),
+    ("XR", "XR"),
+])
+def test_normalize_model_strips_hardware_code(name, expected):
+    assert normalize_model(name) == expected
+
+
+def test_parser_does_not_include_hardware_code_in_quote_or_deduction_model():
+    parser = QuoteImageParser()
+    tokens = [
+        OCRToken("15 Plus A3096", 0.03, 100),
+        OCRToken("128", 0.24, 100),
+        OCRToken("3000", 0.32, 100),
+        OCRToken("港澳版-200", 0.75, 100),
+    ]
+    assert {entry.model for entry in parser.parse_tokens(tokens)} == {"15 Plus"}
+    assert {entry.model for entry in parser.parse_deductions(tokens)} == {"15 Plus"}
 
 
 def test_quote_parser_maps_capacity_and_grade_columns_to_nearest_model():

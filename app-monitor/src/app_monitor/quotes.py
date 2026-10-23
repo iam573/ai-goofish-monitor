@@ -16,6 +16,7 @@ from PIL import Image
 
 from .config import ROOT, Settings
 from .db import Database, utc_now
+from .model_names import normalize_model
 from .swift_runtime import run_swift
 
 logger = logging.getLogger(__name__)
@@ -153,21 +154,6 @@ def normalize_storage(value: str) -> str | None:
     return match.group(1) if match else None
 
 
-def normalize_model(value: str) -> str:
-    text = value.upper().strip()
-    text = re.sub(r"\bIPHONE\b|苹果", "", text)
-    text = text.replace("Ｐ", "P").replace("Ｍ", "M")
-    text = re.sub(r"(?<=\d)(?=PRO\b)", " ", text)
-    text = re.sub(r"\s+", " ", text).strip()
-    text = re.sub(r"\bPRO\s*MAX\b", "Pro Max", text, flags=re.I)
-    text = re.sub(r"\bPRO\b", "Pro", text, flags=re.I)
-    text = re.sub(r"\bPLUS\b", "Plus", text, flags=re.I)
-    text = re.sub(r"\bMINI\b", "Mini", text, flags=re.I)
-    text = re.sub(r"\bAIR\b", "Air", text, flags=re.I)
-    text = re.sub(r"\bMAX\b", "Max", text, flags=re.I)
-    if re.fullmatch(r"\d{1,2}[Ee]", text):
-        return text[:-1] + "e"
-    return text
 
 
 class QuoteImageParser:
@@ -457,11 +443,14 @@ class QuoteService:
         if existing:
             # A moved installation may still contain the previous machine's absolute path.
             with self.database.connect() as connection:
-                connection.execute("UPDATE quote_batches SET image_path=?, image_url=? WHERE id=?",
-                                   (str(image_path), image_url, existing["id"]))
+                connection.execute(
+                    "UPDATE quote_batches SET image_path=?, image_url=?, quote_date=?, fetched_at=? WHERE id=?",
+                    (str(image_path), image_url, quote_date, fetched_at, existing["id"]),
+                )
             count = self._entry_count(existing["id"])
             if existing["parse_status"] == "parsed" and count > 0:
-                batch = {**dict(existing), "image_path": str(image_path), "image_url": image_url}
+                batch = {**dict(existing), "image_path": str(image_path), "image_url": image_url,
+                         "quote_date": quote_date, "fetched_at": fetched_at}
                 logger.info("报价图片未变化且已有有效报价 category=%s batch_id=%s entries=%s", category_id, existing["id"], count)
                 return {"updated": False, "batch": batch, "batch_id": existing["id"],
                         "category_name": existing["category_name"], "entry_count": count, "parse_status": "parsed"}
@@ -586,22 +575,27 @@ class QuoteService:
             except Exception:
                 continue
 
-    async def sync_all(self) -> list[dict[str, Any]]:
+    async def sync_all(self, *, only_stale: bool = False, today: str | None = None) -> list[dict[str, Any]]:
         """同步苹果无保与有保两份报价。"""
         results = []
-        for index, (category_id, category_name) in enumerate(APPLE_PHONE_CATEGORIES.items()):
-            if index:
+        today = today or utc_now()[:10]
+        for category_id, category_name in APPLE_PHONE_CATEGORIES.items():
+            batch = latest_downloaded_batch(self.database, category_id)
+            if only_stale and batch and is_fresh(batch, today):
+                continue
+            if results:
                 await asyncio.sleep(3)
             try:
                 results.append({"category_id": category_id, **await self.sync(category_id, category_name)})
             except Exception as exc:
                 results.append({"category_id": category_id, "error": str(exc)})
-        self.database.state_set("quote_last_check", {"at": utc_now(), "results": results})
+        if results:
+            self.database.state_set("quote_last_check", {"at": utc_now(), "results": results})
         return results
 
     async def sync_if_stale(self, today: str | None = None) -> list[dict[str, Any]]:
-        """兼容旧入口；即使今日已有报价也重新检查，避免漏掉日内换图。"""
-        return await self.sync_all()
+        """仅同步当天尚未成功解析的分类，已同步的分类不再请求接口。"""
+        return await self.sync_all(only_stale=True, today=today)
 
     def _entry_count(self, batch_id: int) -> int:
         with self.database.connect() as connection:

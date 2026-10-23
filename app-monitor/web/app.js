@@ -1,4 +1,5 @@
 import { initSmart } from "./smart-ui.js";
+import { capacityOptions, filterRunItems, normalizeCapacity } from "./run-filters.js";
 const state = { products: [], rules: null, overview: null, targets: [], devices: [] };
 const gradeOrder = ["靓机", "小花", "大花", "外爆", "内爆可测"];
 
@@ -71,6 +72,10 @@ function todayIso() {
 
 /* ------------------------------------------------------------------ 流程状态 */
 
+function quoteSyncDate(batch) {
+  return (batch?.fetched_at || batch?.quote_date || "").slice(0, 10);
+}
+
 async function loadOverview() {
   const value = await api("/api/overview");
   state.overview = value;
@@ -85,11 +90,11 @@ async function loadOverview() {
   const quoteFresh = Boolean(noWarranty?.fresh);
   const quoteStep = {
     label: "① 每日报价",
-    main: noWarranty?.quote_date ? `${noWarranty.quote_date.slice(5)} · ${noWarranty.entry_count} 条` : "尚未同步",
+    main: quoteSyncDate(noWarranty) ? `${quoteSyncDate(noWarranty).slice(5)} · ${noWarranty.entry_count} 条` : "尚未同步",
     sub: noWarranty?.parse_status === "failed" ? "图片已下载，报价识别失败，请查看每日报价"
       : noWarranty?.parse_status === "parsing" ? "图片已下载，正在识别报价"
       : noWarranty?.parse_status === "needs_review" ? "图片已下载，尚未识别到有效报价"
-      : quoteFresh ? `今天已同步 · ${value.quote_schedule} 起每30分钟持续检查` : `沿用最近报价 · ${value.quote_schedule} 起每30分钟持续检查`,
+      : quoteFresh ? `今天已同步 · 每天 ${value.quote_schedule} 同步一次` : `沿用最近报价 · 每天 ${value.quote_schedule} 同步一次`,
     tone: quoteFresh ? "ok" : "warn",
   };
   const ruleStep = {
@@ -576,7 +581,8 @@ function passDetail(run) {
 }
 
 const runView = {
-  status: "", selected: null, code: "",
+  status: "", search: "", model: null, groups: [], runs: [], selected: null, storage: "", result: "", code: "",
+  loadVersion: 0, detailVersion: 0,
   follow: true,          // 选中的是最新一条时，新搜索开始后自动切过去
   running: false,        // 列表里有正在进行的搜索
   topId: null, listSignature: "", detailSignature: "",
@@ -615,36 +621,57 @@ function duration(run) {
   return seconds >= 60 ? `${Math.floor(seconds / 60)} 分 ${seconds % 60} 秒` : `${seconds} 秒`;
 }
 
+function renderRunList() {
+  const search = runView.search.trim().toLowerCase();
+  const groups = runView.groups.filter(group => `iphone ${group.model}`.toLowerCase().includes(search));
+  document.querySelector("#run-model-count").textContent = `${groups.length} 个机型`;
+  document.querySelector("#run-list").innerHTML = groups.length ? groups.map(group => {
+    const recent = {
+      running: { tone: "running", pill: "live", label: "正在搜索" },
+      completed: { tone: "ok", pill: "", label: "最近完成" },
+      failed: { tone: "fail", pill: "bad", label: "最近失败" },
+      warn: { tone: "warn", pill: "warn", label: "最近有警告" },
+    }[group.latest_status];
+    const tone = recent?.tone || "ok";
+    return `<button type="button" class="run-row ${tone} ${group.model === runView.model ? "active" : ""}" data-model="${escapeHtml(group.model)}" aria-pressed="${group.model === runView.model}">
+      <span class="run-row-top"><b>iPhone ${escapeHtml(group.model)}</b><span class="run-row-arrow" aria-hidden="true">›</span></span>
+      <span class="run-row-meta"><span>累计 ${group.run_count} 次搜索</span><span class="run-time" title="最近一轮开始时间">${shortTime(group.started_at)}</span></span>
+      <span class="run-row-meta">
+        <span class="run-total-hits ${group.hit_count ? "has-hits" : ""}">累计命中 ${group.hit_count || 0}</span>
+        ${recent ? `<span class="pill ${recent.pill}">${tone === "running" ? "<i></i>" : ""}${recent.label}</span>` : ""}
+      </span>
+    </button>`;
+  }).join("") : `<div class="empty">${search ? "没有找到该机型，试试其他名称。" : runView.status ? "没有符合条件的机型。" : "还没有搜索记录。"}</div>`;
+}
+
 /** quiet=true 用于自动刷新：内容没变就不重绘，避免闪烁。 */
 async function loadRuns({ quiet = false } = {}) {
-  const query = runView.status ? `&status=${runView.status}` : "";
-  const runs = await api(`/api/runs?limit=120${query}`);
+  const version = ++runView.loadVersion;
+  const query = runView.status ? `?status=${runView.status}` : "";
+  const groups = await api(`/api/run-groups${query}`);
+  if (version !== runView.loadVersion) return;
+  runView.groups = groups;
+  if (!groups.some(group => group.model === runView.model)) {
+    runView.model = groups[0]?.model ?? null;
+    runView.selected = null;
+    runView.storage = runView.result = runView.code = "";
+    runView.follow = true;
+  }
+  runView.running = groups.some(group => group.running_count);
+  const model = runView.model;
+  const runs = model == null ? [] : await api(`/api/runs?limit=1000&model=${encodeURIComponent(model)}`);
+  if (version !== runView.loadVersion || model !== runView.model) return;
+  runView.runs = runs;
   const top = runs[0]?.id ?? null;
-  if (runView.follow && top != null) runView.selected = top;
-  if (!runs.some(run => run.id === runView.selected)) runView.selected = top;
+  if (runView.follow || !runs.some(run => run.id === runView.selected)) runView.selected = top;
   runView.topId = top;
-  runView.running = runs.some(run => run.ok == null);
-  const signature = JSON.stringify([runView.selected, runs.map(run =>
-    [run.id, run.ok, run.item_count, run.hit_count, run.live?.stage, (run.passes || []).length, run.error])]);
+  const signature = JSON.stringify([runView.model, groups]);
   if (!quiet || signature !== runView.listSignature) {
     runView.listSignature = signature;
-    document.querySelector("#run-list").innerHTML = runs.length ? runs.map(run => {
-      const tone = runTone(run);
-      const count = run.item_count || run.observed;
-      const passes = tone === "running"
-        ? (run.live?.stage || "搜索中…")
-        : (run.passes || []).map(p => `${passName(p)} ${p.error ? "✕" : (p.cards ?? p.observed)}`).join(" · ");
-      const status = tone === "fail" ? `<span class="pill bad">失败</span>`
-        : tone === "running" ? `<span class="pill live"><i></i>搜索中 · ${count || 0} 件</span>${run.hit_count ? `<span class="pill hit">命中 ${run.hit_count}</span>` : ""}`
-        : `<span class="pill">${count} 件</span>${run.hit_count ? `<span class="pill hit">命中 ${run.hit_count}</span>` : ""}${tone === "warn" ? `<span class="pill warn">警告</span>` : ""}`;
-      return `<button type="button" class="run-row ${tone} ${run.id === runView.selected ? "active" : ""}" data-id="${run.id}">
-        <span class="run-row-top"><b>${escapeHtml(unitName(run))}</b><span class="run-time">${shortTime(run.started_at)}</span></span>
-        <span class="run-row-meta">${status}<span class="run-passes">${escapeHtml(passes)}</span>${run.trigger !== "schedule" ? `<span class="run-trigger">${triggerLabels[run.trigger] ?? run.trigger}</span>` : ""}</span>
-      </button>`;
-    }).join("") : `<div class="empty">${runView.status ? "没有符合条件的记录。" : "还没有搜索记录。"}</div>`;
+    renderRunList();
   }
   if (runView.selected) await loadRunDetail(runView.selected, { quiet });
-  else document.querySelector("#run-detail").innerHTML = `<div class="empty">选择左侧的一条记录查看详情。</div>`;
+  else document.querySelector("#run-detail").innerHTML = `<div class="empty">选择左侧的机型查看运行记录。</div>`;
 }
 
 function stepChip(ok, label, detail) {
@@ -656,8 +683,10 @@ function runItem(item, fresh = false) {
   const code = item.code || "other";
   const above = item.code === "price_high" && item.threshold_price != null ? item.price - item.threshold_price : null;
   const badge = item.matched
-    ? `<span class="item-badge hit">命中 · ${quoteDifferenceLabel(item.quote_price, item.price)}</span>${item.new_deal ? `<span class="item-badge">本次推送</span>` : `<span class="item-badge muted">${item.assessment_notification === "shadow" ? "仅记录" : "已处理"}</span>`}`
+    ? `<span class="item-badge hit">命中 · ${quoteDifferenceLabel(item.quote_price, item.price)}</span>${item.new_deal ? `<span class="item-badge">新命中</span>` : ""}`
     : `<span class="item-badge ${code}">${codeLabels[code] || code}</span>`;
+  const notificationLabels = { sent: "已推送", failed: "推送失败", shadow: "仅记录", duplicate: "已处理", sending: "推送中" };
+  const notification = notificationLabels[item.assessment_notification];
   const quote = item.quote_price != null
     ? `回收报价 ¥${item.quote_price} · 推送上限 ¥${Math.round(item.threshold_price)}${above != null ? ` · <b class="bad">高出上限 ¥${Math.round(above)}</b>` : ""}`
     : "";
@@ -668,9 +697,10 @@ function runItem(item, fresh = false) {
         : `<span class="run-item-title" title="列表卡片，没有取商品链接">${escapeHtml(item.title)}</span>`}
       <div class="run-item-meta">
         ${badge}
-        ${item.model ? `<span>${escapeHtml(item.model)} ${escapeHtml(displayStorage(item.storage))}</span>` : ""}
+        ${notification ? `<span class="item-badge ${item.assessment_notification === "failed" ? "notification-failed" : "muted"}">${notification}</span>` : ""}
+        ${item.model ? `<span>${escapeHtml(item.model)}${item.storage ? ` ${escapeHtml(displayStorage(item.storage))}` : ""}</span>` : ""}
         ${item.display_region ? `<span>${escapeHtml(item.display_region)}</span>` : ""}
-        ${item.pass_label ? `<span class="pass-tag">${escapeHtml(item.pass_label)}</span>` : ""}
+        ${item.pass_label && normalizeCapacity(item.pass_label) !== normalizeCapacity(item.storage) ? `<span class="pass-tag">采集 ${escapeHtml(item.pass_label)}</span>` : ""}
       </div>
       ${item.assessment_id ? `<button type="button" class="compact secondary" data-assessment-id="${item.assessment_id}">成色与扣费依据</button>` : ""}
       <div class="run-item-reason">${item.matched || item.code === "price_high" ? quote : `${escapeHtml(item.decision || "")}${quote ? ` · ${quote}` : ""}`}</div>
@@ -680,68 +710,100 @@ function runItem(item, fresh = false) {
 }
 
 async function loadRunDetail(id, { quiet = false } = {}) {
+  const version = ++runView.detailVersion;
   const run = await api(`/api/runs/${id}`);
+  if (version !== runView.detailVersion || id !== runView.selected || run.model !== runView.model) return;
+  // 自动刷新不打断正在浏览历史或选择原因的操作。
+  if (quiet && (document.activeElement?.matches("#run-detail select") || document.querySelector(".run-history-menu[open]"))) return;
+  const group = runView.groups.find(item => item.model === run.model);
+  const signature = JSON.stringify([run, group, runView.storage, runView.result, runView.code,
+    runView.follow, runView.runs.map(item => [item.id, item.ok, item.hit_count])]);
   const tone = runTone(run);
-  const signature = JSON.stringify([run.id, run.ok, run.items.length, run.hit_count, run.new_count,
-    run.live?.stage, (run.passes || []).length, run.error, runView.code]);
   if (quiet && signature === runView.detailSignature) {
     const elapsed = document.querySelector("#run-elapsed");
-    if (elapsed && tone === "running") elapsed.textContent = duration(run);
+    if (elapsed && tone === "running") elapsed.textContent = duration(run).replace(/\s/g, "");
     return;
   }
   runView.detailSignature = signature;
-  // 新出现的商品高亮；正在搜索时命中了就弹提示
   const seen = runView.seen.get(run.id);
   const fresh = new Set(seen ? run.items.filter(item => !seen.has(item.item_id)).map(item => item.item_id) : []);
   runView.seen.set(run.id, new Set(run.items.map(item => item.item_id)));
   const newHit = run.items.find(item => item.matched && fresh.has(item.item_id));
-  if (newHit) toast(`命中 iPhone ${newHit.model} ${displayStorage(newHit.storage)} ¥${newHit.price}${newHit.new_deal ? " · 新命中，已触发推送" : ""}`);
-  const logOpen = document.querySelector("#run-detail .run-log")?.open;
+  if (newHit) toast(`命中 iPhone ${newHit.model} ${displayStorage(newHit.storage)} ¥${newHit.price}${newHit.new_deal ? " · 新命中" : ""}`);
+  const logOpen = document.querySelector("#run-detail .run-log")?.open || false;
+  const issueOpen = document.querySelector("#run-detail .run-issue")?.open || false;
+  const { items, counts, reasons, capacities } = filterRunItems(run, runView);
+  const storages = capacityOptions(runView.runs, run);
+  if (runView.storage && runView.storage !== "unknown" && !storages.includes(runView.storage)) storages.push(runView.storage);
+  const scope = runView.storage === "unknown" ? "容量未识别" : runView.storage ? displayStorage(runView.storage) : "全部容量";
+  const hasFilter = runView.storage || runView.result || runView.code;
+  const storageChip = (value, label, count) => `<button type="button" class="chip ${runView.storage === value ? "active" : ""}" data-run-storage="${value}" aria-pressed="${runView.storage === value}">${label}<small>${count}</small></button>`;
+  const storageFilters = [storageChip("", "全部容量", run.items.length),
+    ...storages.map(storage => storageChip(storage, displayStorage(storage), capacities[storage] || 0)),
+    ...(capacities.unknown || runView.storage === "unknown" ? [storageChip("unknown", "未识别容量", capacities.unknown || 0)] : [])].join("");
+  const resultFilters = [["", "全部", counts.all], ["matched", "命中", counts.matched],
+    ["pending", "待确认", counts.pending], ["rejected", "未命中", counts.rejected]].map(([value, label, count]) =>
+    `<button type="button" class="run-result-stat ${value || "all"} ${runView.result === value ? "active" : ""}" data-run-result="${value}" aria-pressed="${runView.result === value}"><span>${label}</span><strong>${count}</strong></button>`).join("");
+  const reasonCodes = [...codeOrder.filter(code => reasons[code]), ...Object.keys(reasons).filter(code => !codeOrder.includes(code))];
+  if (runView.code && !reasonCodes.includes(runView.code)) reasonCodes.push(runView.code);
+  const reasonFilter = runView.result === "rejected" ? `<label class="run-reason-filter" for="run-reason-select">未命中原因<select id="run-reason-select"><option value="">全部原因（${counts.rejected}）</option>${reasonCodes.map(code => `<option value="${escapeHtml(code)}" ${code === runView.code ? "selected" : ""}>${escapeHtml(codeLabels[code] || code)}（${reasons[code] || 0}）</option>`).join("")}</select></label>` : "";
   const steps = [];
   if (tone === "running" && run.region) steps.push(stepChip(null, `区域 ${run.region}`, "搜索结束后显示是否已在 App 内切换"));
   else if (run.ok !== 0 && run.region) steps.push(stepChip(Boolean(run.region_applied), `区域 ${run.region}`, run.region_applied ? "已在 App 内切换" : "未切换，只核对卡片地区"));
   if (run.ok !== 0 && run.storage) steps.push(stepChip(Boolean(run.filter_applied), `容量 ${displayStorage(run.storage)}`, run.filter_applied ? "已在 App 内筛选" : "未筛选，按标题识别容量"));
-  for (const p of run.passes || []) {
-    const detail = p.error || (p.candidates != null ? `列表卡片 ${p.cards}，符合条件的候选 ${p.candidates}，取到链接 ${p.observed}`
-      : p.cards != null ? `页面卡片 ${p.cards}，曝光记录 ${p.exposures}，关联 ${p.observed}` : "");
-    steps.push(stepChip(p.error ? false : true, `${passName(p)} ${p.error ? "失败" : `${p.cards ?? p.observed} 件`}`, detail));
+  for (const pass of run.passes || []) {
+    const detail = pass.error || (pass.candidates != null ? `列表卡片 ${pass.cards}，符合条件的候选 ${pass.candidates}，取到链接 ${pass.observed}` : "");
+    steps.push(stepChip(!pass.error, `${passName(pass)} ${pass.error ? "失败" : `${pass.cards ?? pass.observed ?? 0} 件`}`, detail));
   }
-  const codes = run.codes || {};
-  const total = run.items.length;
-  if (runView.code && !codes[runView.code]) runView.code = "";
-  const filters = total ? [`<button type="button" class="chip ${runView.code ? "" : "active"}" data-code="">全部<small>${total}</small></button>`,
-    ...codeOrder.filter(code => codes[code]).map(code =>
-      `<button type="button" class="chip ${code === "matched" ? "chip-hit" : ""} ${runView.code === code ? "active" : ""}" data-code="${code}">${codeLabels[code]}<small>${codes[code]}</small></button>`)].join("") : "";
-  const items = run.items.filter(item => !runView.code || (item.code || "other") === runView.code);
   const logText = passDetail(run);
+  const statusLabel = tone === "running" ? "搜索中" : tone === "fail" ? "搜索失败" : tone === "warn" ? "完成 · 有警告" : "已完成";
   let body;
-  if (total) body = items.map(item => runItem(item, fresh.has(item.item_id))).join("");
+  if (items.length) body = items.map(item => runItem(item, fresh.has(item.item_id))).join("");
+  else if (run.items.length) body = `<div class="empty run-filter-empty"><b>没有符合筛选条件的商品</b><span>当前查看${scope}${runView.result ? ` · ${runView.result === "matched" ? "命中" : runView.result === "pending" ? "待确认" : "未命中"}` : ""}，可以切换容量或清除筛选。</span><button type="button" class="secondary compact" data-run-clear>清除筛选</button></div>`;
   else if (tone === "running") body = `<div class="empty live-empty"><span class="live-dot"></span>正在搜索，读到的商品会实时出现在这里…</div>`;
-  else if (run.ok === 0) body = `<div class="empty bad">这次搜索失败了，没有读到商品。</div>`;
-  else if (run.observed) body = `<div class="empty">这条记录早于逐件明细功能，只知道看到了 ${run.observed} 件。</div>`;
-  else body = `<div class="empty">这次没有关联到商品链接。<br /><span class="hint">下方日志会显示筛选操作、列表卡片和候选数。</span></div>`;
-
-  const phoneRun = (run.passes || []).some(p => String(p.device || "").startsWith("ios:"));
-  const cardCount = (run.passes || []).reduce((sum, p) => sum + (Number(p.cards) || 0), 0);
-
+  else if (run.ok === 0) body = `<div class="empty">本次搜索未取得商品，展开失败原因查看详情。</div>`;
+  else if (run.observed) body = `<div class="empty">此历史记录未保存逐件明细，当时共看到 ${run.observed} 件。</div>`;
+  else body = `<div class="empty">本次搜索暂无商品记录，可展开操作日志检查采集情况。</div>`;
+  const dateLabel = value => new Date(value).toLocaleString("zh-CN", {
+    ...(new Date(value).getFullYear() !== new Date().getFullYear() ? { year: "numeric" } : {}),
+    month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false,
+  });
+  const statusName = item => item.ok == null ? "搜索中" : item.ok === 0 ? "失败" : item.error ? "有警告" : "已完成";
   document.querySelector("#run-detail").innerHTML = `
-    <div class="detail-head ${tone}">
-      <div>
-        <h2>iPhone ${escapeHtml(unitName(run))}</h2>
-        <p class="hint">${formatTime(run.started_at)}${duration(run) ? ` · ${tone === "running" ? "已用时" : "用时"} <span id="run-elapsed">${duration(run)}</span>` : ""} · ${triggerLabels[run.trigger] ?? run.trigger}搜索 · 关键词「${escapeHtml(run.keyword)}」</p>
-        ${tone === "running" ? `<p class="live-line"><span class="live-dot"></span><b>实时</b>${escapeHtml(run.live?.stage || "搜索中…")}<span class="hint">· 读到一件判一件，命中立即推送</span></p>` : ""}
+    <header class="run-model-head">
+      <div class="run-model-name"><h2>iPhone ${escapeHtml(run.model)}</h2><span class="run-state ${tone}"><i aria-hidden="true"></i>${statusLabel}</span></div>
+      <div class="run-round-panel">
+        <div class="run-history">
+          ${!runView.follow ? `<button type="button" class="run-back-latest" data-run-latest>回到最新</button>` : ""}
+          <details class="run-history-menu">
+            <summary aria-label="切换搜索轮次，当前${run.id === runView.topId ? "最新一轮，" : ""}${escapeHtml(formatTime(run.started_at))}">
+              <svg width="15" height="15" viewBox="0 0 20 20" fill="none" aria-hidden="true"><circle cx="10" cy="10" r="7" stroke="currentColor" stroke-width="1.5"/><path d="M10 6v4l2.5 1.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+              <time datetime="${escapeHtml(run.started_at)}" title="${escapeHtml(formatTime(run.started_at))}">${escapeHtml(dateLabel(run.started_at))}</time>
+              <svg class="run-history-chevron" width="12" height="12" viewBox="0 0 12 12" fill="none" aria-hidden="true"><path d="m3 4.5 3 3 3-3" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            </summary>
+            <div class="run-history-popover">
+              <div class="run-history-heading"><strong>搜索历史</strong><span>共 ${group?.run_count ?? runView.runs.length} 轮</span></div>
+              <div class="run-history-options">${runView.runs.map(item => `<button type="button" class="run-history-option ${item.id === run.id ? "selected" : ""}" data-run-select="${item.id}" aria-current="${item.id === run.id}">
+                <span class="run-history-option-top"><time title="${escapeHtml(formatTime(item.started_at))}">${escapeHtml(dateLabel(item.started_at))}</time><span class="run-history-state ${runTone(item)}">${statusName(item)}</span></span>
+                <span class="run-history-option-bottom"><span>${item.storage ? escapeHtml(displayStorage(item.storage)) : "全部容量"} · ${escapeHtml(triggerLabels[item.trigger] ?? item.trigger)}搜索</span><span>${item.id === runView.topId ? "最新一轮" : item.id === run.id ? "正在查看" : ""}</span></span>
+              </button>`).join("")}</div>
+              <div class="run-history-foot">累计记录 ${group?.item_count ?? 0} 件次 · 命中 ${group?.hit_count ?? 0} 件次${group?.run_count > runView.runs.length ? `<br />显示最近 ${runView.runs.length} 轮` : ""}</div>
+            </div>
+          </details>
+        </div>
+        <p class="run-session-facts">${run.region ? `<span>${escapeHtml(run.region)}</span>` : ""}<span>${escapeHtml(triggerLabels[run.trigger] ?? run.trigger)}搜索</span>${duration(run) ? `<span>${tone === "running" ? "已用时" : "用时"}<span id="run-elapsed">${duration(run).replace(/\s/g, "")}</span></span>` : ""}</p>
       </div>
-      <div class="detail-stats">
-        <div><strong>${total || run.observed}</strong><span>看到</span></div>
-        <div class="${run.hit_count ? "hit" : ""}"><strong>${run.hit_count || 0}</strong><span>命中</span></div>
-        <div><strong>${run.new_count || 0}</strong><span>新推送</span></div>
-      </div>
-    </div>
-    ${steps.length ? `<div class="step-chips">${steps.join("")}</div>` : ""}
-    ${run.error ? `<div class="notice ${run.ok === 0 ? "bad" : "warn"}">${run.error.split("；").map(escapeHtml).join("<br />")}</div>` : ""}
-    ${logText ? `<details class="run-log" ${(logOpen ?? phoneRun) ? "open" : ""}><summary>操作日志${cardCount ? ` · 列表卡片 ${cardCount} 件` : ""}</summary><pre>${escapeHtml(logText)}</pre></details>` : ""}
-    ${filters ? `<div class="chips code-filter">${filters}</div>` : ""}
-    <div class="run-items">${body}</div>`;
+    </header>
+    ${tone === "running" ? `<p class="live-line"><span class="live-dot"></span>${escapeHtml(run.live?.stage || "正在搜索…")}</p>` : ""}
+    ${run.error ? `<details class="notice run-issue ${run.ok === 0 ? "bad" : "warn"}" ${issueOpen ? "open" : ""}><summary>${run.ok === 0 ? "本次搜索失败" : "部分搜索步骤未完成"} · 展开原因</summary><p>${run.error.split("；").map(escapeHtml).join("<br />")}</p></details>` : ""}
+    <section class="run-results" aria-label="本次搜索商品结果">
+      <div class="run-capacity"><span class="run-filter-label">容量</span><div class="chips" role="group" aria-label="筛选本次商品容量">${storageFilters}</div></div>
+      <div class="run-result-stats" role="group" aria-label="筛选商品判定结果">${resultFilters}</div>
+      <div class="run-results-tools"><p class="hint">${runView.storage ? "按商品容量筛选；未识别时参考采集容量。" : "容量和判定筛选仅作用于本次搜索。"}</p>${hasFilter ? `<button type="button" class="run-clear" data-run-clear>清除筛选</button>` : ""}</div>
+      ${reasonFilter}
+      <div class="run-items">${body}</div>
+    </section>
+    ${logText || steps.length ? `<details class="run-log" ${logOpen ? "open" : ""}><summary>搜索步骤与操作日志<span>按需展开，查看容量筛选和采集过程</span></summary><p class="hint">关键词「${escapeHtml(run.keyword)}」 · 日志包含本轮全部容量。</p>${steps.length ? `<div class="step-chips">${steps.join("")}</div>` : ""}<pre>${escapeHtml(logText)}</pre></details>` : ""}`;
 }
 
 /* ------------------------------------------------------------------ 每日报价 */
@@ -751,11 +813,11 @@ async function loadQuoteBatches() {
     api("/api/quotes/status"), api("/api/quotes/batches"),
   ]);
   document.querySelector("#quote-batches").innerHTML = statuses.map(item => {
-    if (!item.quote_date) return `<span class="batch-chip warn">${escapeHtml(item.category_name)} · 未同步</span>`;
+    if (!quoteSyncDate(item)) return `<span class="batch-chip warn">${escapeHtml(item.category_name)} · 未同步</span>`;
     const ok = item.parse_status === "parsed";
     const fresh = item.fresh;
     const statusLabel = {parsing:"识别中", failed:"识别失败", needs_review:"未识别到有效报价，需复核"}[item.parse_status] || "需复核";
-    const label = `${item.category_name} · ${item.quote_date.slice(5)} · ${item.entry_count}条 · 扣费项${item.deduction_count ?? 0}条${ok ? "" : ` · ${statusLabel}`}${fresh ? "" : " · 尚未取得今日有效报价"}`;
+    const label = `${item.category_name} · ${quoteSyncDate(item).slice(5)} · ${item.entry_count}条 · 扣费项${item.deduction_count ?? 0}条${ok ? "" : ` · ${statusLabel}`}${fresh ? "" : " · 尚未取得今日有效报价"}`;
     const error = item.parse_error ? `<span class="bad">${escapeHtml(item.parse_error)}</span>` : "";
     if (!item.image_available) return `<span class="batch-chip warn">${escapeHtml(label)} · 原图缺失</span>`;
     const image = `/api/quotes/batches/${encodeURIComponent(item.batch_id)}/image`;
@@ -1001,19 +1063,63 @@ document.querySelector("#run-filter").addEventListener("click", event => {
 document.querySelector("#run-list").addEventListener("click", event => {
   const row = event.target.closest(".run-row");
   if (!row) return;
-  runView.selected = Number(row.dataset.id);
-  runView.follow = runView.selected === runView.topId;
-  runView.code = "";
+  runView.model = row.dataset.model;
+  runView.selected = null;
+  runView.follow = true;
+  runView.storage = runView.result = runView.code = "";
   document.querySelectorAll(".run-row").forEach(item => item.classList.toggle("active", item === row));
-  loadRunDetail(runView.selected).catch(error => toast(error.message, true));
+  loadRuns().catch(error => toast(error.message, true));
   if (window.matchMedia("(max-width: 900px)").matches) document.querySelector("#run-detail").scrollIntoView({ behavior: "smooth" });
 });
 
-document.querySelector("#run-detail").addEventListener("click", event => {
-  const chip = event.target.closest(".code-filter .chip");
-  if (!chip) return;
-  runView.code = chip.dataset.code;
+document.querySelector("#run-model-search").addEventListener("input", event => {
+  runView.search = event.target.value;
+  renderRunList();
+});
+
+document.querySelector("#run-detail").addEventListener("change", event => {
+  if (event.target.id !== "run-reason-select") return;
+  runView.code = event.target.value;
   loadRunDetail(runView.selected).catch(error => toast(error.message, true));
+});
+
+document.querySelector("#run-detail").addEventListener("click", event => {
+  const button = event.target.closest("button");
+  if (!button) return;
+  if (button.hasAttribute("data-run-select")) {
+    runView.selected = Number(button.dataset.runSelect);
+    runView.follow = runView.selected === runView.topId;
+    runView.result = runView.code = "";
+    document.querySelector(".run-history-menu")?.removeAttribute("open");
+  } else if (button.hasAttribute("data-run-storage")) {
+    runView.storage = button.dataset.runStorage;
+    runView.code = "";
+  } else if (button.hasAttribute("data-run-result")) {
+    runView.result = button.dataset.runResult;
+    runView.code = "";
+  } else if (button.hasAttribute("data-run-clear")) {
+    runView.storage = runView.result = runView.code = "";
+  } else if (button.hasAttribute("data-run-latest")) {
+    runView.follow = true;
+    runView.result = runView.code = "";
+    loadRuns().catch(error => toast(error.message, true));
+    return;
+  } else return;
+  loadRunDetail(runView.selected).catch(error => toast(error.message, true));
+});
+
+// 历史面板支持点击外部和 Escape 收起。
+document.addEventListener("click", event => {
+  const menu = document.querySelector(".run-history-menu[open]");
+  if (menu && !menu.contains(event.target)) menu.open = false;
+});
+document.querySelector("#run-detail").addEventListener("keydown", event => {
+  if (event.key !== "Escape") return;
+  const menu = document.querySelector(".run-history-menu[open]");
+  if (!menu) return;
+  event.preventDefault();
+  menu.open = false;
+  menu.querySelector("summary").focus();
 });
 
 const panelLoaders = { "deals-panel": loadDeals, "rules-panel": loadTargets, "runs-panel": loadRuns };

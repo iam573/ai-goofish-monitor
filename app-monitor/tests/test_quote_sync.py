@@ -66,7 +66,7 @@ async def test_new_quote_api_sends_public_context_without_login_headers(database
     ('https://example.test/20261022/revised.png', b'original-image', False),
     ('https://example.test/20261022/original.png', b'new-image', True),
 ])
-async def test_intraday_checks_follow_latest_url_and_compare_image_content(
+async def test_manual_sync_follows_latest_url_and_compares_image_content(
     database, service, monkeypatch, new_url, new_content, changed,
 ):
     from app_monitor.quotes import latest_entries
@@ -90,7 +90,7 @@ async def test_intraday_checks_follow_latest_url_and_compare_image_content(
     first = (await service.sync_if_stale())[0]
     assert quote_status(database)[0]['fresh']
     revision.update(url=new_url, content=new_content, price=4900)
-    second = (await service.sync_if_stale())[0]
+    second = (await service.sync_all())[0]
     assert second['updated'] is changed
     assert requests == ['100025', '100025']
     assert len(parses) == (2 if changed else 1)
@@ -110,6 +110,40 @@ async def test_first_sync_parses_then_only_valid_nonempty_data_is_unchanged(data
     assert second['updated'] is False and second['entry_count']==1
     assert len(calls)==1
     with database.connect() as c:assert c.execute('SELECT COUNT(*) FROM quote_batches').fetchone()[0]==1
+
+
+async def test_unchanged_quote_refreshes_sync_date_without_reparsing(database, service, monkeypatch):
+    from app_monitor.quotes import is_fresh
+
+    parses = []
+    def parse(path):
+        parses.append(path)
+        return good_parse(path)
+    monkeypatch.setattr(service.parser, 'parse_image', parse)
+    monkeypatch.setattr('app_monitor.quotes.utc_now', lambda: '2026-10-22T09:00:00+08:00')
+    first = await service.sync('100025', '苹果无保')
+    monkeypatch.setattr('app_monitor.quotes.utc_now', lambda: '2026-10-23T09:00:00+08:00')
+    second = await service.sync('100025', '苹果无保')
+    batch = latest_downloaded_batch(database, '100025')
+    assert second['updated'] is False and second['batch_id'] == first['batch_id']
+    assert len(parses) == 1 and second['entry_count'] == 1
+    assert batch['fetched_at'] == second['batch']['fetched_at'] == '2026-10-23T09:00:00+08:00'
+    assert batch['quote_date'] == '2026-10-21'  # 原图日期独立于最近同步日期。
+    assert is_fresh(batch, '2026-10-23')
+    assert quote_status(database)[0]['fetched_at'] == batch['fetched_at']
+
+
+async def test_failed_download_does_not_advance_sync_date(database, service, monkeypatch):
+    monkeypatch.setattr(service.parser, 'parse_image', good_parse)
+    monkeypatch.setattr('app_monitor.quotes.utc_now', lambda: '2026-10-22T09:00:00+08:00')
+    await service.sync('100025', '苹果无保')
+    monkeypatch.setattr('app_monitor.quotes.utc_now', lambda: '2026-10-23T09:00:00+08:00')
+    async def fail_download(url):
+        raise RuntimeError('下载失败')
+    monkeypatch.setattr(service, '_download', fail_download)
+    with pytest.raises(RuntimeError, match='下载失败'):
+        await service.sync('100025', '苹果无保')
+    assert latest_downloaded_batch(database, '100025')['fetched_at'] == '2026-10-22T09:00:00+08:00'
 
 
 @pytest.mark.parametrize('status',['failed','parsing','needs_review','parsed'])
@@ -212,3 +246,25 @@ def test_existing_database_adds_parse_error_without_losing_batches(tmp_path):
     with migrated.connect() as c:
         row=c.execute('SELECT parse_status,parse_error,image_sha256 FROM quote_batches').fetchone()
         assert tuple(row)==('failed','','legacy')
+
+
+async def test_daily_sync_skips_successful_categories_and_refreshes_next_day(database, service, monkeypatch):
+    monkeypatch.setattr(service.parser, 'parse_image', good_parse)
+    await service.sync('100025', '苹果无保')
+    checked = []
+    original_get_json = service._get_json
+    async def payload(*args, **kwargs):
+        checked.append(kwargs['params']['categoryId'])
+        return await original_get_json(*args, **kwargs)
+    monkeypatch.setattr(service, '_get_json', payload)
+    assert len(await service.sync_if_stale()) == 1
+    assert checked == ['100027']
+    last_check = database.state_get('quote_last_check')
+    checked.clear()
+    assert await service.sync_if_stale() == []
+    assert checked == []
+    assert database.state_get('quote_last_check') == last_check
+    with database.connect() as connection:
+        connection.execute("UPDATE quote_batches SET fetched_at='2026-10-22', quote_date='2026-10-21'")
+    assert len(await service.sync_if_stale('2026-10-23')) == 2
+    assert checked == ['100025', '100027']

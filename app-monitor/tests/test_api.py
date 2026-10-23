@@ -9,7 +9,51 @@ async def _noop():
     return None
 
 
-def test_quote_schedule_continues_after_the_morning_window(monkeypatch):
+def test_run_groups_merge_capacities_and_include_older_runs(tmp_path, monkeypatch):
+    monkeypatch.setattr(api.database, "path", tmp_path / "run-groups.sqlite3")
+    monkeypatch.setattr(api, "refresh_quotes_if_stale", _noop)
+    with TestClient(api.app) as client:
+        with api.database.connect() as connection:
+            connection.executemany(
+                """INSERT INTO search_runs(model, keyword, storage, started_at, ok, observed, error)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                [("16 Pro Max", "iPhone 16 Pro Max", "256", "2026-10-20T10:00:00", 0, 0, "失败")]
+                + [("16", "iPhone 16", "128" if i % 2 else "256", "2026-10-21T10:00:00", 1, 2, None)
+                   for i in range(125)]
+                + [("16", "iPhone 16", None, "2026-10-22T10:00:00", None, 1, None),
+                   ("16 Pro", "iPhone 16 Pro", "256", "2026-10-22T11:00:00", 1, 3, "部分失败")],
+            )
+        groups = client.get("/api/run-groups").json()
+        assert [group["model"] for group in groups] == ["16 Pro", "16", "16 Pro Max"]
+        base = groups[1]
+        assert base["run_count"] == 126 and base["item_count"] == 251
+        assert base["running_count"] == 1
+        assert base["latest_status"] == "running"
+        assert groups[0]["latest_status"] == "warn"
+        assert groups[2]["latest_status"] == "failed"
+        assert [g["model"] for g in client.get("/api/run-groups?status=failed").json()] == ["16 Pro Max"]
+        assert [g["model"] for g in client.get("/api/run-groups?status=warn").json()] == ["16 Pro"]
+        assert client.get("/api/run-groups?status=hit").json() == []
+        assert client.get("/api/run-groups?status=invalid").status_code == 422
+        history = client.get("/api/runs?model=16&limit=1000").json()
+        assert len(history) == 126 and history[0]["id"] == base["latest_id"]
+        assert {run["storage"] for run in history} == {None, "128", "256"}
+        # 历史失败不影响恢复后的状态、筛选；状态取最后一条记录而非累计异常。
+        with api.database.connect() as connection:
+            connection.execute("""INSERT INTO search_runs(model,keyword,started_at,ok)
+                                  VALUES('16 Pro Max','iPhone 16 Pro Max','2026-10-23T09:00:00',1)""")
+            connection.execute("""INSERT INTO search_runs(model,keyword,started_at,ok)
+                                  VALUES('16 Pro','iPhone 16 Pro','2026-10-23T09:00:00',1)""")
+        latest = {g["model"]: g for g in client.get("/api/run-groups").json()}
+        assert latest["16 Pro Max"]["latest_status"] == "completed"
+        assert latest["16 Pro Max"]["failed_count"] == 1
+        assert latest["16 Pro"]["latest_status"] == "completed"
+        assert latest["16 Pro"]["warn_count"] == 1
+        assert client.get("/api/run-groups?status=failed").json() == []
+        assert client.get("/api/run-groups?status=warn").json() == []
+
+
+def test_quote_schedule_runs_once_daily_at_configured_time(monkeypatch):
     from dataclasses import replace
     from datetime import datetime
     from zoneinfo import ZoneInfo
@@ -18,9 +62,12 @@ def test_quote_schedule_continues_after_the_morning_window(monkeypatch):
                                                 timezone='Asia/Shanghai'))
     trigger = api.quote_refresh_trigger()
     zone = ZoneInfo('Asia/Shanghai')
-    assert trigger.get_next_fire_time(None, datetime(2026, 10, 22, 13, 5, tzinfo=zone)) == datetime(2026, 10, 22, 13, 30, tzinfo=zone)
-    assert trigger.get_next_fire_time(None, datetime(2026, 10, 22, 23, 20, tzinfo=zone)) == datetime(2026, 10, 22, 23, 30, tzinfo=zone)
+    assert trigger.get_next_fire_time(None, datetime(2026, 10, 22, 13, 5, tzinfo=zone)) == datetime(2026, 10, 23, 9, 0, tzinfo=zone)
+    assert trigger.get_next_fire_time(None, datetime(2026, 10, 22, 23, 20, tzinfo=zone)) == datetime(2026, 10, 23, 9, 0, tzinfo=zone)
     assert not api.quote_time_reached(datetime(2026, 10, 22, 8, 59, tzinfo=zone))
+    assert trigger.get_next_fire_time(None, datetime(2026, 10, 22, 8, 59, tzinfo=zone)) == datetime(2026, 10, 22, 9, 0, tzinfo=zone)
+    monkeypatch.setattr(api, 'settings', replace(api.settings, quote_hour=10, quote_minute=17))
+    assert api.quote_refresh_trigger().get_next_fire_time(None, datetime(2026, 10, 22, 10, 0, tzinfo=zone)) == datetime(2026, 10, 22, 10, 17, tzinfo=zone)
 
 
 def test_device_selection_is_phone_only_and_mac_is_rejected(tmp_path, monkeypatch):
@@ -99,6 +146,8 @@ def test_api_flow_rules_targets_and_injected_items(tmp_path, monkeypatch):
         assert detail["items"][0]["matched"] == 1 and detail["items"][0]["code"] == "matched"
         assert detail["codes"] == {"matched": 1}
         assert client.get("/api/runs?status=hit").json()[0]["id"] == run["id"]
+        group = client.get("/api/run-groups?status=hit").json()[0]
+        assert group["model"] == "15 Pro" and group["hit_count"] == 1 and group["new_count"] == 1
         assert client.get("/api/runs?status=failed").json() == []
         assert client.get("/api/runs/99999").status_code == 404
         target = next(t for t in client.get("/api/targets").json() if t["model"] == "15 Pro")
