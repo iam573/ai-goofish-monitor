@@ -125,7 +125,7 @@ def test_clipboard_never_reads_if_runner_did_not_reach_foreground(monkeypatch):
 
 
 @pytest.mark.parametrize("failure", ["marker_failure", "changed_detail", "stale_confirmation"])
-def test_share_stops_before_copy_if_marker_fails_or_detail_changes(monkeypatch, failure):
+def test_clipboard_fallback_stops_before_recopy_if_marker_fails_or_detail_changes(monkeypatch, failure):
     card = PhoneCard("iPhone 13 Pro Max 128G 个人自用", 2000, "翔安区", 20, 400)
     valid = f'''<XCUIElementTypeApplication>
       <XCUIElementTypeTextView name="{card.title}" visible="true" />
@@ -146,12 +146,14 @@ def test_share_stops_before_copy_if_marker_fails_or_detail_changes(monkeypatch, 
 
     class Driver:
         page_source = valid
+        taps = 0
 
         def find_elements(self, *args):
             return [Title()]
 
         def execute_script(self, *args):
-            raise AssertionError("Must never tap the copy link")
+            self.taps += 1
+            assert self.taps == 1, "The clipboard fallback must never copy after failed verification"
 
     driver = Driver()
     collector = IPhoneCollector(Settings())
@@ -159,9 +161,10 @@ def test_share_stops_before_copy_if_marker_fails_or_detail_changes(monkeypatch, 
     monkeypatch.setattr(collector, "_ensure_foreground", lambda *args: None)
     monkeypatch.setattr(collector, "_find", lambda *args: Title())
     monkeypatch.setattr(collector, "_return_to_results", lambda *args: returned.append(True))
+    monkeypatch.setattr(collector, "_close_share_sheet", lambda *args: None)
     monkeypatch.setattr("app_monitor.iphone_collector.time.sleep", lambda _: None)
     wait = collector._wait_for_source
-    monkeypatch.setattr(collector, "_wait_for_source", lambda *args: wait(*args, timeout=0))
+    monkeypatch.setattr(collector, "_wait_for_source", lambda *args, **kwargs: wait(*args, **(kwargs | {"timeout": 0})))
 
     def prepare(*args, **kwargs):
         if failure == "changed_detail":

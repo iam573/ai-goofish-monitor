@@ -22,7 +22,7 @@ from .swift_runtime import run_swift
 from PIL import Image
 
 from .appium_server import ensure_appium_server
-from .collector import CollectResult, ItemCallback, emit_safely, guess_region
+from .collector import CollectResult, DetailCheck, ItemCallback, emit_safely, guess_region
 from .config import ROOT, Settings
 from .matching import normalize_search_text
 
@@ -600,10 +600,11 @@ class IPhoneCollector:
         region_steps: list[str], storages: list[str], scroll_pages: int,
         is_candidate: Callable[[dict[str, Any], bool, str], bool],
         on_items: ItemCallback | None = None,
+        check_detail: DetailCheck | None = None,
     ) -> CollectResult:
         return await asyncio.to_thread(
             self._collect, udid, os_version, keyword, region_hint, region_steps,
-            storages, scroll_pages, is_candidate, on_items,
+            storages, scroll_pages, is_candidate, on_items, check_detail,
         )
 
     def _collect(
@@ -611,6 +612,7 @@ class IPhoneCollector:
         region_steps: list[str], storages: list[str], scroll_pages: int,
         is_candidate: Callable[[dict[str, Any], bool, str], bool],
         on_items: ItemCallback | None = None,
+        check_detail: DetailCheck | None = None,
     ) -> CollectResult:
         """在线程里运行；每拿到一件候选商品的链接就通过 ``on_items`` 交出，边搜边判价、推送。"""
         from appium import webdriver
@@ -704,14 +706,24 @@ class IPhoneCollector:
                                     "clicked": clicked, "success": True})
                     self._sort_new(driver)
                     actions.append({"action": "点击排序", "target": "新发", "success": True})
+                    source = driver.page_source
+                    list_changed = False
                     for page in range(max(0, scroll_pages) + 1):
                         if page:
-                            driver.execute_script("mobile: swipe", {"direction": "up", "velocity": 900})
-                            time.sleep(1)
+                            # Detail visits may move/collapse the list. Use its
+                            # actual current viewport as the gesture baseline.
+                            previous = driver.page_source if list_changed else source
+                            source = self._scroll_results(driver, previous)
+                            if parse_cards(source) == parse_cards(previous):
+                                actions.append({"action": "结束列表翻页", "method": "拖动及备用滑动后列表位置均未变化",
+                                                "success": True})
+                                break
+                        list_changed = False
+                        if page:
                             actions.append({"action": "上滑列表", "target": f"第 {page + 1} 屏", "success": True})
                         emit_safely(on_items, stage=f"iPhone 读取 {storage_label} 第 {page + 1}/{max(0, scroll_pages) + 1} 屏",
                                     storage=storage)
-                        cards = parse_cards(driver.page_source, region_hint)
+                        cards = parse_cards(source, region_hint)
                         logger.info("iPhone 列表 udid=%s storage=%s page=%s cards=%s", udid[-6:], storage, page, len(cards))
                         for card in cards:
                             key = (card.title, card.price, card.region)
@@ -733,7 +745,10 @@ class IPhoneCollector:
                             candidates += 1
                             seller_info: dict[str, Any] = {}
                             try:
-                                item_id = self._share_item_id(driver, udid, card, actions, seller_info)
+                                list_changed = True
+                                detail_gate = (lambda item: check_detail(item, result.region_applied, storage)) if check_detail else None
+                                item_id = self._share_item_id(driver, udid, card, actions, seller_info,
+                                                              check_detail=detail_gate)
                             except Exception as exc:
                                 logger.warning("iPhone 候选分享失败 title=%s error=%s", card.title[:40], exc)
                                 actions.append({"action": "复制候选链接", "target": card.title[:40],
@@ -742,7 +757,10 @@ class IPhoneCollector:
                                 if not is_search_results(driver.page_source):
                                     raise RuntimeError("分享失败后未回到搜索列表，停止本机采集") from exc
                                 continue
-                            if item_id:
+                            rejection = seller_info.pop("detail_rejection", None)
+                            if rejection:
+                                emit_safely(on_items, cards=[{**raw, "detail_rejection": rejection}], **card_meta)
+                            elif item_id:
                                 item = {**raw, **seller_info, "item_id": item_id,
                                         "item_url": f"https://www.goofish.com/item?id={item_id}",
                                         "image_urls": [], "source_storage": storage, "source_pass": "新发"}
@@ -959,6 +977,76 @@ class IPhoneCollector:
             raise RuntimeError("找不到「新发」排序按钮")
         button.click()
         time.sleep(0.8)
+
+    def _scroll_results(self, driver: Any, source: str) -> str:
+        """A bounded drag keeps adjacent viewports overlapping; wait for progress."""
+        if not is_search_results(source):
+            raise RuntimeError("列表滚动前未确认搜索结果页")
+        root = ET.fromstring(source)
+        app = root if root.tag == "XCUIElementTypeApplication" else root.find(".//XCUIElementTypeApplication")
+        width = float(app.get("width") or 0) if app is not None else 0
+        height = float(app.get("height") or 0) if app is not None else 0
+        if not width or not height:
+            size = driver.get_window_size()
+            width, height = size["width"], size["height"]
+        top = max(height * .22, max((float(node.get("y") or 0) + 100 for node in root.iter()
+                  if _text(node) in {"新发", "筛选"} and node.get("visible") == "true"), default=0))
+        bottom = height * .86
+        distance = (bottom - top) * .75
+        if distance < 80:
+            raise RuntimeError("搜索列表可滚动区域不足")
+
+        def position(xml: str) -> tuple:
+            return tuple((card.title, card.price, card.region, card.y) for card in parse_cards(xml))
+
+        before = position(source)
+        before_y = {(title, price, region): y for title, price, region, y in before}
+        started = time.monotonic()
+        last = source
+
+        def progressed(xml: str) -> bool:
+            nonlocal last
+            last = xml
+            if not is_search_results(xml):
+                return False
+            current = position(xml)
+            # A collapsing toolbar or a few pixels of animation is not a new
+            # viewport. Require a new card or meaningful upward movement.
+            return any((title, price, region) not in before_y
+                       or before_y[(title, price, region)] - y >= min(60, distance * .25)
+                       for title, price, region, y in current)
+
+        try:
+            driver.execute_script("mobile: dragFromToWithVelocity", {
+                "pressDuration": .5, "holdDuration": .5, "velocity": 600,
+                "fromX": width / 2, "toX": width / 2,
+                "fromY": bottom, "toY": bottom - distance,
+            })
+        except Exception as exc:
+            logger.warning("iPhone 受控拖动失败，核对当前页面后使用备用手势：%s", _brief_error(exc))
+            # A command may fail after moving the UI. Re-read before recovery.
+            if progressed(driver.page_source):
+                return last
+        else:
+            logger.info("iPhone 列表拖动 command_elapsed=%.3fs distance=%.0f", time.monotonic() - started, distance)
+            try:
+                current = self._wait_for_source(driver, progressed, "拖动后列表未变化", timeout=5)
+                logger.info("iPhone 列表进度 method=受控拖动 elapsed=%.3fs", time.monotonic() - started)
+                return current
+            except _PageWaitTimeout:
+                pass
+        # A bottom boundary or an App version with a different gesture handler
+        # retains the original swipe path, never another screen's controls.
+        if not is_search_results(last):
+            raise RuntimeError("拖动后离开搜索结果页，停止滚动")
+        logger.info("iPhone 列表进度 method=回退原生滑动")
+        driver.execute_script("mobile: swipe", {"direction": "up", "velocity": 900})
+        try:
+            return self._wait_for_source(driver, progressed, "滑动后列表未变化", timeout=5)
+        except _PageWaitTimeout:
+            if is_search_results(last):
+                return last
+            raise
 
     def _region_option(self, driver: Any, label: str, clicked: list[str]) -> Any | None:
         from appium.webdriver.common.appiumby import AppiumBy
@@ -1264,7 +1352,9 @@ class IPhoneCollector:
                                 "method": "排序栏收起，按页面结构确认" if collapsed else "结果页结构确认"})
                 logger.info("iPhone 已返回搜索列表 sort_collapsed=%s", collapsed)
                 return
-            if not clicked_back and self._find(driver, "分享按钮"):
+            has_share = any("分享按钮" in {node.get("name"), node.get("label"), _text(node)} and node.get("visible") != "false"
+                            for node in ET.fromstring(source).iter())
+            if not clicked_back and has_share:
                 back = self._find(driver, "返回按钮")
                 if back:
                     back.click()
@@ -1274,17 +1364,49 @@ class IPhoneCollector:
         actions.append({"action": "确认搜索列表", "success": False, "error": "未识别到搜索结果页"})
         raise RuntimeError("返回后未到搜索结果页，停止继续采集")
 
+    def _copy_from_share(self, driver: Any, actions: list[dict[str, Any]], *, wait_confirmation=True) -> str:
+        from appium.webdriver.common.appiumby import AppiumBy
+
+        share = self._find(driver, "分享按钮")
+        if share is None:
+            raise RuntimeError("详情页找不到分享按钮")
+        share.click()
+        actions.append({"action": "打开分享面板", "target": "分享按钮", "success": True})
+        for _ in range(10):
+            choices = driver.find_elements(AppiumBy.IOS_PREDICATE,
+                                          "(name == '复制链接' OR label == '复制链接') AND visible == true")
+            rect = next((bounds for element in choices if (bounds := element.rect)["width"] > 20), None)
+            if rect:
+                break
+            time.sleep(.3)
+        else:
+            raise RuntimeError("分享菜单没有复制链接")
+        if share_confirmation_text(driver.page_source):
+            raise RuntimeError("分享面板仍有旧的复制确认文案，已跳过以免关联旧商品")
+        driver.execute_script("mobile: tap", {
+            "x": int(rect["x"] + rect["width"] / 2), "y": int(rect["y"] + rect["height"] * .9),
+        })
+        if not wait_confirmation:
+            return ""
+        try:
+            source = self._wait_for_source(driver, lambda xml: bool(share_confirmation_text(xml)),
+                                           "未读到本次复制确认文案", timeout=3)
+        except _PageWaitTimeout:
+            return ""
+        actions.append({"action": "读取分享确认文案", "target": "本次可见确认框", "success": True})
+        return share_confirmation_text(source)
+
     def _share_item_id(
         self, driver: Any, udid: str, card: PhoneCard,
         actions: list[dict[str, Any]] | None = None,
         seller_info: dict[str, Any] | None = None,
+        *, check_detail: Callable[[dict[str, Any]], dict[str, Any] | None] | None = None,
     ) -> str:
-        from appium.webdriver.common.appiumby import AppiumBy
-
         title = self._candidate_title(driver, card)
         if title is None:
             raise RuntimeError("候选卡片已离开当前屏，跳过以免点错商品")
         actions = actions if actions is not None else []
+        seller_info = seller_info if seller_info is not None else {}
         self._ensure_foreground(driver, actions)
         title.click()
         actions.append({"action": "打开候选详情", "target": card.title[:60], "success": True})
@@ -1310,8 +1432,15 @@ class IPhoneCollector:
                                 "success": False, "error": reason})
                 raise RuntimeError(f"详情身份校验失败：{reason}；已跳过复制")
             actions.append({"action": "核对详情标题和价格", "target": f"¥{card.price:g}", "success": True})
-            if seller_info is not None:
-                seller_info.update(detail_content(source))
+            seller_info.update(detail_content(source))
+            if check_detail:
+                rejection = check_detail({"title": card.title, "price": card.price,
+                                          "display_region": card.region, **seller_info})
+                if rejection:
+                    seller_info["detail_rejection"] = rejection
+                    actions.append({"action": "详情提前判价", "target": rejection["reason"],
+                                    "method": "不符合条件，跳过分享取链接", "success": True})
+                    return ""
             seller = detail_seller(source)
             # Seller header accessibility may become visible shortly after the description.
             for _ in range(2):
@@ -1337,51 +1466,31 @@ class IPhoneCollector:
             shop_label = {True: "是", False: "否", None: "未识别"}[seller["is_fish_shop"]]
             actions.append({"action": "读取卖家信息", "target": f"{seller['seller_name'] or '未识别'} · 鱼小铺：{shop_label}",
                             "method": seller_method, "success": bool(seller["seller_name"])})
-            marker = _prepare_pasteboard(driver, settings=self.settings)
-            # Foreground clipboard access temporarily switches away from Goofish.
-            # Recheck identity and locate the share button again after returning.
-            self._wait_for_source(driver, lambda xml: detail_matches(xml, card),
-                                  "剪贴板准备后详情身份发生变化，已跳过复制")
-            share = self._find(driver, "分享按钮")
-            if share is None:
-                raise RuntimeError("剪贴板准备后找不到分享按钮")
-            actions.append({"action": "准备手机剪贴板", "target": "本次复制标记已核验", "success": True})
-            share.click()
-            actions.append({"action": "打开分享面板", "target": "分享按钮", "success": True})
-            copy = None
-            for _ in range(10):
-                choices = driver.find_elements(AppiumBy.IOS_PREDICATE, "name == '复制链接' OR label == '复制链接'")
-                copy = next((element for element in choices if element.rect["width"] > 20), None)
-                if copy:
-                    break
-                time.sleep(0.3)
-            if copy is None:
-                raise RuntimeError("分享菜单没有复制链接")
-            if share_confirmation_text(driver.page_source):
-                raise RuntimeError("分享面板仍有旧的复制确认文案，已跳过以免关联旧商品")
-            # The icon's image centre does not trigger this App version. The
-            # label is within the bottom of the same bounded AX share control.
-            rect = copy.rect
-            driver.execute_script("mobile: tap", {
-                "x": int(rect["x"] + rect["width"] / 2),
-                "y": int(rect["y"] + rect["height"] * 0.9),
-            })
-            try:
-                copied_source = self._wait_for_source(
-                    driver, lambda xml: bool(share_confirmation_text(xml)), "未读到本次复制确认文案",
-                )
-                after = share_confirmation_text(copied_source)
-                actions.append({"action": "读取分享确认文案", "target": "本次可见确认框", "success": True})
-            except _PageWaitTimeout:
-                # Other App versions may copy without showing accessible text.
-                after = ""
+            # Most copies expose a fresh confirmation. Avoid switching apps
+            # and preparing a clipboard marker unless that path is unavailable.
+            copy_started = time.monotonic()
+            after = self._copy_from_share(driver, actions)
+            method = "本次确认框"
+            if not after:
+                method = "标记后重新复制并读剪贴板"
+                self._close_share_sheet(driver)
+                self._wait_for_source(driver, lambda xml: detail_matches(xml, card),
+                                      "备用复制前详情身份发生变化，已跳过复制")
+                marker = _prepare_pasteboard(driver, settings=self.settings)
+                self._wait_for_source(driver, lambda xml: detail_matches(xml, card),
+                                      "剪贴板准备后详情身份发生变化，已跳过复制")
+                actions.append({"action": "准备手机剪贴板", "target": "本次复制标记已核验", "success": True})
+                # A second copy AFTER marker preparation is mandatory. Never
+                # fall back to reading a clipboard left by the first attempt.
+                self._copy_from_share(driver, actions, wait_confirmation=False)
                 for _ in range(4):
                     after = _pasteboard(driver, settings=self.settings)
                     if after and marker not in after:
                         break
                     time.sleep(0.3)
-            if not after or marker in after:
-                raise RuntimeError("手机剪贴板未产生新链接")
+                if not after or marker in after:
+                    raise RuntimeError("手机剪贴板未产生新链接")
+            logger.info("iPhone 分享复制 method=%s elapsed=%.3fs", method, time.monotonic() - copy_started)
             short_urls = [url.rstrip("，。)）") for url in _URL.findall(after)
                           if urlparse(url).hostname in _SHARE_HOSTS]
             if not short_urls:

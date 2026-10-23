@@ -67,7 +67,7 @@ def setup(database, collector=None, **rules):
     service = MonitorService(database, None, notifier)
 
     class PhoneAdapter:
-        async def collect(self, udid, version, keyword, city, steps, storages, pages, is_candidate, on_items=None):
+        async def collect(self, udid, version, keyword, city, steps, storages, pages, is_candidate, on_items=None, check_detail=None):
             return await fake.collect(keyword, region_steps=steps, region_hint=city,
                                       storage_filters=[(value, load_rules(database).storage_steps(value)) for value in storages],
                                       scroll_pages=pages, on_items=on_items)
@@ -148,7 +148,7 @@ async def test_iphone_prefilters_before_processing_shared_id(database, monkeypat
     ])
 
     class FakePhone:
-        async def collect(self, udid, version, keyword, city, region_steps, storages, pages, is_candidate, on_items=None):
+        async def collect(self, udid, version, keyword, city, region_steps, storages, pages, is_candidate, on_items=None, check_detail=None):
             assert (udid, version, keyword, city, storages) == (
                 "phone-1", "27.2", "iPhone 15 Pro", "厦门", ["256"]
             )
@@ -168,6 +168,59 @@ async def test_iphone_prefilters_before_processing_shared_id(database, monkeypat
     assert result["matched"] == 1 and notifier.sent[0][0] == "1091531543430"
     assert result["passes"][0]["device_name"] == "测试 iPhone"
     assert result["passes"][0]["cards"] == 7
+
+
+@pytest.mark.parametrize("price, rejected", [(1350, True), (1200, False)])
+async def test_detail_gate_prices_repairs_before_links_and_preserves_pending(database, price, rejected):
+    from app_monitor.quotes import QuoteDeduction, _save_deductions
+    service, notifier = setup(database, region_city="厦门")
+    batch = add_quotes(database, [("12 Pro", "128", "靓机", 1500), ("12 Pro", "128", "小花", 1300)])
+    with database.connect() as connection:
+        _save_deductions(connection, batch, "100025", [QuoteDeduction("12 Pro", 0, 0, "弹电-300", "弹电", 300, 300)])
+    database.state_set("smart_config", {"enabled": True, "ai_enabled": True})
+    raw = {"title": "苹果12Pro原装128G国行双卡双待", "price": price, "display_region": "集美区"}
+    detail = {**raw, "description": "新原装电芯100健康，功能正常，无拆修", "detail_parameters": []}
+
+    class Phone:
+        async def collect(self, *args, check_detail=None, on_items=None, **kwargs):
+            decision = check_detail(detail, True, "128")
+            assert bool(decision) == rejected
+            if decision:
+                assert decision["code"] == "smart_rejected" and decision["quote_basis"] == "detail"
+                assert decision["quote_price"] is None and decision["threshold_price"] == 1200
+                on_items([], cards=[{**raw, "detail_rejection": decision}], storage="128",
+                         region_applied=True, filter_applied=True)
+            return CollectResult(items=[], region_applied=True, filter_applied=True,
+                                 passes=[{"storage": "128", "filter_applied": True, "error": None}])
+
+    service.iphone_collector = Phone()
+    run = await service.run_model("12 Pro", "128")
+    with database.connect() as connection:
+        rows = connection.execute("SELECT * FROM run_items WHERE run_id=?", (run["run_id"],)).fetchall()
+        assert connection.execute("SELECT COUNT(*) FROM smart_assessments").fetchone()[0] == 0
+    assert notifier.sent == [] and len(rows) == int(rejected)
+    if rejected:
+        assert rows[0]["code"] == "smart_rejected" and rows[0]["assessment_id"] is None
+        assert "扣¥300" in rows[0]["decision"] and "未取得商品链接" not in rows[0]["decision"]
+        assert "参考上限 ¥1000" in rows[0]["decision"] and rows[0]["item_url"] == ""
+
+
+async def test_detail_gate_failure_keeps_original_collection_path(database, monkeypatch):
+    service, _ = setup(database)
+    database.state_set("smart_config", {"enabled": True})
+
+    def fail(*args, **kwargs):
+        raise ValueError("invalid quote")
+
+    monkeypatch.setattr("app_monitor.service.assess_local", fail)
+
+    class Phone:
+        async def collect(self, *args, check_detail=None, **kwargs):
+            assert check_detail({"title": "iPhone 15 Pro 256G", "price": 3500}, True, "256") is None
+            return CollectResult(items=[], passes=[{"error": None}])
+
+    service.iphone_collector = Phone()
+    await service._collect_sources("iPhone 15 Pro", "15 Pro", ["256"], load_rules(database))
 
 
 async def test_iphone_filter_failure_keeps_actions_in_failed_run(database, monkeypatch):

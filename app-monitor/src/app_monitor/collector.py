@@ -19,6 +19,9 @@ logger = logging.getLogger(__name__)
 # 采集过程中的实时回调：on_items(新读到的商品, storage=..., region_applied=..., filter_applied=...,
 # stage="当前步骤", pass_info={本轮结果})。回调必须很快返回（只入队），可以从其他线程调用。
 ItemCallback = Callable[..., None]
+# A verified detail may be rejected before obtaining its public link. None
+# means continue; a rejection contains the run-record decision, never an ID.
+DetailCheck = Callable[[dict[str, Any], bool, str], dict[str, Any] | None]
 
 
 def emit_safely(callback: ItemCallback | None, items: list[dict[str, Any]] | None = None, **meta: Any) -> None:

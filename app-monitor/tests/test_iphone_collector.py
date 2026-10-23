@@ -310,7 +310,7 @@ def test_collapsed_sort_bar_still_identifies_list_but_not_detail_or_modal():
 
 def test_return_clicks_detail_back_once_and_accepts_collapsed_result_bar(monkeypatch):
     class Driver:
-        page_source = '<XCUIElementTypeApplication />'
+        page_source = '<XCUIElementTypeApplication><XCUIElementTypeOther name="分享按钮" visible="true" /></XCUIElementTypeApplication>'
         backs = 0
 
     driver = Driver()
@@ -377,7 +377,7 @@ def test_share_keeps_copied_id_when_returned_sort_bar_is_hidden(monkeypatch, cli
     monkeypatch.setattr("app_monitor.iphone_collector._pasteboard", read_clipboard)
     monkeypatch.setattr("app_monitor.iphone_collector.time.sleep", lambda _: None)
     wait = collector._wait_for_source
-    monkeypatch.setattr(collector, "_wait_for_source", lambda *args: wait(*args, timeout=0))
+    monkeypatch.setattr(collector, "_wait_for_source", lambda *args, **kwargs: wait(*args, **(kwargs | {"timeout": 0})))
     actions = []
     if clipboard == "copy-marker":
         with pytest.raises(RuntimeError, match="剪贴板未产生新链接"):
@@ -537,10 +537,11 @@ def test_candidate_rejection_continues_scrolling_when_returned_sort_bar_is_hidde
     monkeypatch.setattr(collector, "_apply_storage", lambda *args: ["512GB", "确定"])
     monkeypatch.setattr(collector, "_sort_new", lambda *args: None)
 
-    def reject(*args):
+    def reject(*args, **kwargs):
         raise RuntimeError("详情页标题或价格与候选卡片不一致，已跳过复制")
 
     monkeypatch.setattr(collector, "_share_item_id", reject)
+    monkeypatch.setattr(collector, "_scroll_results", lambda d, source: d.execute_script("mobile: swipe", {"direction": "up"}) or source)
     result = collector._collect("test", "", "iPhone 17", "厦门", [], ["512"], 1, lambda *args: True)
     assert driver.swipes == 1
     assert result.passes[0]["error"] is None and result.passes[0]["candidates"] == 1
@@ -652,11 +653,12 @@ def test_share_waits_for_identity_and_preserves_failed_comparison(monkeypatch,de
     monkeypatch.setattr(collector,'_ensure_foreground',lambda *args:None)
     monkeypatch.setattr(collector,'_find',lambda *args:Element())
     monkeypatch.setattr(collector,'_return_to_results',lambda *args:returns.append(True))
+    monkeypatch.setattr(collector,'_close_share_sheet',lambda *args:None)
     monkeypatch.setattr('app_monitor.iphone_collector.time.sleep',lambda _:None)
     monkeypatch.setattr('app_monitor.iphone_collector._prepare_pasteboard',lambda _, **kwargs:copies.append(True) or 'marker')
     monkeypatch.setattr('app_monitor.iphone_collector._pasteboard',lambda _, **kwargs:'https://www.goofish.com/item?id=1091531543430')
     wait = collector._wait_for_source
-    monkeypatch.setattr(collector, "_wait_for_source", lambda *args: wait(*args, timeout=0))
+    monkeypatch.setattr(collector, "_wait_for_source", lambda *args, **kwargs: wait(*args, **(kwargs | {"timeout": 0})))
     actions=[]
     if delayed:
         assert collector._share_item_id(driver,'test',card,actions)=='1091531543430'

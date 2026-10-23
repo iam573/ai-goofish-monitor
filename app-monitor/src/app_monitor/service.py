@@ -6,14 +6,14 @@ import asyncio
 import hashlib
 import json
 import logging
-from dataclasses import replace
+from dataclasses import asdict, replace
 from datetime import datetime, timedelta
 from typing import Any
 
 from .collector import CollectResult
 from .db import Database, utc_now
 from .config import settings as default_settings
-from .smart import SmartService, candidate_decision, load_config
+from .smart import SmartService, assess_local, candidate_decision, load_config, policies_for
 from .devices import MAC_DEVICE, discover_devices, selected_devices
 from .iphone_collector import IPhoneCollector
 from .matching import MatchDecision, evaluate
@@ -367,6 +367,38 @@ class MonitorService:
                         if smart.enabled else evaluate(item, rules, quotes, region_applied, storage_hint, model))
             return decision.matched and decision.storage == storage_hint and storage_hint in storages
 
+        def check_detail(item: dict[str, Any], region_applied: bool, storage_hint: str) -> dict | None:
+            # Read current settings just as final assessment does; no writes,
+            # notifications or AI calls before a real item ID has been obtained.
+            config = load_config(self.database)
+            if not config.enabled:
+                return None
+            try:
+                _, value = assess_local(
+                    item, rules, latest_entries(self.database, rules.quote_category),
+                    policies_for(self.database, model, rules.quote_category, storage_hint),
+                    config, model, storage_hint, region_applied,
+                )
+                if value["status"] != "rejected":
+                    return None  # Pending candidates still obtain links, including AI review.
+                decision = asdict(self.smart_decision({"result": value, "snapshot": item}))
+                decision.update(threshold_price=value.get("threshold_high"), expected_margin=None)
+                details = []
+                if value.get("base_price") is not None:
+                    details.append(f"基础报价 ¥{value['base_price']:g}")
+                for fee in value.get("deductions", []):
+                    amount = f"¥{fee['min']:g}" if fee['min'] == fee['max'] else f"¥{fee['min']:g}～{fee['max']:g}"
+                    details.append(f"{fee['name']}扣{amount}{'起' if fee.get('open_ended') else ''}")
+                if value.get("value_high") is not None:
+                    details.append(f"扣费后回收参考上限 ¥{value['value_high']:g}")
+                decision["reason"] = "详情判价不符合：" + value["reason"]
+                if details:
+                    decision["reason"] += " · " + "；".join(details)
+                return decision
+            except Exception:
+                logger.warning("详情提前判价失败，继续原有取链接及正式评估流程", exc_info=True)
+                return None
+
         for device_id in selected:
             device = available.get(device_id)
             label = device.name if device else device_id
@@ -380,6 +412,7 @@ class MonitorService:
                     device.udid, device.os_version, keyword, rules.region_city,
                     rules.region_steps, storages, rules.scroll_pages, is_candidate,
                     on_items=stream.for_device(device_id, label) if stream else None,
+                    check_detail=check_detail,
                 )
                 if any(not entry.get("error") for entry in part.passes):
                     successes += 1
@@ -427,7 +460,9 @@ class MonitorService:
             decision = (candidate_decision(item, rules, latest_entries(self.database, rules.quote_category), smart,
                                            bool(meta.get("region_applied")), storage_hint, model)
                         if smart.enabled else evaluate(item, rules, quotes, bool(meta.get("region_applied")), storage_hint, model))
-            if decision.matched:
+            if card.get("detail_rejection"):
+                decision = MatchDecision(**card["detail_rejection"])
+            elif decision.matched:
                 reason = card.get("link_error") or (
                     f"标题容量（{decision.storage}）与当前容量筛选不一致，未进详情取链接"
                     if storage_hint and decision.storage != storage_hint else "未取得详情分享链接，原因未记录"
