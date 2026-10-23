@@ -36,6 +36,7 @@ class MatchDecision:
     code: str = ""
     quote_grade: str | None = None
     quote_basis: str = "fixed"
+    valuation: dict[str, Any] | None = None
 
 
 def extract_storage(title: str) -> str | None:

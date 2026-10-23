@@ -368,21 +368,21 @@ class MonitorService:
             return decision.matched and decision.storage == storage_hint and storage_hint in storages
 
         def check_detail(item: dict[str, Any], region_applied: bool, storage_hint: str) -> dict | None:
-            # Read current settings just as final assessment does; no writes,
-            # notifications or AI calls before a real item ID has been obtained.
-            config = load_config(self.database)
-            if not config.enabled:
-                return None
             try:
+                # Current detail drives both early and final assessment.
+                config = load_config(self.database)
+                if not config.enabled:
+                    return asdict(evaluate(item, rules, eligible_quotes(self.database, rules),
+                                           region_applied, storage_hint, model))
                 _, value = assess_local(
                     item, rules, latest_entries(self.database, rules.quote_category),
                     policies_for(self.database, model, rules.quote_category, storage_hint),
                     config, model, storage_hint, region_applied,
                 )
-                if value["status"] != "rejected":
-                    return None  # Pending candidates still obtain links, including AI review.
                 decision = asdict(self.smart_decision({"result": value, "snapshot": item}))
                 decision.update(threshold_price=value.get("threshold_high"), expected_margin=None)
+                if value["status"] != "rejected":
+                    return decision  # Carry the completed local stage if link extraction fails.
                 details = []
                 if value.get("base_price") is not None:
                     details.append(f"基础报价 ¥{value['base_price']:g}")
@@ -462,12 +462,23 @@ class MonitorService:
                         if smart.enabled else evaluate(item, rules, quotes, bool(meta.get("region_applied")), storage_hint, model))
             if card.get("detail_rejection"):
                 decision = MatchDecision(**card["detail_rejection"])
+            elif card.get("detail_decision"):
+                checked = MatchDecision(**card["detail_decision"])
+                summary = "详情判价待确认" if checked.code == "pending" else "详情判价符合"
+                decision = replace(checked, matched=False, code="link_failed",
+                                   reason=f"{summary}，链接获取失败：{card.get('link_error') or '未取得分享链接'}")
+            elif card.get("acquisition_stage"):
+                stage = card["acquisition_stage"]
+                label_text = "详情读取失败" if stage == "detail" else "核验未完成"
+                decision = replace(decision, matched=False,
+                                   code="detail_failed" if stage == "detail" else "verification_incomplete",
+                                   reason=f"{label_text}：{card.get('link_error') or '尚未完成详情判价'}")
             elif decision.matched:
                 reason = card.get("link_error") or (
                     f"标题容量（{decision.storage}）与当前容量筛选不一致，未进详情取链接"
                     if storage_hint and decision.storage != storage_hint else "未取得详情分享链接，原因未记录"
                 )
-                decision = replace(decision, matched=False, code="no_link", reason=f"列表初筛符合，但未取得商品链接：{reason}")
+                decision = replace(decision, matched=False, code="no_link", reason=f"核验未完成，尚不能判断是否符合推送条件：{reason}")
             digest = hashlib.sha1(f"{storage}|{title}|{price}|{region}".encode("utf-8")).hexdigest()[:12]
             item["item_id"] = f"card:{digest}"
             self._save_run_item(run_id, label, item, decision, False)
@@ -608,10 +619,12 @@ class MonitorService:
             value["status"] == "matched", value["reason"], value["model"], value["storage"],
             quote_entry_id=value.get("quote_entry_id"), quote_price=low,
             quote_grade=value.get("grade"), quote_basis="detail",
+            valuation={key: value.get(key) for key in ("grade", "reference_grade", "base_price", "value_low", "value_high",
+                       "threshold_low", "threshold_high", "max_over_quote", "deductions", "unpriced_conditions", "unpriced_notes")},
             threshold_price=value.get("threshold_low"),
             expected_margin=low - float(item["price"]) if low is not None else None,
             region=item.get("display_region"),
-            code={"matched": "matched", "pending": "pending", "rejected": "smart_rejected",
+            code={"matched": "matched", "pending": "pending", "rejected": value.get("rejection_code") or "smart_rejected",
                   "analysis_failed": "analysis_failed"}[value["status"]],
         )
 
@@ -753,8 +766,8 @@ class MonitorService:
                 INSERT OR REPLACE INTO run_items(
                     run_id, item_id, pass_label, position, title, price, display_region, item_url,
                     publish_time, model, storage, quote_price, threshold_price, expected_margin,
-                    matched, code, decision, new_deal, assessment_id, quote_grade, quote_basis
-                ) VALUES (?, ?, ?, (SELECT COUNT(*) FROM run_items WHERE run_id=?), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    matched, code, decision, new_deal, assessment_id, quote_grade, quote_basis, valuation_json
+                ) VALUES (?, ?, ?, (SELECT COUNT(*) FROM run_items WHERE run_id=?), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     run_id, item["item_id"], pass_label, run_id, item["title"], item["price"],
@@ -762,6 +775,7 @@ class MonitorService:
                     decision.model, decision.storage, decision.quote_price, decision.threshold_price,
                     decision.expected_margin, int(decision.matched), decision.code, decision.reason,
                     int(new_deal), assessment_id, decision.quote_grade, decision.quote_basis,
+                    json.dumps(decision.valuation, ensure_ascii=False) if decision.valuation is not None else None,
                 ),
             )
 

@@ -259,13 +259,18 @@ def candidate_decision(item: dict, rules: Rules, quotes: list[dict], config: Sma
     if expected_model and explicit_models and not model_in_title(expected_model, item["title"]) and normalize_search_text(expected_model) not in {normalize_search_text(m) for m in explicit_models}:
         actual = " / ".join(explicit_models)
         return MatchDecision(False, f"标题明确为 iPhone {actual}，与当前搜索目标 {expected_model} 不一致",
-                             model=actual, storage=extract_storage(item["title"]) or storage_hint, code="other_model")
+                             model=actual, storage=extract_storage(item["title"]) or storage_hint, code="other_model", quote_basis="candidate")
+    explicit_storage = extract_storage(item["title"])
+    if storage_hint and explicit_storage and explicit_storage != storage_hint:
+        return MatchDecision(False, f"商品容量为 {explicit_storage}，与当前筛选容量 {storage_hint} 不符",
+                             model=expected_model, storage=explicit_storage, code="storage_mismatch",
+                             quote_basis="candidate")
     from .local_rules import blocked_title_condition
     blocked = blocked_title_condition(item["title"], config.blocked_conditions)
     if blocked:
         key, evidence = blocked
         return MatchDecision(False, f"标题明确存在不收问题：{FACT_LABELS[key]}（{evidence}）",
-                             model=expected_model, storage=extract_storage(item["title"]) or storage_hint, code="excluded")
+                             model=expected_model, storage=extract_storage(item["title"]) or storage_hint, code="excluded", quote_basis="candidate")
     maxima: dict[tuple[str, str], dict] = {}
     for quote in quotes:
         if quote["grade"] not in config.accepted_grades:
@@ -297,10 +302,10 @@ def price_facts(item: dict, facts: Facts, quotes: list[dict], policies: list[dic
         finding = facts.findings.get(key)
         if finding is None or finding.value is None and not finding.evidence:
             result["defaults"].append(f"{FACT_LABELS[key]}未说明，按正常处理")
-    def reject(reason):
-        return {**result, "status": "rejected", "reason": reason}
+    def reject(reason, code):
+        return {**result, "status": "rejected", "reason": reason, "rejection_code": code}
     if not allowed:
-        return reject("允许的成色没有可用报价")
+        return reject("允许的成色没有可用报价", "no_quote")
     for key in ("model", "storage"):
         finding = facts.findings.get(key)
         if not finding or finding.value is None:
@@ -308,21 +313,21 @@ def price_facts(item: dict, facts: Facts, quotes: list[dict], policies: list[dic
         elif normalize_search_text(finding.value) != normalize_search_text(result[key]):
             # Model may explicitly include the iPhone prefix.
             if key != "model" or normalize_search_text(finding.value).removeprefix("iphone") != normalize_search_text(model):
-                return reject(f"详情{FACT_LABELS[key]}与搜索目标不符")
+                return reject(f"详情{FACT_LABELS[key]}与搜索目标不符", "other_model" if key == "model" else "storage_mismatch")
     for key in ("whole_phone", "full_price"):
         finding = facts.findings.get(key)
         if finding and finding.value == "no":
-            return reject("并非整机或价格不是整机售价")
+            return reject("并非整机或价格不是整机售价", "not_whole" if key == "whole_phone" else "not_full_price")
         if finding and finding.value is None and finding.evidence:
             unknown.append("整机或完整售价存在歧义")
     for key in config.blocked_conditions:
         finding = facts.findings.get(key)
         if finding and finding.value == "yes":
-            return reject(f"存在不接受的问题：{FACT_LABELS[key]}（{finding.evidence}）")
+            return reject(f"存在不接受的问题：{FACT_LABELS[key]}（{finding.evidence}）", "excluded")
     if not facts.grade:
         unknown.append("成色无法确定")
     elif facts.grade not in config.accepted_grades:
-        return reject(f"不接受成色：{facts.grade}")
+        return reject(f"不接受成色：{facts.grade}", "grade_not_accepted")
     if config.require_no_repair and (not facts.findings.get("repaired") or facts.findings["repaired"].value is None):
         unknown.append("拆修情况未明确")
     active, grade_overrides = [], []
@@ -422,13 +427,13 @@ def price_facts(item: dict, facts: Facts, quotes: list[dict], policies: list[dic
             grade = grade_overrides[0]
             result["grade"] = grade
     if grade and grade not in config.accepted_grades:
-        return reject(f"降档后成色不在接受范围：{grade}")
+        return reject(f"降档后成色不在接受范围：{grade}", "grade_not_accepted")
     quote = next((q for q in available if q["grade"] == grade), None)
     reference = quote
     if grade is None:
         reference = next((q for q in allowed if q["grade"] == "小花"), None)
         if reference is None:
-            return reject("成色未确定，且没有可用的小花报价，无法计价")
+            return reject("成色未确定，且没有可用的小花报价，无法计价", "no_quote")
         result["reference_grade"] = "小花"
     elif quote is None:
         unknown.append("未取得确定成色的报价，使用候选上限")
@@ -448,13 +453,13 @@ def price_facts(item: dict, facts: Facts, quotes: list[dict], policies: list[dic
     if unpriced or unpriced_notes:
         result["unpriced_conditions"] = unpriced
         result["unpriced_notes"] = unpriced_notes
-        return reject("已识别影响报价的条件，但缺少适用扣费，无法确定推送门槛")
+        return reject("已识别影响报价的条件，但缺少适用扣费，无法确定推送门槛", "unpriced_condition")
     result["value_high"] = max(0, high)
     result["value_low"] = max(0, low) if not unknown else None
     result["threshold_high"] = max(0, high) + rules.max_over_quote
     result["threshold_low"] = max(0, low) + rules.max_over_quote if not unknown else None
     if float(item["price"]) > result["threshold_high"]:
-        return reject("挂牌价高于可计算的回收价上限加议价空间")
+        return reject("挂牌价高于可计算的回收价上限加议价空间", "price_high")
     if float(item["price"]) < base * rules.min_price_ratio:
         unknown.append("挂牌价异常低，需确认整机实价")
     if not unknown and float(item["price"]) > result["threshold_low"]:
@@ -476,9 +481,9 @@ def assess_local(item: dict, rules: Rules, quotes: list[dict], policies: list[di
     facts = manual.verify(evidence_text(item)) if manual is not None else extract_local(item, config, quotes, rules)
     target_quotes = [quote for quote in quotes if quote["model"] == model and quote["storage"] == storage]
     broad = candidate_decision(item, rules, target_quotes, config, region_applied, storage, model)
-    if not broad.matched:
+    if not broad.matched and broad.code != "price_high":
         return facts, {"status": "rejected", "reason": broad.reason, "model": model,
-                       "storage": storage, "uncertainties": []}
+                       "storage": storage, "uncertainties": [], "rejection_code": broad.code}
     return facts, price_facts(item, facts, quotes, policies, config, rules, model, storage)
 
 

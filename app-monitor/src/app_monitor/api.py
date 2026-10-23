@@ -546,6 +546,8 @@ async def run_detail(run_id: int) -> dict[str, Any]:
     codes: dict[str, int] = {}
     for item in items:
         item["assessment_result"] = json.loads(item["assessment_result"]) if item.get("assessment_result") else None
+        saved_valuation = item.pop("valuation_json", None)
+        item["valuation"] = json.loads(saved_valuation) if saved_valuation else None
         codes[item["code"] or "other"] = codes.get(item["code"] or "other", 0) + 1
     return {**_with_live(monitor_service._run_dict(row)), "items": items, "codes": codes}
 

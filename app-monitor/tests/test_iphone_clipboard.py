@@ -128,6 +128,7 @@ def test_clipboard_never_reads_if_runner_did_not_reach_foreground(monkeypatch):
 def test_clipboard_fallback_stops_before_recopy_if_marker_fails_or_detail_changes(monkeypatch, failure):
     card = PhoneCard("iPhone 13 Pro Max 128G 个人自用", 2000, "翔安区", 20, 400)
     valid = f'''<XCUIElementTypeApplication>
+      <XCUIElementTypeOther name="分享按钮" visible="true" />
       <XCUIElementTypeTextView name="{card.title}" visible="true" />
       <XCUIElementTypeStaticText name="2000" y="157" visible="true" />
     </XCUIElementTypeApplication>'''

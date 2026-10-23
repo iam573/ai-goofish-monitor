@@ -351,7 +351,7 @@ def test_share_keeps_copied_id_when_returned_sort_bar_is_hidden(monkeypatch, cli
             pass
 
     class Driver:
-        page_source = seller_source('<XCUIElementTypeImage name="鱼小铺" x="136" y="108" width="40" height="15" visible="true" />')
+        page_source = seller_source('<XCUIElementTypeImage name="鱼小铺" x="136" y="108" width="40" height="15" visible="true" />').replace('</XCUIElementTypeApplication>', '<XCUIElementTypeStaticText name="3200" y="157" visible="true" /></XCUIElementTypeApplication>')
 
         def find_elements(self, *args):
             return [Element()]
@@ -545,7 +545,7 @@ def test_candidate_rejection_continues_scrolling_when_returned_sort_bar_is_hidde
     result = collector._collect("test", "", "iPhone 17", "厦门", [], ["512"], 1, lambda *args: True)
     assert driver.swipes == 1
     assert result.passes[0]["error"] is None and result.passes[0]["candidates"] == 1
-    assert any(not action["success"] and action["action"] == "复制候选链接"
+    assert any(not action["success"] and action["action"] == "读取详情"
                for action in result.passes[0]["actions"])
 
 
@@ -622,16 +622,17 @@ def test_detail_identity_diagnostics_distinguish_title_price_and_loading():
     </XCUIElementTypeApplication>'''
     assert detail_mismatch_reason(source,card) is None
     reason=detail_mismatch_reason(source.replace('3,260.00','3,200.00'),card)
-    assert '价格不匹配' in reason and '¥3260' in reason and '¥3200' in reason and '标题不匹配' not in reason
-    assert '标题不匹配' in detail_mismatch_reason(source.replace(card.title,'iPhone 15 Pro 128G'),card)
-    assert '未读到正文' in detail_mismatch_reason('<XCUIElementTypeApplication/>',card)
+    assert '售价发生变化' in reason and '¥3260' in reason and '¥3200' in reason and '标题不匹配' not in reason
+    assert '正文发生变化' in detail_mismatch_reason(source.replace(card.title,'iPhone 15 Pro 128G'),card)
+    assert '未读到详情正文' in detail_mismatch_reason('<XCUIElementTypeApplication/>',card)
     assert not detail_matches(source.replace('visible="true"','visible="false"'),card)
 
 
 @pytest.mark.parametrize('delayed',[True,False])
-def test_share_waits_for_identity_and_preserves_failed_comparison(monkeypatch,delayed):
+def test_share_waits_for_detail_and_uses_its_actual_price(monkeypatch,delayed):
     card=PhoneCard('iPhone 16 Plus 黑色 128G 个人自用',3260,'湖里区',20,400)
     full=f'''<XCUIElementTypeApplication>
+      <XCUIElementTypeOther name="分享按钮" visible="true" />
       <XCUIElementTypeTextView name="{card.title}" visible="true" />
       <XCUIElementTypeStaticText name="3260" y="157" visible="true" />
     </XCUIElementTypeApplication>'''
@@ -659,13 +660,10 @@ def test_share_waits_for_identity_and_preserves_failed_comparison(monkeypatch,de
     monkeypatch.setattr('app_monitor.iphone_collector._pasteboard',lambda _, **kwargs:'https://www.goofish.com/item?id=1091531543430')
     wait = collector._wait_for_source
     monkeypatch.setattr(collector, "_wait_for_source", lambda *args, **kwargs: wait(*args, **(kwargs | {"timeout": 0})))
-    actions=[]
+    actions=[]; observed={}
+    assert collector._share_item_id(driver,'test',card,actions,observed)=='1091531543430'
+    assert observed['price'] == (3260 if delayed else 3200)
+    assert copies
     if delayed:
-        assert collector._share_item_id(driver,'test',card,actions)=='1091531543430'
-        assert driver.reads>=3 and copies
-    else:
-        with pytest.raises(RuntimeError,match='价格不匹配.*3260.*3200'):
-            collector._share_item_id(driver,'test',card,actions)
-        assert driver.reads==6 and copies==[]
-        assert any(a.get('success') is False and '3200' in a.get('error','') for a in actions)
+        assert driver.reads>=3
     assert returns==[True]

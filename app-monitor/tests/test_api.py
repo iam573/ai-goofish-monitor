@@ -5,6 +5,32 @@ from app_monitor.devices import Device
 from conftest import add_quotes
 
 
+async def test_run_detail_exposes_saved_early_valuation_and_keeps_old_rows_unknown(database, monkeypatch):
+    import json
+    from app_monitor.db import utc_now
+    from app_monitor.matching import MatchDecision
+    from app_monitor.service import MonitorService
+
+    monkeypatch.setattr(api, "database", database)
+    saved = {"reference_grade": "小花", "grade": None, "base_price": 3550,
+             "value_low": None, "value_high": 3550, "threshold_high": 3750, "deductions": []}
+    with database.connect() as connection:
+        run_id = connection.execute("INSERT INTO search_runs(model, keyword, started_at) VALUES ('16 Pro','iPhone 16 Pro',?)", (utc_now(),)).lastrowid
+    service = MonitorService(database, None, None)
+    for key, valuation in [("old", None), ("new", saved)]:
+        service._save_run_item(run_id, "128", {"item_id": key, "title": "iPhone 16 Pro 128G", "price": 3844,
+            "display_region": "厦门", "item_url": "", "publish_time": None},
+            MatchDecision(False, "价格超出", code="price_high", quote_basis="detail", valuation=valuation), False)
+    # Migration is idempotent and does not reconstruct the old row's snapshot.
+    database.initialize()
+    response = await api.run_detail(run_id)
+    items = {item["item_id"]: item for item in response["items"]}
+    assert items["old"]["valuation"] is None and items["new"]["valuation"] == saved
+    assert "valuation_json" not in items["new"] and items["new"]["assessment_id"] is None
+    with database.connect() as connection:
+        assert json.loads(connection.execute("SELECT valuation_json FROM run_items WHERE item_id='new'").fetchone()[0]) == saved
+
+
 async def _noop():
     return None
 

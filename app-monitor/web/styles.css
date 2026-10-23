@@ -480,7 +480,7 @@ th.num, td.num { text-align: right; }
 .run-capacity { display: flex; align-items: baseline; gap: 12px; margin-bottom: 16px; }
 .run-filter-label { flex: none; color: var(--muted); font-size: 12px; }
 .run-capacity .chips { margin: 0; }
-.run-result-stats { display: flex; gap: 22px; border-bottom: 1px solid var(--line); }
+.run-result-stats { display: flex; flex-wrap: wrap; gap: 22px; border-bottom: 1px solid var(--line); }
 .run-result-stat { position: relative; display: inline-flex; align-items: center; justify-content: center; gap: 7px; padding: 10px 2px 13px; border: 0; border-radius: 0; background: transparent; color: var(--muted); font-size: 13px; font-weight: 500; white-space: nowrap; }
 .run-result-stat:hover { filter: none; color: var(--ink); }
 .run-result-stat strong { min-width: 20px; padding: 1px 5px; border-radius: 5px; background: var(--surface-3); color: var(--muted); font-size: 10px; font-weight: 600; font-variant-numeric: tabular-nums; }
@@ -530,21 +530,33 @@ th.num, td.num { text-align: right; }
 .run-item-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; margin-top: 6px; color: var(--muted); font-size: 12px; }
 .run-item-reason { margin-top: 4px; color: var(--muted); font-size: 12px; }
 .run-item-quote-detail { margin-top: 3px; }
+.run-item-quote-line { display: flex; flex-wrap: wrap; gap: 4px 16px; }
+.run-item-quote-line strong { color: var(--ink-2); font-weight: 650; font-variant-numeric: tabular-nums; }
+.run-item-quote-note { margin-top: 3px; font-size: 11px; }
+.run-item-stage { border-left: 1px solid var(--line); padding-left: 10px; font-weight: 500; }
+.run-item-reason.price-excess { color: var(--warn); font-weight: 600; }
 .run-item-reason b.bad { font-weight: 650; }
 .run-item-price { flex: none; font-size: 17px; font-weight: 750; font-variant-numeric: tabular-nums; }
 .run-item.hit .run-item-price { color: var(--brand); }
 .run-item-footer { grid-column: 1 / -1; justify-self: end; }
 button.run-item-evidence { display: inline-flex; align-items: center; gap: 5px; padding: 5px 8px; min-height: 28px; border-color: var(--line-soft); border-radius: 7px; background: var(--surface-2); color: var(--ink-2); font-size: 12px; font-weight: 500; line-height: 1.4; white-space: nowrap; }
 button.run-item-evidence:hover { filter: none; background: var(--brand-soft); border-color: var(--brand-line); color: var(--brand); }
+.run-item-evidence-preview > summary { display: inline-block; padding: 5px 8px; border: 1px solid var(--line-soft); border-radius: 7px; background: var(--surface-2); color: var(--ink-2); font-size: 12px; cursor: pointer; list-style: none; }
+.run-item-evidence-preview > summary::-webkit-details-marker { display: none; }
+.run-item-evidence-preview { text-align: right; max-width: 100%; }
+.run-item-price-details { text-align: left; margin-top: 8px; padding: 10px 12px; border: 1px solid var(--line-soft); border-radius: 8px; background: var(--surface-2); color: var(--ink-2); font-size: 12px; line-height: 1.8; overflow-wrap: anywhere; }
 .item-badge { padding: 1px 8px; border-radius: 6px; background: var(--surface-3); color: var(--muted); font-weight: 650; }
 .item-badge.hit { background: var(--brand); color: var(--brand-ink); }
 .item-badge.muted { font-weight: 500; }
 .item-badge.price_high { background: var(--warn-soft); color: var(--warn); }
 .item-badge.region, .item-badge.other_model { background: var(--info-soft); color: var(--info); }
-.item-badge.no_link { background: var(--brand-soft); color: var(--brand); box-shadow: inset 0 0 0 1px var(--brand-line); }
+.item-badge.no_link, .item-badge.detail_failed, .item-badge.link_failed, .item-badge.analysis_failed, .item-badge.verification_incomplete { background: var(--surface-3); color: var(--muted); }
 span.run-item-title { cursor: default; }
 span.run-item-title:hover { color: var(--ink); text-decoration: none; }
 .item-badge.excluded, .item-badge.too_cheap { background: var(--bad-soft); color: var(--bad); }
+.item-badge.rejected { background: var(--warn-soft); color: var(--warn); }
+.item-badge.incomplete { background: var(--surface-3); color: var(--muted); box-shadow: none; }
+.item-badge.pending { background: var(--info-soft); color: var(--info); }
 .item-badge.notification-failed { background: var(--bad-soft); color: var(--bad); }
 .pass-tag { padding: 0 6px; border: 1px solid var(--line); border-radius: 5px; }
 .run-log { margin-top: 24px; padding-top: 16px; border-top: 1px solid var(--line-soft); }

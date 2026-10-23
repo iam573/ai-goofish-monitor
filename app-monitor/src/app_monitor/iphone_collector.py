@@ -142,14 +142,41 @@ def share_confirmation_text(source: str) -> str:
     return ""
 
 
+def current_detail(source: str) -> dict[str, Any]:
+    """Read the opened product, without comparing it with the list summary."""
+    root = ET.fromstring(source)
+    visible = [node for node in root.iter() if node.get("visible") != "false"]
+    controls = {value for node in visible for value in (node.get("name"), node.get("label"), _text(node))}
+    if not controls.intersection({"分享按钮", "返回按钮"}) or "确定" in controls:
+        raise ValueError("尚未进入商品详情页")
+    content = detail_content(source)
+    if not content["description"].strip():
+        raise ValueError("未读到详情正文")
+    avatar = next((node for node in visible if "用户头像" in {node.get("name"), node.get("label")}), None)
+    price_top = max(100, float(avatar.get("y") or 0) + float(avatar.get("height") or 0)) if avatar is not None else 100
+    prices = set()
+    for node in visible:
+        if node.tag not in {"XCUIElementTypeStaticText", "XCUIElementTypeOther"}:
+            continue
+        if not price_top <= float(node.get("y") or 0) < 300:
+            continue
+        amount = re.fullmatch(r"[¥￥]?\s*(\d+(?:\.\d{1,2})?)\s*元?", _text(node).replace(',', ''))
+        if amount and float(amount.group(1)) > 0:
+            prices.add(float(amount.group(1)))
+    if len(prices) != 1:
+        raise ValueError("未读到详情售价" if not prices else "详情售价存在多个数值，尚不能确认")
+    return {**content, "title": content["description"][:300], "price": prices.pop()}
+
+
 def detail_mismatch_reason(source: str, card: PhoneCard) -> str | None:
+    """Check continuity against a captured DETAIL, never against a list card."""
     detail = ET.fromstring(source)
     expected = normalize_search_text(card.title)
-    descriptions = [_text(node) for node in detail.iter("XCUIElementTypeTextView")
-                    if node.get("visible") != "false" and _text(node)]
+    descriptions = list(dict.fromkeys(_text(node) for node in detail.iter("XCUIElementTypeTextView")
+                                      if node.get("visible") != "false" and _text(node)))
     problems = []
-    if len(expected) < 12 or not any(normalize_search_text(value).startswith(expected) for value in descriptions):
-        problems.append(f"标题不匹配（列表：{card.title[:70]}；详情：{descriptions[0][:70] if descriptions else '未读到正文'}）")
+    if not expected or not normalize_search_text("\n\n".join(descriptions)).startswith(expected):
+        problems.append("已读详情正文发生变化" if descriptions else "未读到详情正文")
     prices = []
     for node in detail.iter():
         if node.get("visible") == "false" or not 100 <= int(node.get("y") or 0) < 300:
@@ -159,7 +186,7 @@ def detail_mismatch_reason(source: str, card: PhoneCard) -> str | None:
             prices.append(float(value.group(1)))
     if card.price not in prices:
         observed = ' / '.join(f"¥{value:g}" for value in dict.fromkeys(prices)) or '未读到详情价'
-        problems.append(f"价格不匹配（列表 ¥{card.price:g}；详情 {observed}）")
+        problems.append(f"已读详情售价发生变化（原 ¥{card.price:g}；当前 {observed}）")
     return '；'.join(problems) or None
 
 
@@ -743,24 +770,28 @@ class IPhoneCollector:
                                 emit_safely(on_items, cards=[dict(raw)], **card_meta)
                                 continue
                             candidates += 1
-                            seller_info: dict[str, Any] = {}
+                            seller_info: dict[str, Any] = {"acquisition_stage": "detail"}
                             try:
                                 list_changed = True
                                 detail_gate = (lambda item: check_detail(item, result.region_applied, storage)) if check_detail else None
                                 item_id = self._share_item_id(driver, udid, card, actions, seller_info,
                                                               check_detail=detail_gate)
                             except Exception as exc:
-                                logger.warning("iPhone 候选分享失败 title=%s error=%s", card.title[:40], exc)
-                                actions.append({"action": "复制候选链接", "target": card.title[:40],
+                                logger.warning("iPhone 候选处理失败 stage=%s title=%s error=%s",
+                                               seller_info.get("acquisition_stage"), card.title[:40], exc)
+                                stage = {"detail": "读取详情", "valuation": "详情判价", "link": "获取商品链接"}.get(seller_info.get("acquisition_stage"), "处理详情")
+                                actions.append({"action": stage, "target": card.title[:40],
                                                 "success": False, "error": _brief_error(exc)})
-                                emit_safely(on_items, cards=[{**raw, "link_error": _brief_error(exc)}], **card_meta)
+                                emit_safely(on_items, cards=[{**raw, **seller_info, "link_error": _brief_error(exc)}], **card_meta)
                                 if not is_search_results(driver.page_source):
                                     raise RuntimeError("分享失败后未回到搜索列表，停止本机采集") from exc
                                 continue
                             rejection = seller_info.pop("detail_rejection", None)
                             if rejection:
-                                emit_safely(on_items, cards=[{**raw, "detail_rejection": rejection}], **card_meta)
+                                emit_safely(on_items, cards=[{**raw, **seller_info, "detail_rejection": rejection}], **card_meta)
                             elif item_id:
+                                seller_info.pop("detail_decision", None)
+                                seller_info.pop("acquisition_stage", None)
                                 item = {**raw, **seller_info, "item_id": item_id,
                                         "item_url": f"https://www.goofish.com/item?id={item_id}",
                                         "image_urls": [], "source_storage": storage, "source_pass": "新发"}
@@ -774,7 +805,7 @@ class IPhoneCollector:
                                 logger.info("iPhone 候选关联 item_id=%s price=%s title=%s",
                                             item_id, card.price, card.title[:60])
                             else:
-                                emit_safely(on_items, cards=[{**raw, "link_error": "分享内容里没有商品 ID"}], **card_meta)
+                                emit_safely(on_items, cards=[{**raw, **seller_info, "link_error": "分享内容里没有商品 ID"}], **card_meta)
                 except Exception as exc:
                     error = _brief_error(exc)
                     actions.append({"action": "容量筛选或采集", "target": storage,
@@ -1412,35 +1443,37 @@ class IPhoneCollector:
         actions.append({"action": "打开候选详情", "target": card.title[:60], "success": True})
         operation_error = None
         try:
-            for _ in range(8):
-                share = self._find(driver, "分享按钮")
-                if share:
-                    break
-                time.sleep(0.4)
-            else:
-                raise RuntimeError("进入详情后找不到分享按钮")
-            # The share button can appear before the description and price load.
+            # The list is only an entry point. Its summary and old price are
+            # not identity evidence for the current product's description.
+            read_error = "详情尚未加载"
             for attempt in range(6):
                 source = driver.page_source
-                if detail_matches(source, card):
+                try:
+                    observed = current_detail(source)
+                except (ValueError, ET.ParseError) as exc:
+                    read_error = str(exc)
+                else:
                     break
                 if attempt < 5:
                     time.sleep(0.35)
             else:
-                reason = detail_mismatch_reason(source, card) or "详情身份校验未通过"
-                actions.append({"action": "核对详情标题和价格", "target": f"¥{card.price:g}",
-                                "success": False, "error": reason})
-                raise RuntimeError(f"详情身份校验失败：{reason}；已跳过复制")
-            actions.append({"action": "核对详情标题和价格", "target": f"¥{card.price:g}", "success": True})
-            seller_info.update(detail_content(source))
+                actions.append({"action": "读取详情正文与售价", "success": False, "error": read_error})
+                raise RuntimeError(f"详情读取失败：{read_error}")
+            seller_info.update(observed)
+            # Only later app switches compare against this captured detail.
+            detail_card = PhoneCard(observed["description"], observed["price"], card.region, card.x, card.y)
+            actions.append({"action": "读取详情正文与售价", "target": f"¥{observed['price']:g}", "success": True})
+            seller_info["acquisition_stage"] = "valuation"
             if check_detail:
-                rejection = check_detail({"title": card.title, "price": card.price,
-                                          "display_region": card.region, **seller_info})
-                if rejection:
-                    seller_info["detail_rejection"] = rejection
-                    actions.append({"action": "详情提前判价", "target": rejection["reason"],
+                decision = check_detail({"display_region": card.region, **observed})
+                if decision:
+                    seller_info["detail_decision"] = decision
+                if decision and not decision.get("matched") and decision.get("code") != "pending":
+                    seller_info["detail_rejection"] = decision
+                    actions.append({"action": "详情判价", "target": decision["reason"],
                                     "method": "不符合条件，跳过分享取链接", "success": True})
                     return ""
+            seller_info["acquisition_stage"] = "link"
             seller = detail_seller(source)
             # Seller header accessibility may become visible shortly after the description.
             for _ in range(2):
@@ -1448,7 +1481,7 @@ class IPhoneCollector:
                     break
                 time.sleep(0.3)
                 source = driver.page_source
-                if not detail_matches(source, card):
+                if not detail_matches(source, detail_card):
                     raise RuntimeError("读取卖家信息时详情页发生变化，已跳过复制")
                 seller = detail_seller(source)
             seller_method = "页面树"
@@ -1474,10 +1507,10 @@ class IPhoneCollector:
             if not after:
                 method = "标记后重新复制并读剪贴板"
                 self._close_share_sheet(driver)
-                self._wait_for_source(driver, lambda xml: detail_matches(xml, card),
+                self._wait_for_source(driver, lambda xml: detail_matches(xml, detail_card),
                                       "备用复制前详情身份发生变化，已跳过复制")
                 marker = _prepare_pasteboard(driver, settings=self.settings)
-                self._wait_for_source(driver, lambda xml: detail_matches(xml, card),
+                self._wait_for_source(driver, lambda xml: detail_matches(xml, detail_card),
                                       "剪贴板准备后详情身份发生变化，已跳过复制")
                 actions.append({"action": "准备手机剪贴板", "target": "本次复制标记已核验", "success": True})
                 # A second copy AFTER marker preparation is mandatory. Never

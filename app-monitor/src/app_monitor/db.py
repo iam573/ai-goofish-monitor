@@ -192,6 +192,7 @@ class Database:
             )
             _add_columns(connection, "run_items", {
                 "assessment_id": "INTEGER", "quote_grade": "TEXT", "quote_basis": "TEXT",
+                "valuation_json": "TEXT",
             })
             _add_columns(
                 connection,

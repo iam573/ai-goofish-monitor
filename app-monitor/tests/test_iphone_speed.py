@@ -3,7 +3,7 @@ from types import SimpleNamespace
 import pytest
 
 from app_monitor.config import Settings
-from app_monitor.iphone_collector import IPhoneCollector, PhoneCard, _PageWaitTimeout, parse_cards
+from app_monitor.iphone_collector import IPhoneCollector, PhoneCard, _PageWaitTimeout, current_detail, detail_matches, parse_cards
 
 
 @pytest.fixture
@@ -91,6 +91,52 @@ def test_clipboard_fallback_recopies_after_marker(share_phone):
     assert events == ["copy1", "marker", "copy2", "read", "returned"]
 
 
+def test_summary_difference_and_old_list_price_do_not_block_detail_or_clipboard(share_phone):
+    collector, driver, card, state, events = share_phone
+    state.native = False
+    summary = PhoneCard("苹果12Pro原装128G成色95新性价比高便宜出", 1600, card.region, card.x, card.y)
+    observed = {}
+    checked = []
+    assert collector._share_item_id(driver, "test", summary, seller_info=observed,
+                                   check_detail=lambda item: checked.append(item)) == "1091531543430"
+    assert observed["price"] == checked[0]["price"] == 1350
+    assert "新原装电芯" in checked[0]["description"]
+    assert observed["title"] != summary.title
+    assert events == ["copy1", "marker", "copy2", "read", "returned"]
+
+
+def test_current_detail_reads_split_body_and_uses_one_actual_price():
+    source = '''<XCUIElementTypeApplication>
+      <XCUIElementTypeOther name="分享按钮" visible="true" />
+      <XCUIElementTypeOther name="用户头像" y="99" height="32" visible="true" />
+      <XCUIElementTypeOther name="999999" y="108" visible="true" />
+      <XCUIElementTypeStaticText name="￥2,180.00" y="157" visible="true" />
+      <XCUIElementTypeOther name="2180元" y="160" visible="true" />
+      <XCUIElementTypeStaticText name="2400" y="157" visible="false" />
+      <XCUIElementTypeTextView name="苹果 iPhone 13 Pro Max 128G 白色 国行" visible="true" />
+      <XCUIElementTypeTextView name="苹果 iPhone 13 Pro Max 128G 白色 国行" visible="true" />
+      <XCUIElementTypeTextView name="电池健康81%，边框有磕碰，具体看图，适合日常使用或备用机" visible="true" />
+    </XCUIElementTypeApplication>'''
+    item = current_detail(source)
+    assert item["price"] == 2180 and "具体看图" in item["description"]
+    assert item["title"].startswith("苹果 iPhone 13 Pro Max")
+    assert detail_matches(source, PhoneCard(item["description"], item["price"], "", 0, 0))
+    with pytest.raises(ValueError, match="多个数值"):
+        current_detail(source.replace('name="2400" y="157" visible="false"', 'name="2400" y="157" visible="true"'))
+
+
+@pytest.mark.parametrize("missing", ["body", "price", "detail_page"])
+def test_detail_readiness_does_not_substitute_list_content_for_missing_fields(missing):
+    source = '''<XCUIElementTypeApplication>
+      <XCUIElementTypeOther name="分享按钮" visible="true" />
+      <XCUIElementTypeStaticText name="1350" y="157" visible="true" />
+      <XCUIElementTypeTextView name="iPhone 12 Pro 128G 实际详情" visible="true" />
+    </XCUIElementTypeApplication>'''
+    token = {"body": 'name="iPhone 12 Pro 128G 实际详情"', "price": 'name="1350"', "detail_page": 'name="分享按钮"'}[missing]
+    with pytest.raises(ValueError):
+        current_detail(source.replace(token, 'name=""'))
+
+
 def test_clipboard_fallback_rejects_first_copy_when_second_copy_fails(share_phone):
     collector, driver, card, state, events = share_phone
     state.native = state.second_copy = False
@@ -116,10 +162,11 @@ def test_old_native_confirmation_is_rejected_before_tap(share_phone):
     assert events == ["returned"]
 
 
-def test_rejected_detail_returns_without_seller_or_share_work(share_phone):
+def test_rejected_detail_returns_without_seller_or_share_work(share_phone, monkeypatch):
     collector, driver, card, _, events = share_phone
     rejection = {"reason": "扣费后价格不符合", "matched": False}
     seller = {}
+    monkeypatch.setattr(collector, "_find", lambda *args: pytest.fail("判价排除前不需要查找分享入口"))
 
     def check(item):
         assert "新原装电芯" in item["description"] and item["price"] == 1350
@@ -129,15 +176,17 @@ def test_rejected_detail_returns_without_seller_or_share_work(share_phone):
     assert seller["detail_rejection"] == rejection and events == ["returned"]
 
 
-def test_pending_detail_keeps_link_path_and_identity_mismatch_never_calls_gate(share_phone):
+def test_current_detail_price_reaches_gate_even_when_list_price_differs(share_phone):
     collector, driver, card, state, events = share_phone
     checked = []
     assert collector._share_item_id(driver, "test", card,
                                    check_detail=lambda item: checked.append(item)) == "1091531543430"
     assert len(checked) == 1
     state.switched = True
-    with pytest.raises(RuntimeError, match="详情身份校验失败"):
-        collector._share_item_id(driver, "test", card, check_detail=lambda _: pytest.fail("wrong detail"))
+    def reject_current(item):
+        assert item['price'] == 1500
+        return {'matched': False, 'code': 'price_high', 'reason': '详情价超出'}
+    assert collector._share_item_id(driver, "test", card, check_detail=reject_current) == ""
     assert events.count("copy1") == 1
 
 

@@ -184,9 +184,9 @@ async def test_detail_gate_prices_repairs_before_links_and_preserves_pending(dat
     class Phone:
         async def collect(self, *args, check_detail=None, on_items=None, **kwargs):
             decision = check_detail(detail, True, "128")
-            assert bool(decision) == rejected
-            if decision:
-                assert decision["code"] == "smart_rejected" and decision["quote_basis"] == "detail"
+            assert (decision["code"] == "price_high") == rejected
+            if rejected:
+                assert decision["code"] == "price_high" and decision["quote_basis"] == "detail"
                 assert decision["quote_price"] is None and decision["threshold_price"] == 1200
                 on_items([], cards=[{**raw, "detail_rejection": decision}], storage="128",
                          region_applied=True, filter_applied=True)
@@ -200,9 +200,13 @@ async def test_detail_gate_prices_repairs_before_links_and_preserves_pending(dat
         assert connection.execute("SELECT COUNT(*) FROM smart_assessments").fetchone()[0] == 0
     assert notifier.sent == [] and len(rows) == int(rejected)
     if rejected:
-        assert rows[0]["code"] == "smart_rejected" and rows[0]["assessment_id"] is None
+        assert rows[0]["code"] == "price_high" and rows[0]["assessment_id"] is None
         assert "扣¥300" in rows[0]["decision"] and "未取得商品链接" not in rows[0]["decision"]
         assert "参考上限 ¥1000" in rows[0]["decision"] and rows[0]["item_url"] == ""
+        saved = json.loads(rows[0]["valuation_json"])
+        assert saved["reference_grade"] == "小花" and saved["grade"] is None
+        assert saved["value_low"] is None and saved["value_high"] == 1000
+        assert saved["base_price"] == 1300 and saved["deductions"][0]["min"] == 300
 
 
 async def test_detail_gate_failure_keeps_original_collection_path(database, monkeypatch):
@@ -217,6 +221,62 @@ async def test_detail_gate_failure_keeps_original_collection_path(database, monk
     class Phone:
         async def collect(self, *args, check_detail=None, **kwargs):
             assert check_detail({"title": "iPhone 15 Pro 256G", "price": 3500}, True, "256") is None
+            return CollectResult(items=[], passes=[{"error": None}])
+
+    service.iphone_collector = Phone()
+    await service._collect_sources("iPhone 15 Pro", "15 Pro", ["256"], load_rules(database))
+
+
+@pytest.mark.parametrize("case, expected, text", [
+    ("unread", "detail_failed", "详情读取失败"),
+    ("unpriced", "verification_incomplete", "核验未完成"),
+    ("matched", "link_failed", "详情判价符合"),
+    ("pending", "link_failed", "详情判价待确认"),
+    ("rejected", "smart_rejected", "扣费后价格不符合"),
+])
+async def test_run_records_distinguish_detail_failure_link_failure_and_rejection(database, case, expected, text):
+    from dataclasses import asdict
+    from app_monitor.matching import MatchDecision
+    service, notifier = setup(database)
+    raw = {"title": "iPhone 15 Pro 256G 实际详情", "price": 3500, "display_region": "厦门"}
+    decision = asdict(MatchDecision(case == "matched", "扣费后价格不符合" if case == "rejected" else "详情判价",
+                                   model="15 Pro", storage="256", quote_price=4000,
+                                   quote_basis="detail", code="smart_rejected" if case == "rejected" else case))
+
+    class Phone:
+        async def collect(self, *args, on_items=None, **kwargs):
+            card = {**raw, "link_error": "本次未取得链接", "acquisition_stage": "detail" if case == "unread" else "link"}
+            if case in {"matched", "pending"}:
+                card["detail_decision"] = decision
+            elif case == "rejected":
+                card["detail_rejection"] = decision
+            on_items([], cards=[card], storage="256", region_applied=True, filter_applied=True)
+            return CollectResult(items=[], passes=[{"storage": "256", "error": None}])
+
+    service.iphone_collector = Phone()
+    run = await service.run_model("15 Pro", "256")
+    with database.connect() as connection:
+        row = connection.execute("SELECT * FROM run_items WHERE run_id=?", (run["run_id"],)).fetchone()
+    assert row["code"] == expected and text in row["decision"]
+    assert row["matched"] == 0 and row["item_url"] == "" and notifier.sent == []
+
+
+@pytest.mark.parametrize("description, price, code", [
+    ("iPhone 15 Pro 256G 国行，99新无拆修", 4100, "matched"),
+    ("iPhone 15 Pro 256G 国行，99新无拆修", 5100, "price_high"),
+    ("iPhone 15 Pro Max 256G 国行，99新无拆修", 3500, "other_model"),
+    ("iPhone 15 Pro 512G 国行，99新无拆修", 3500, "storage_mismatch"),
+])
+async def test_actual_detail_drives_price_model_and_capacity_decision(database, description, price, code):
+    service, _ = setup(database)
+    database.state_set("smart_config", {"enabled": True})
+    add_quotes(database, [("15 Pro", "256", "靓机", 4500), ("15 Pro", "256", "小花", 4000)])
+
+    class Phone:
+        async def collect(self, *args, check_detail=None, **kwargs):
+            result = check_detail({"title": description, "description": description, "price": price,
+                                   "display_region": "厦门"}, True, "256")
+            assert result["code"] == code
             return CollectResult(items=[], passes=[{"error": None}])
 
     service.iphone_collector = Phone()

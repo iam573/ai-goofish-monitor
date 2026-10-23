@@ -1,5 +1,6 @@
 import { initSmart } from "./smart-ui.js";
 import { capacityOptions, filterRunItems, normalizeCapacity } from "./run-filters.js";
+import { codeLabels, codeOrder, runOutcome } from "./run-outcome.js";
 const state = { products: [], rules: null, overview: null, targets: [], devices: [] };
 const gradeOrder = ["靓机", "小花", "大花", "外爆", "内爆可测"];
 
@@ -631,18 +632,12 @@ const runView = {
   seen: new Map(),       // 每条记录已显示过的商品，用来高亮新出现的
 };
 const triggerLabels = { schedule: "定时", manual: "手动", inject: "调试" };
-const codeLabels = {
-  matched: "命中", price_high: "价格偏高", region: "地区不符", unrecognized: "无法识别",
-  excluded: "排除词", too_cheap: "疑似引流", no_quote: "无报价", other_model: "其他机型", other: "其他",
-  no_link: "候选·无链接", pending: "待确认", smart_rejected: "判价不符合", analysis_failed: "分析失败",
-};
 /** 每一轮的名字：按容量筛选时显示容量（「256G」），否则显示按钮名（「新发」）。 */
 function passName(p) {
   const name = p.storage ? displayStorage(p.storage) : p.label;
   return p.device_name ? `${p.device_name} · ${name}` : name;
 }
 
-const codeOrder = ["matched", "pending", "analysis_failed", "smart_rejected", "no_link", "price_high", "region", "other_model", "unrecognized", "excluded", "too_cheap", "no_quote", "other"];
 
 function unitName(run) {
   return `${run.model}${run.storage ? ` ${displayStorage(run.storage)}` : ""}`;
@@ -721,55 +716,69 @@ function stepChip(ok, label, detail) {
   return `<span class="step-chip ${ok === true ? "ok" : ok === false ? "bad" : ""}" title="${escapeHtml(detail || "")}">${icon} ${escapeHtml(label)}</span>`;
 }
 
-function runItemQuote(item) {
-  const value = item.assessment_result;
-  const basis = value ? "detail" : item.quote_basis || (item.code === "no_link" ? "candidate" : "fixed");
-  const grade = value?.grade || item.quote_grade;
-  const gradeLabel = escapeHtml(grade || (basis === "detail" ? "成色待确认" : "成色未记录"));
+function runItemQuote(item, outcome = runOutcome(item)) {
+  if (outcome.basis !== "detail" && outcome.low == null && outcome.high == null && outcome.limit == null) return "";
   const amount = number => `¥${money(number)}`;
-  const limit = value?.threshold_low ?? item.threshold_price;
-  const threshold = limit != null ? ` · ${basis === "candidate" ? "初筛" : "推送"}上限 ${amount(limit)}` : "";
-  if (basis === "detail") {
-    const low = value?.value_low ?? item.quote_price;
-    const high = value?.value_high ?? low;
-    const range = low != null ? (high != null && high !== low ? `${amount(low)}–${amount(high)}` : amount(low))
-      : high != null ? `≤ ${amount(high)}（待确认）` : "待确认";
-    const details = [];
-    if (value?.base_price != null) details.push(`基础报价${value.reference_grade ? `（${escapeHtml(value.reference_grade)}参考）` : ""} ${amount(value.base_price)}`);
-    for (const deduction of value?.deductions || []) {
-      const fee = deduction.min === deduction.max ? amount(deduction.min) : `${amount(deduction.min)}–${amount(deduction.max)}`;
-      details.push(`${escapeHtml(deduction.name)} −${fee}${deduction.open_ended ? "起" : ""}`);
+  const notes = [];
+  let reference;
+  if (outcome.basis === "candidate") {
+    reference = outcome.high == null ? null : `列表筛选参考 <strong>${amount(outcome.high)}</strong>`;
+    if (outcome.grade) notes.push(`按最高允许档位（${escapeHtml(outcome.grade)}）筛选`);
+    notes.push(outcome.bucket === "rejected" ? "未进入详情判价" : "尚未完成详情判价");
+  } else {
+    const range = outcome.low != null ? (outcome.high != null && outcome.high !== outcome.low
+      ? `${amount(outcome.low)}–${amount(outcome.high)}` : amount(outcome.low))
+      : outcome.high != null ? `≤ ${amount(outcome.high)}` : "暂无可用估值";
+    reference = `回收参考 <strong>${range}</strong>`;
+    notes.push(outcome.basis === "fixed" ? (outcome.grade ? `按${escapeHtml(outcome.grade)}档参考` : "固定档位参考")
+      : outcome.grade ? `成色：${escapeHtml(outcome.grade)}` : "成色待确认");
+    if (outcome.referenceGrade) notes.push(`按${escapeHtml(outcome.referenceGrade)}参考`);
+    if (outcome.code === "unpriced_condition") notes.push("缺少适用扣费，无法计价");
+    else if (outcome.deductions) {
+      const low = outcome.deductions.reduce((sum, row) => sum + Number(row.min || 0), 0);
+      const high = outcome.deductions.reduce((sum, row) => sum + Number(row.max ?? row.min ?? 0), 0);
+      notes.push(!outcome.deductions.length ? "未扣费" : outcome.deductions.some(row => row.open_ended)
+        ? `至少扣 ${amount(low)}` : low === high ? `已扣 ${amount(low)}`
+          : outcome.low == null ? `按最低扣费 ${amount(low)}参考` : `扣费 ${amount(low)}–${amount(high)}`);
     }
-    return `${gradeLabel} · 调整后回收价 ${range}${threshold}${details.length ? `<div class="run-item-quote-detail">${details.join(" · ")}</div>` : ""}`;
   }
-  if (item.quote_price == null) return "";
-  const label = basis === "candidate" ? "初筛参考价" : "固定参考回收价";
-  return `${gradeLabel} · ${label} ${amount(item.quote_price)}${threshold}${basis === "candidate" ? " · 尚未完成详情判价" : ""}`;
+  const limit = outcome.limit != null ? `${outcome.basis === "candidate" ? "初筛" : "判价"}上限 <strong>${amount(outcome.limit)}</strong>` : null;
+  if (!reference && !limit) return "";
+  return `<div class="run-item-quote-line">${[reference, limit].filter(Boolean).map(text => `<span>${text}</span>`).join("")}</div>
+    ${notes.length ? `<div class="run-item-quote-note">${notes.join(" · ")}</div>` : ""}`;
 }
 
 function runItem(item, fresh = false) {
-  const code = item.code || "other";
-  const above = item.code === "price_high" && item.threshold_price != null ? item.price - item.threshold_price : null;
-  const badge = item.matched
+  const outcome = runOutcome(item);
+  const { code } = outcome;
+  const reason = outcome.excess != null ? `挂牌价超出${outcome.basis === "candidate" ? "初筛" : "判价"}上限 ¥${money(outcome.excess)}` : outcome.reason;
+  const isHit = outcome.bucket === "matched";
+  const badge = isHit
     ? `<span class="item-badge hit">命中 · ${quoteDifferenceLabel(item.quote_price, item.price)}</span>${item.new_deal ? `<span class="item-badge">新命中</span>` : ""}`
-    : `<span class="item-badge ${code}">${codeLabels[code] || code}</span>`;
+    : `<span class="item-badge ${code} ${outcome.bucket}">${codeLabels[code] || code}</span>`;
   const notificationLabels = { sent: "已推送", failed: "推送失败", shadow: "仅记录", duplicate: "已处理", sending: "推送中" };
   const notification = notificationLabels[item.assessment_notification];
-  const quote = runItemQuote(item);
-  return `<article class="run-item ${item.matched ? "hit" : ""} ${fresh ? "fresh" : ""}">
+  const quote = runItemQuote(item, outcome);
+  const priceDetails = outcome.base != null && outcome.deductions ? `<details class="run-item-evidence-preview">
+    <summary>报价与扣费明细</summary><div class="run-item-price-details">
+      <div>基础报价${outcome.referenceGrade ? `（${escapeHtml(outcome.referenceGrade)}参考）` : ""}：¥${money(outcome.base)}</div>
+      ${outcome.deductions.length ? outcome.deductions.map(row => `<div>${escapeHtml(row.name)}：扣 ¥${money(row.min)}${row.max !== row.min ? `–${money(row.max)}` : ""}${row.open_ended ? "起" : ""}</div>`).join("") : outcome.code === "unpriced_condition" ? "<div>已知问题缺少适用扣费，尚无调整后估值</div>" : "<div>无适用扣费</div>"}
+    </div></details>` : "";
+  return `<article class="run-item ${isHit ? "hit" : ""} ${fresh ? "fresh" : ""}">
     <div class="run-item-main">
       ${item.item_url
         ? `<a class="run-item-title" href="${escapeHtml(item.item_url)}" target="_blank" rel="noreferrer">${escapeHtml(item.title)}</a>`
-        : `<span class="run-item-title" title="列表卡片，没有取商品链接">${escapeHtml(item.title)}</span>`}
+        : `<span class="run-item-title" title="本次记录未取得商品链接">${escapeHtml(item.title)}</span>`}
       <div class="run-item-meta">
         ${badge}
+        ${outcome.stage ? `<span class="run-item-stage">${escapeHtml(outcome.stage)}</span>` : ""}
         ${notification ? `<span class="item-badge ${item.assessment_notification === "failed" ? "notification-failed" : "muted"}">${notification}</span>` : ""}
         ${item.model ? `<span>${escapeHtml(item.model)}${item.storage ? ` ${escapeHtml(displayStorage(item.storage))}` : ""}</span>` : ""}
         ${item.display_region ? `<span>${escapeHtml(item.display_region)}</span>` : ""}
         ${item.pass_label && normalizeCapacity(item.pass_label) !== normalizeCapacity(item.storage) ? `<span class="pass-tag">采集 ${escapeHtml(item.pass_label)}</span>` : ""}
       </div>
-      ${quote ? `<div class="run-item-reason">${quote}${above != null ? ` · <b class="bad">高出上限 ¥${Math.round(above)}</b>` : ""}</div>` : ""}
-      ${!item.matched && item.code !== "price_high" ? `<div class="run-item-reason">${escapeHtml(item.decision || "")}</div>` : ""}
+      ${quote ? `<div class="run-item-reason">${quote}</div>` : ""}
+      ${!isHit && reason ? `<div class="run-item-reason ${outcome.excess != null ? "price-excess" : ""}">${escapeHtml(reason)}</div>` : ""}
     </div>
     <div class="run-item-price">¥${item.price}</div>
     ${item.assessment_id ? `<div class="run-item-footer">
@@ -777,7 +786,7 @@ function runItem(item, fresh = false) {
         <span>成色与扣费依据</span>
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9 6 6 6-6 6" /></svg>
       </button>
-    </div>` : ""}
+    </div>` : priceDetails ? `<div class="run-item-footer">${priceDetails}</div>` : ""}
   </article>`;
 }
 
@@ -786,7 +795,7 @@ async function loadRunDetail(id, { quiet = false } = {}) {
   const run = await api(`/api/runs/${id}`);
   if (version !== runView.detailVersion || id !== runView.selected || run.model !== runView.model) return;
   // 自动刷新不打断正在浏览历史或选择原因的操作。
-  if (quiet && (document.activeElement?.matches("#run-detail select") || document.querySelector(".run-history-menu[open]"))) return;
+  if (quiet && (document.activeElement?.matches("#run-detail select") || document.querySelector(".run-history-menu[open], .run-item-evidence-preview[open]"))) return;
   const group = runView.groups.find(item => item.model === run.model);
   const signature = JSON.stringify([run, group, runView.storage, runView.result, runView.code,
     runView.follow, runView.runs.map(item => [item.id, item.ok, item.hit_count])]);
@@ -814,24 +823,24 @@ async function loadRunDetail(id, { quiet = false } = {}) {
     ...storages.map(storage => storageChip(storage, displayStorage(storage), capacities[storage] || 0)),
     ...(capacities.unknown || runView.storage === "unknown" ? [storageChip("unknown", "未识别容量", capacities.unknown || 0)] : [])].join("");
   const resultFilters = [["", "全部", counts.all], ["matched", "命中", counts.matched],
-    ["pending", "待确认", counts.pending], ["rejected", "未命中", counts.rejected]].map(([value, label, count]) =>
+    ["pending", "待确认", counts.pending], ["rejected", "不符合", counts.rejected], ["incomplete", "未完成", counts.incomplete]].map(([value, label, count]) =>
     `<button type="button" class="run-result-stat ${value || "all"} ${runView.result === value ? "active" : ""}" data-run-result="${value}" aria-pressed="${runView.result === value}"><span>${label}</span><strong>${count}</strong></button>`).join("");
   const reasonCodes = [...codeOrder.filter(code => reasons[code]), ...Object.keys(reasons).filter(code => !codeOrder.includes(code))];
   if (runView.code && !reasonCodes.includes(runView.code)) reasonCodes.push(runView.code);
-  const reasonFilter = runView.result === "rejected" ? `<label class="run-reason-filter" for="run-reason-select">未命中原因<select id="run-reason-select"><option value="">全部原因（${counts.rejected}）</option>${reasonCodes.map(code => `<option value="${escapeHtml(code)}" ${code === runView.code ? "selected" : ""}>${escapeHtml(codeLabels[code] || code)}（${reasons[code] || 0}）</option>`).join("")}</select></label>` : "";
+  const reasonFilter = ["rejected", "incomplete"].includes(runView.result) ? `<label class="run-reason-filter" for="run-reason-select">${runView.result === "incomplete" ? "未完成步骤" : "不符合原因"}<select id="run-reason-select"><option value="">全部原因（${counts[runView.result]}）</option>${reasonCodes.map(code => `<option value="${escapeHtml(code)}" ${code === runView.code ? "selected" : ""}>${escapeHtml(codeLabels[code] || code)}（${reasons[code] || 0}）</option>`).join("")}</select></label>` : "";
   const steps = [];
   if (tone === "running" && run.region) steps.push(stepChip(null, `区域 ${run.region}`, "搜索结束后显示是否已在 App 内切换"));
   else if (run.ok !== 0 && run.region) steps.push(stepChip(Boolean(run.region_applied), `区域 ${run.region}`, run.region_applied ? "已在 App 内切换" : "未切换，只核对卡片地区"));
   if (run.ok !== 0 && run.storage) steps.push(stepChip(Boolean(run.filter_applied), `容量 ${displayStorage(run.storage)}`, run.filter_applied ? "已在 App 内筛选" : "未筛选，按标题识别容量"));
   for (const pass of run.passes || []) {
-    const detail = pass.error || (pass.candidates != null ? `列表卡片 ${pass.cards}，符合条件的候选 ${pass.candidates}，取到链接 ${pass.observed}` : "");
+    const detail = pass.error || (pass.candidates != null ? `列表卡片 ${pass.cards}，进入详情 ${pass.candidates}，取到链接 ${pass.observed}` : "");
     steps.push(stepChip(!pass.error, `${passName(pass)} ${pass.error ? "失败" : `${pass.cards ?? pass.observed ?? 0} 件`}`, detail));
   }
   const logText = passDetail(run);
   const statusLabel = tone === "running" ? "搜索中" : tone === "fail" ? "搜索失败" : tone === "warn" ? "完成 · 有警告" : "已完成";
   let body;
   if (items.length) body = items.map(item => runItem(item, fresh.has(item.item_id))).join("");
-  else if (run.items.length) body = `<div class="empty run-filter-empty"><b>没有符合筛选条件的商品</b><span>当前查看${scope}${runView.result ? ` · ${runView.result === "matched" ? "命中" : runView.result === "pending" ? "待确认" : "未命中"}` : ""}，可以切换容量或清除筛选。</span><button type="button" class="secondary compact" data-run-clear>清除筛选</button></div>`;
+  else if (run.items.length) body = `<div class="empty run-filter-empty"><b>没有符合筛选条件的商品</b><span>当前查看${scope}${runView.result ? ` · ${{matched: "命中", pending: "待确认", rejected: "不符合", incomplete: "未完成"}[runView.result] || ""}` : ""}，可以切换容量或清除筛选。</span><button type="button" class="secondary compact" data-run-clear>清除筛选</button></div>`;
   else if (tone === "running") body = `<div class="empty live-empty"><span class="live-dot"></span>正在搜索，读到的商品会实时出现在这里…</div>`;
   else if (run.ok === 0) body = `<div class="empty">本次搜索未取得商品，展开失败原因查看详情。</div>`;
   else if (run.observed) body = `<div class="empty">此历史记录未保存逐件明细，当时共看到 ${run.observed} 件。</div>`;

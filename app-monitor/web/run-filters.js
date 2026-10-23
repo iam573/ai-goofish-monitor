@@ -1,3 +1,4 @@
+import { runOutcome } from "./run-outcome.js";
 /** 容量筛选只作用于当前搜索，不把搜索所选容量当成商品明确写出的容量。 */
 export function normalizeCapacity(value) {
   const match = String(value || "").trim().toUpperCase().match(/^(64|128|256|512|1T|2T)(?:G|GB|B)?$/);
@@ -21,8 +22,7 @@ export function capacityOptions(runs, run) {
 }
 
 export function resultBucket(item) {
-  if (item.matched || item.code === "matched") return "matched";
-  return item.code === "pending" ? "pending" : "rejected";
+  return runOutcome(item).bucket;
 }
 
 export function filterRunItems(run, { storage = "", result = "", code = "" } = {}) {
@@ -33,17 +33,17 @@ export function filterRunItems(run, { storage = "", result = "", code = "" } = {
     capacities[key] = (capacities[key] || 0) + 1;
   }
   const scoped = all.filter(item => !storage || (itemCapacity(item, run) || "unknown") === storage);
-  const counts = { all: scoped.length, matched: 0, pending: 0, rejected: 0 };
+  const counts = { all: scoped.length, matched: 0, pending: 0, rejected: 0, incomplete: 0 };
   const reasons = {};
   for (const item of scoped) {
     const bucket = resultBucket(item);
     counts[bucket] += 1;
-    if (bucket === "rejected") {
-      const reason = item.code || "other";
+    if (["rejected", "incomplete"].includes(bucket) && (!result || bucket === result)) {
+      const reason = runOutcome(item).code;
       reasons[reason] = (reasons[reason] || 0) + 1;
     }
   }
   const items = scoped.filter(item => (!result || resultBucket(item) === result)
-    && (result !== "rejected" || !code || (item.code || "other") === code));
+    && (!["rejected", "incomplete"].includes(result) || !code || runOutcome(item).code === code));
   return { items, counts, reasons, capacities };
 }
