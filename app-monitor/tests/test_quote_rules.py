@@ -198,3 +198,36 @@ def test_grade_change_precedes_scoped_fees_and_keeps_its_original_trigger():
     result,_=assess('99新，后盖破，电池健康80%',rows)
     assert result['grade']=='大花' and result['base_price']==2400
     assert result['deductions']==[] and result['status']=='matched'
+
+
+@pytest.mark.parametrize('phrase', ['新原装电芯100健康','换过电芯','更换了原装电芯',
+                                  '换过全新原装电芯','电芯已更换','换新电芯'])
+def test_new_or_replaced_cell_counts_as_battery_replacement_with_evidence(phrase):
+    result,facts=assess('99新，'+phrase,notes('弹电-300'))
+    assert facts.findings['battery_cell_replaced'].value=='yes'
+    assert facts.findings['battery_replaced'].value=='yes'
+    assert facts.findings['battery_third_party'].value is None
+    assert result['value_high']==2700 and len(result['deductions'])==1
+    if '100健康' in phrase:assert facts.findings['battery_health'].value=='100'
+
+
+@pytest.mark.parametrize('phrase', ['原装电芯','原装电芯100健康','没有换过电芯','没换过新电芯',
+                                  '未换过全新原装电芯','新机未拆封，原装电芯','电池健康100%'])
+def test_original_cell_or_healthy_battery_alone_does_not_imply_replacement(phrase):
+    result,facts=assess('99新，'+phrase,notes('弹电-300'))
+    assert facts.findings['battery_cell_replaced'].value!='yes'
+    assert facts.findings['battery_replaced'].value!='yes'
+    assert result['deductions']==[] and result['value_high']==3000
+
+
+def test_suspected_cell_replacement_remains_uncertain_not_a_confirmed_deduction():
+    result,facts=assess('99新，可能更换过电芯',notes('弹电-300'))
+    assert facts.findings['battery_cell_replaced'].value is None
+    assert result['status']=='pending' and result['deductions']==[]
+
+
+def test_original_cell_does_not_claim_a_genuine_complete_battery_or_cheaper_type():
+    result,facts=assess('99新，新原装电芯100健康',notes('弹电-300','第三方-100'))
+    assert facts.findings['battery_third_party'].value is None
+    assert result['status']=='pending' and result['value_high']==2900
+    assert result['deductions'][0]['min']==100 and result['deductions'][0]['max']==300

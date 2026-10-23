@@ -20,9 +20,9 @@ from .quotes import GRADE_COLUMNS, deduction_storages, latest_deductions, latest
 from .rules import Rules
 
 logger = logging.getLogger(__name__)
-VERSION = "local-quote-facts-v3"
+VERSION = "local-cell-facts-v4"
 PRICING_VERSION = "compound-deductions-v3"
-BATTERY_PATTERN = re.compile(r"(?:电池(?:健康度|健康|效率|容量|寿命)?|健康度|电池寿命)\s*[为是约:：]?\s*(?:百分之)?\s*(100(?:\.0+)?|[1-9]?\d(?:\.\d+)?)\s*(?:%|％)?(?![\d.])", re.I)
+BATTERY_PATTERN = re.compile(r"(?:(?:电池|电芯)(?:健康度|健康|效率|容量|寿命)?|健康度|电池寿命)\s*[为是约:：]?\s*(?:百分之)?\s*(100(?:\.0+)?|[1-9]?\d(?:\.\d+)?)\s*(?:%|％)?(?![\d.])", re.I)
 FACT_FIELDS = ("model", "storage", "whole_phone", "full_price", "battery_health", "screen_watermark",
                "screen_broken", "function_fault", "locked", "repaired", "screen_replaced", "battery_replaced", "water_damage", "back_glass_broken", "warranty", "color", "variant")
 FACT_LABELS = {"model": "机型", "storage": "容量", "whole_phone": "整机", "full_price": "整机实价",
@@ -31,6 +31,7 @@ FACT_LABELS = {"model": "机型", "storage": "容量", "whole_phone": "整机", 
                "screen_replaced": "换屏", "battery_replaced": "换电池", "water_damage": "进水", "back_glass_broken": "后盖破损",
                "warranty": "保修情况", "color": "颜色", "variant": "版本"}
 QUOTE_FLAGS = {"screen_original": "原装更换屏", "screen_popup": "屏幕弹窗", "battery_popup": "电池弹窗",
+               "battery_cell_replaced": "更换电芯",
                "battery_third_party": "第三方电池", "battery_swollen": "电池鼓包", "overseas": "海外版本",
                "face_id_fault": "面容故障", "rear_camera_replaced": "后摄更换", "camera_watermark": "镜头水印",
                "screen_aging": "屏幕老化", "front_camera_spots": "前摄彩点", "rear_camera_spots": "后摄彩点",
@@ -407,7 +408,7 @@ def price_facts(item: dict, facts: Facts, quotes: list[dict], policies: list[dic
                 continue
             if key in {"screen_original", "screen_popup"} and "screen_replaced" in handled_conditions:
                 continue
-            if key in {"battery_third_party", "battery_popup"} and "battery_replaced" in handled_conditions:
+            if key in {"battery_third_party", "battery_popup", "battery_cell_replaced"} and "battery_replaced" in handled_conditions:
                 continue
             if key == "overseas" and "variant" in handled_conditions:
                 continue

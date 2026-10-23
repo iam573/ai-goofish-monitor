@@ -238,9 +238,35 @@ def test_pending_push_keeps_product_status_and_value_without_review_reasons():
     markdown = NotificationService._format_webhook_content(item, '待确认原因不应重复输出', '', [])
     assert title == '【待确认】iPhone 15 Pro 256G'
     for body in (plain, markdown):
-        assert '成色待确认' in body and '回收参考：≤ ¥4500（小花参考，待确认）' in body
+        assert '成色待确认' in body and '回收参考：≤ ¥4500（小花参考，未扣费，待确认）' in body
         assert item['item_url'] in body
         assert '待确认：' not in body and '待确认原因不应重复输出' not in body
         assert all(reason not in body for reason in assessment['uncertainties'])
         assert '扣后回收价' not in body
     assert assessment['uncertainties'] == ['成色无法确定', '可能适用的报价备注尚未识别：电池鼓-80']
+
+
+@pytest.mark.parametrize('deductions,summary', [
+    ([], '未扣费'),
+    ([{'name':'弹电','min':300,'max':300}], '已扣 ¥300'),
+    ([{'name':'弹电','min':100,'max':300}], '按最低扣费 ¥100参考'),
+    ([{'name':'弹电','min':100,'max':300},{'name':'港澳版','min':200,'max':200}], '按最低扣费 ¥300参考'),
+    ([{'name':'轻微老化','min':100,'max':100,'open_ended':True}], '至少扣 ¥100'),
+])
+def test_reference_price_inline_explains_its_actual_deduction_basis(deductions,summary):
+    assessment={'status':'pending','grade':None,'reference_grade':'小花','base_price':1300,
+                'value_low':None,'value_high':1000,'deductions':deductions}
+    item={**REFERENCE_ITEM,'smart_assessment':assessment}
+    for body in [NotificationService._format_message(item,'','',[])[1],
+                 NotificationService._format_webhook_content(item,'','',[])]:
+        assert f'回收参考：≤ ¥1000（小花参考，{summary}，待确认）' in body
+        if deductions:assert '扣费：基础 ¥1300' in body
+        assert '待确认：' not in body
+
+
+def test_confirmed_value_also_marks_deductions_next_to_price():
+    item={**REFERENCE_ITEM,'smart_assessment':{'status':'matched','grade':'小花','base_price':4500,
+          'value_low':4200,'value_high':4200,'deductions':[{'name':'弹电','min':300,'max':300}]}}
+    _,plain=NotificationService._format_message(item,'','',[])
+    markdown=NotificationService._format_webhook_content(item,'','',[])
+    assert '回收估值：¥4200（已扣 ¥300）' in plain and '回收估值：¥4200（已扣 ¥300）' in markdown

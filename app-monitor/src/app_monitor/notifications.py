@@ -136,6 +136,19 @@ class NotificationService:
         return lines
 
     @staticmethod
+    def _deduction_summary(value: dict, *, upper_only: bool = False) -> str:
+        rows = value.get("deductions") or []
+        if not rows:
+            return "未扣费"
+        low = sum(float(row["min"]) for row in rows)
+        high = sum(float(row["max"]) for row in rows)
+        if any(row.get("open_ended") for row in rows):
+            return f"至少扣 ¥{low:g}"
+        if low != high:
+            return f"按最低扣费 ¥{low:g}参考" if upper_only else f"扣费 ¥{low:g}～{high:g}"
+        return f"已扣 ¥{low:g}"
+
+    @staticmethod
     def _smart_lines(item, markdown=False):
         value = item["smart_assessment"]
         escape = lambda text: re.sub(r"([\\`*_{}\[\]()#+.!|>~-])", r"\\\1", str(text)) if markdown else str(text)
@@ -148,10 +161,12 @@ class NotificationService:
             difference = float(item['price']) - low
             comparison = (f"需议价 ¥{difference:g}" if difference > 0 else
                           f"低于{'保守' if high is not None and low != high else ''}估值 ¥{-difference:g}" if difference < 0 else "与估值持平")
-            lines.append(f"回收估值：{price} · {comparison}")
+            deduction = NotificationService._deduction_summary(value)
+            lines.append(f"回收估值：{price}（{deduction}） · {comparison}")
         elif high is not None:
             reference = f"{escape(value['reference_grade'])}参考" if value.get("reference_grade") else "候选上限"
-            lines.append(f"回收参考：≤ ¥{high:g}（{reference}，待确认）")
+            deduction = NotificationService._deduction_summary(value, upper_only=True)
+            lines.append(f"回收参考：≤ ¥{high:g}（{reference}，{deduction}，待确认）")
         else:
             lines.append("回收估值：待确认")
         if value.get("deductions"):

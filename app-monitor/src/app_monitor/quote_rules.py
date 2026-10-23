@@ -23,7 +23,9 @@ FLAG_PATTERNS = {
     'screen_original': [r'(?:换|更换)(?:过|了|的是|的)?(?:官方|原装|原厂|拆机)(?:原装|原厂)?屏', r'(?:原装|原厂|拆机)屏(?:幕)?(?:已|有)?更?换过'],
     'screen_popup': [r'(?:屏幕?|显示屏)(?:有|会|出现)?弹窗', r'弹屏', r'屏幕?(?:未知|不明|无法验证)(?:部件)?'],
     'battery_popup': [r'电池(?:有|会|出现)?弹窗', r'弹电', r'电池(?:未知|不明|无法验证)(?:部件)?'],
-    'battery_third_party': [r'(?:第三方|非原装|组装|国产|德赛|品胜|飞毛腿|诺希|倍思)(?:的)?电池'],
+    'battery_cell_replaced': [r'(?:更换|换)(?:过|了)?(?:全新|新)?(?:原装|原厂|官方|第三方)?(?:的)?电芯',
+                              r'(?:全新|新)(?:原装|原厂)?电芯', r'电芯(?:已更换|更换过|换过|换新|新换)'],
+    'battery_third_party': [r'(?:第三方|非原装|组装|国产|德赛|品胜|飞毛腿|诺希|倍思)(?:的)?(?:电池|电芯)'],
     'battery_swollen': [r'(?:电池)?鼓包', r'电池(?:有|出现)?(?:鼓起|膨胀)'],
     'face_id_fault': [r'面容(?:损坏|失灵|不可用|坏|故障)', r'无面容', r'face\s*id(?:失灵|损坏)'],
     'rear_camera_replaced': [r'(?:更换|换)(?:过|了)?(?:后置?|后摄)(?:摄像头|镜头|像头)?', r'后(?:置摄像头|摄像头|镜头|摄|像头)(?:更换|换过|换了)'],
@@ -43,7 +45,12 @@ def extra_findings(text: str, findings: dict, unknowns: list[str]) -> None:
     from .smart import FACT_LABELS
     for key, patterns in FLAG_PATTERNS.items():
         content = re.sub(r'不(?=鼓包|膨胀|弹窗)', '无', text)
-        findings[key] = _finding(mentions(content, patterns), FACT_LABELS[key], unknowns)
+        values = mentions(content, patterns)
+        if key == 'battery_cell_replaced':
+            # “没换过新电芯” must not become positive through the nested “新电芯”.
+            values = [v for v in values if not any(v[2]>=other[2] and v[3]<=other[3]
+                      and v[3]-v[2]<other[3]-other[2] for other in values)]
+        findings[key] = _finding(values, FACT_LABELS[key], unknowns)
     for key, mapping in [('color', COLORS), ('variant', VARIANTS)]:
         values = []
         for canonical, patterns in mapping.items():
@@ -65,7 +72,8 @@ def extra_findings(text: str, findings: dict, unknowns: list[str]) -> None:
     findings['overseas'] = Finding(value=('no' if variant.value == '国行' else 'yes') if variant.value else None,
                                    evidence=variant.evidence)
     for specific, parent in [('screen_original','screen_replaced'), ('screen_popup','screen_replaced'),
-                              ('battery_third_party','battery_replaced'), ('battery_popup','battery_replaced')]:
+                              ('battery_third_party','battery_replaced'), ('battery_popup','battery_replaced'),
+                              ('battery_cell_replaced','battery_replaced')]:
         if findings[specific].value == 'yes':
             findings[parent] = findings[specific].model_copy()
     # A known third-party screen is explicitly not an original replacement screen.
@@ -158,6 +166,8 @@ def compile_policy(row: dict) -> Policy:
         '换电池': ('battery_replaced','battery_part',['battery_replaced'],10),
         '换过电池': ('battery_replaced','battery_part',['battery_replaced'],10),
         '更换电池': ('battery_replaced','battery_part',['battery_replaced'],10),
+        '换电芯': ('battery_cell_replaced','battery_part',['battery_replaced'],30),
+        '更换电芯': ('battery_cell_replaced','battery_part',['battery_replaced'],30),
         '第三方': ('battery_third_party','battery_part',['battery_replaced'],30),
         '第三方电池': ('battery_third_party','battery_part',['battery_replaced'],30),
         '电池鼓': ('battery_swollen','battery_swollen',[],10),

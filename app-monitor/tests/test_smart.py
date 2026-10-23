@@ -219,7 +219,7 @@ def test_pending_notification_shows_bounds_and_seller_not_profit(database):
     item={**ITEM,'model':'17','storage':'256','smart_assessment':value,'assessment_facts':f.model_dump()}
     title,body=NotificationService._format_message(item,'','',[])
     assert title=='【待确认】iPhone 17 256G'
-    assert '成色待确认' in body and '回收参考：≤ ¥4600（小花参考，待确认）' in body
+    assert '成色待确认' in body and '回收参考：≤ ¥4600（小花参考，未扣费，待确认）' in body
     assert '低于估值' not in body and '成色无法确定' not in body
     assert '小鱼（鱼小铺）' in body and '利润' not in body
 

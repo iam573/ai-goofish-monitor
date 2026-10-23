@@ -4,6 +4,7 @@ export function initSmart({api,escapeHtml,toast,state,gradeOrder,loadOverview,lo
   const e=value=>escapeHtml(value).replace(/"/g,'&quot;').replace(/'/g,'&#39;');
   const labels={model:'机型',storage:'容量',whole_phone:'整机',full_price:'整机实价',battery_health:'电池健康度',screen_watermark:'屏幕水印',screen_broken:'碎屏',function_fault:'功能故障',locked:'锁机/监管/卡贴',repaired:'拆修',screen_replaced:'换屏',battery_replaced:'换电池',water_damage:'进水',back_glass_broken:'后盖破损',warranty:'保修',color:'颜色',variant:'版本'};
   const statuses={matched:'符合条件',pending:'待确认',rejected:'不符合',analysis_failed:'判价或复核失败'};
+  labels.battery_cell_replaced='更换电芯';
   Object.assign(labels,{screen_original:'原装更换屏',screen_popup:'屏幕弹窗',battery_popup:'电池弹窗',battery_third_party:'第三方电池',battery_swollen:'电池鼓包',overseas:'海外版本',face_id_fault:'面容故障',rear_camera_replaced:'后摄更换',camera_watermark:'镜头水印',screen_aging:'屏幕老化',front_camera_spots:'前摄彩点',rear_camera_spots:'后摄彩点',front_camera_flare:'前镜头蓝光',rear_camera_flare:'后镜头蓝光',true_tone_missing:'缺少原彩',full_set_missing:'缺少全套配件'});
   let config=null,rows=[],record=null;
   const read=()=>{
