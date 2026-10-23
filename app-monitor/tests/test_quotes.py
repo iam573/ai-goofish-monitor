@@ -83,6 +83,13 @@ def test_parse_deduction_text_handles_amount_range_and_notes():
     assert parse_deduction_text("电池低于60%按弹电")[4] == "note"
 
 
+def test_verified_battery_note_ocr_error_is_corrected_in_name_and_source_text():
+    assert parse_deduction_text('电池低于70％按3单电') == ('电池低于70％按弹电', None, None, False, 'note')
+    page = [*NO_WARRANTY_PAGE, line('电池低于70％按3单电', 0.90, 1087)]
+    note = next(item for item in QuoteImageParser().parse_deductions(page) if '按弹电' in item.name)
+    assert note.text == '电池低于70％按弹电' and note.kind == 'note'
+
+
 def test_merge_wrapped_lines_rejoins_cell_wraps_only():
     lines = [
         line("水货2T-3000以上", 0.74, 100), line("256G蓝色-300", 0.75, 119),

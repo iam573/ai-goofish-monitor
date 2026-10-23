@@ -92,6 +92,47 @@ def test_conflicting_battery_stays_pending_and_unsupported_explicit_note_is_visi
     assert result['status']=='pending' and result['deductions']==[]
 
 
+@pytest.mark.parametrize('description,note,applies', [
+    ('99新，电池健康75%', '电池低于70％按3单电', False),
+    ('99新，电池健康70%', '电池低于70%按弹电', False),
+    ('99新，电池健康69%', '电池低于70%按弹电', True),
+    ('99新，电池健康70%', '电池70%以下按弹电', True),
+    ('99新，电池健康75%', '电池70%以下按弹电', False),
+    ('99新', '电池低于70%按弹电', False),
+    ('99新，电池健康75%', '电池鼓', False),
+    ('99新，电池健康75%，无鼓包', '电池鼓', False),
+    ('99新，电池不鼓包', '电池鼓', False),
+    ('99新，电池没有鼓包', '电池鼓', False),
+    ('99新，电池鼓包', '电池鼓', True),
+    ('99新，电池膨胀', '电池鼓', True),
+    ('99新，电池疑似鼓包', '电池鼓', True),
+])
+def test_unsupported_battery_note_requires_its_condition(quotes, description, note, applies):
+    item = listing(description)
+    facts = extract_local(item, SmartConfig(), quotes, Rules())
+    row = fee(note, 80) if note == '电池鼓' else dict(
+        name=note, text=note, amount_min=None, policy=automatic_policy({'name': note, 'text': note}).model_dump())
+    result = price_facts(item, facts, quotes, [row], SmartConfig(), Rules(), '17', '256')
+    supported = note == '电池鼓' and applies and '疑似' not in description
+    uncertain = '疑似' in description
+    assert result['status'] == ('matched' if supported or not applies else 'pending' if uncertain else 'rejected')
+    assert bool(result['uncertainties']) == (applies and not supported)
+    assert len(result['deductions']) == int(supported)
+    if supported:
+        assert result['value_low'] == 5120
+
+
+def test_unsupported_swelling_note_checks_title_and_detail_parameters(quotes):
+    for item in [listing('99新', title='iPhone 17 256G 电池鼓包'),
+                 {**listing('99新'), 'detail_parameters': ['电池疑似鼓包']}]:
+        facts = extract_local(item, SmartConfig(), quotes, Rules())
+        result = price_facts(item, facts, quotes, [fee('电池鼓', 80)], SmartConfig(), Rules(), '17', '256')
+        if '鼓包' in item['title']:
+            assert result['status'] == 'matched' and result['value_low'] == 5120
+        else:
+            assert result['status'] == 'pending' and result['deductions'] == []
+
+
 def test_ai_cannot_downgrade_missing_info_policy_or_erase_explicit_risks(quotes):
     item=listing('99新')
     local=extract_local(item,SmartConfig(),quotes,Rules())
@@ -136,7 +177,8 @@ def test_stated_repair_without_price_rule_is_pending_not_free(quotes):
     item=listing('99新，换过屏')
     facts=extract_local(item,SmartConfig(),quotes,Rules())
     result=price_facts(item,facts,quotes,[],SmartConfig(),Rules(),'17','256')
-    assert result['status']=='pending' and any('换屏' in u for u in result['uncertainties'])
+    assert result['status']=='rejected' and any('换屏' in u for u in result['uncertainties'])
+    assert result['value_high'] is None
     result=price_facts(item,facts,quotes,[fee('换屏',300)],SmartConfig(),Rules(),'17','256')
     assert result['status']=='matched' and result['value_low']==4900
 

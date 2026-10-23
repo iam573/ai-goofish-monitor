@@ -172,7 +172,7 @@ def test_missing_model_only_scrolls_inside_model_panel_then_fails(monkeypatch):
         scrolls = 0
 
         def execute_script(self, command, args):
-            if command == "mobile: dragFromToForDuration":
+            if command == "mobile: dragFromToWithVelocity":
                 assert self.opened
                 assert 98 < args["fromX"] == args["toX"] < 378
                 assert 218 < args["toY"] < args["fromY"] < 647
@@ -184,5 +184,35 @@ def test_missing_model_only_scrolls_inside_model_panel_then_fails(monkeypatch):
     driver = MissingModelDriver()
     with pytest.raises(RuntimeError, match="未找到精确机型"):
         IPhoneCollector(Settings())._apply_model(driver, "iPhone 18")
-    assert driver.scrolls == 7 and driver.opened
+    assert driver.scrolls == 2 and driver.opened
     assert (263, 669.5) not in driver.taps
+
+
+@pytest.mark.parametrize('visible_after', [8, 24])
+@pytest.mark.parametrize('keyword', ['iPhone 14', 'iPhone 14 Plus'])
+def test_model_search_reads_overlapping_viewports_including_final_scroll(monkeypatch, visible_after, keyword):
+    class ScrollingDriver(Driver):
+        scrolls = 0
+
+        @property
+        def page_source(self):
+            source = super().page_source
+            if self.opened:
+                label = keyword if self.scrolls >= visible_after else f'iPhone 15 {self.scrolls}'
+                return source.replace('name="iPhone 16" x="260"', f'name="{label}" x="260"')
+            return source
+
+        def execute_script(self, command, args):
+            if command == 'mobile: dragFromToWithVelocity':
+                assert args['fromX'] == args['toX']
+                assert 0 < args['fromY'] - args['toY'] <= 180
+                assert args['velocity'] == 180 and args['holdDuration'] >= .5
+                self.scrolls += 1
+            else:
+                super().execute_script(command, args)
+
+    monkeypatch.setattr('app_monitor.iphone_collector.time.sleep', lambda _: None)
+    driver = ScrollingDriver()
+    clicked = IPhoneCollector(Settings())._apply_model(driver, keyword)
+    assert f'已校验 {keyword}' in clicked and clicked[-1] == '确定'
+    assert driver.scrolls == visible_after and not driver.opened

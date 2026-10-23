@@ -4,6 +4,7 @@ export function initSmart({api,escapeHtml,toast,state,gradeOrder,loadOverview,lo
   const e=value=>escapeHtml(value).replace(/"/g,'&quot;').replace(/'/g,'&#39;');
   const labels={model:'机型',storage:'容量',whole_phone:'整机',full_price:'整机实价',battery_health:'电池健康度',screen_watermark:'屏幕水印',screen_broken:'碎屏',function_fault:'功能故障',locked:'锁机/监管/卡贴',repaired:'拆修',screen_replaced:'换屏',battery_replaced:'换电池',water_damage:'进水',back_glass_broken:'后盖破损',warranty:'保修',color:'颜色',variant:'版本'};
   const statuses={matched:'符合条件',pending:'待确认',rejected:'不符合',analysis_failed:'判价或复核失败'};
+  Object.assign(labels,{screen_original:'原装更换屏',screen_popup:'屏幕弹窗',battery_popup:'电池弹窗',battery_third_party:'第三方电池',battery_swollen:'电池鼓包',overseas:'海外版本',face_id_fault:'面容故障',rear_camera_replaced:'后摄更换',camera_watermark:'镜头水印',screen_aging:'屏幕老化',front_camera_spots:'前摄彩点',rear_camera_spots:'后摄彩点',front_camera_flare:'前镜头蓝光',rear_camera_flare:'后镜头蓝光',true_tone_missing:'缺少原彩',full_set_missing:'缺少全套配件'});
   let config=null,rows=[],record=null;
   const read=()=>{
     if(!config)return null;
@@ -36,7 +37,8 @@ export function initSmart({api,escapeHtml,toast,state,gradeOrder,loadOverview,lo
     rows=(await api(`/api/smart/policies?model=${encodeURIComponent(model)}`)).items;
     document.querySelector('#valuation-policy-rows').innerHTML=rows.map((row,index)=>{const p=row.policy;return `<div class="smart-policy" data-policy-index="${index}"><b>${e(row.text)}</b>
       <label>处理<select data-key="action">${options([['deduct','按报价扣费'],['grade','改成色档位'],['ignore','不参与扣费']],p.action)}</select></label>
-      <div class="field-row"><label>触发字段<select data-key="field">${options(Object.entries(labels),p.field)}</select></label><label>比较<select data-key="operator">${options([['eq','等于'],['contains','包含'],['lt','小于'],['le','小于等于'],['gt','大于'],['ge','大于等于']],p.operator)}</select></label></div>
+      ${(p.grades||[]).length?`<p class="hint">适用成色：${e(p.grades.join('、'))}</p>`:''}${(p.requires||[]).length?`<p class="hint">同时满足：${e(p.requires.map(c=>`${labels[c.field]||c.field} ${c.operator} ${c.value}`).join('；'))}</p>`:''}${(p.alternatives||[]).length?`<p class="hint">也可由：${e(p.alternatives.map(c=>`${labels[c.field]||c.field} ${c.value}`).join('；'))}</p>`:''}
+      <div class="field-row"><label>触发字段<select data-key="field">${options(Object.entries(labels),p.field)}</select></label><label>比较<select data-key="operator">${options([['eq','等于'],['contains','包含'],['in','属于任一选项（|分隔）'],['lt','小于'],['le','小于等于'],['gt','大于'],['ge','大于等于']],p.operator)}</select></label></div>
       <label>触发值<input data-key="value" value="${e(p.value)}" placeholder="有/无填 yes/no；健康度填数字"></label>
       <div class="field-row"><label>互斥组<input data-key="group" value="${e(p.group)}"></label><label>目标成色<select data-key="grade">${options(gradeOrder.map(grade=>[grade,grade]),p.grade)}</select></label></div>
       <label class="check"><input data-key="tiered" type="checkbox" ${p.tiered?'checked':''}>电池分档，取更严格阈值，不叠扣</label>
@@ -44,14 +46,14 @@ export function initSmart({api,escapeHtml,toast,state,gradeOrder,loadOverview,lo
   }
   document.querySelector('#valuation-policy-load').addEventListener('click',()=>loadPolicies().catch(err=>toast(err.message,true)));
   document.querySelector('#valuation-policy-save').addEventListener('click',async()=>{try{
-    const updates=rows.map((row,index)=>{const policy={};for(const el of root.querySelector(`[data-policy-index="${index}"]`).querySelectorAll('[data-key]'))policy[el.dataset.key]=el.type==='checkbox'?el.checked:el.value;return{rule_key:row.rule_key,policy};});
+    const updates=rows.map((row,index)=>{const policy={...row.policy};for(const el of root.querySelector(`[data-policy-index="${index}"]`).querySelectorAll('[data-key]'))policy[el.dataset.key]=el.type==='checkbox'?el.checked:el.value;if(Object.keys(policy).some(key=>key!=='automatic'&&JSON.stringify(policy[key])!==JSON.stringify(row.policy[key])))policy.automatic=false;return{rule_key:row.rule_key,policy};});
     await api(`/api/smart/policies?model=${encodeURIComponent(document.querySelector('#valuation-policy-model').value.trim())}`,{method:'PUT',body:JSON.stringify(updates)});await loadPolicies();toast('扣费规则已保存');
   }catch(err){toast(err.message,true);}});
   async function openRecord(id){
     record=await api(`/api/smart/assessments/${id}`);const v=record.result,item=record.snapshot;
     document.querySelector('#valuation-detail-title').textContent=`${statuses[record.status]} · ${item.title}`;
     const range=v.value_low!=null?`¥${v.value_low}${v.value_low!==v.value_high?`～${v.value_high}`:''}`:v.value_high!=null?`上限 ¥${v.value_high}（待确认）`:'无法估价';
-    document.querySelector('#valuation-detail-body').innerHTML=`<p>卖家：${e(item.seller_name||'未识别')}${item.is_fish_shop?'（鱼小铺）':''}</p><p>挂牌 ¥${item.price} · ${v.grade||'成色待确认'} · 调整后回收价 ${range}</p><p>${v.ai_reviewed?'本地规则 + AI复核':'本地关键词规则'} · ${v.shadow?'仅记录':e(record.notification_status)}</p>
+    document.querySelector('#valuation-detail-body').innerHTML=`<p>卖家：${e(item.seller_name||'未识别')}${item.is_fish_shop?'（鱼小铺）':''}</p><p>挂牌 ¥${item.price} · ${v.grade||'成色待确认'}${v.reference_grade?` · 按${e(v.reference_grade)}报价参考`:''} · 调整后回收价 ${range}</p><p>${v.ai_reviewed?'本地规则 + AI复核':'本地关键词规则'} · ${v.shadow?'仅记录':e(record.notification_status)}</p>
       <h4>判断依据</h4><p>${e(record.facts.grade_evidence||'没有匹配到成色关键词')}</p><p>${e(v.reason)}</p>
       <table><thead><tr><th>适用扣费</th><th>金额</th><th>报价原文</th></tr></thead><tbody>${(v.deductions||[]).map(row=>`<tr><td>${e(row.name)}</td><td>¥${row.min}${row.max!==row.min?`～${row.max}`:''}${row.open_ended?'起':''}</td><td>${e(row.source)}</td></tr>`).join('')||'<tr><td colspan="3">无已匹配扣费</td></tr>'}</tbody></table><p class="hint">${e((v.defaults||[]).join('；'))}</p>
       <h4>商品原文</h4><pre>${e(item.description||'未读到正文')}</pre><details><summary>更多商品信息与依据</summary><table>${Object.entries(labels).map(([key,label])=>{const f=record.facts.findings?.[key]||{};return `<tr><td>${label}</td><td>${e(f.value==='yes'?'是':f.value==='no'?'否':f.value||'未说明')}</td><td>${e(f.evidence||'')}</td></tr>`;}).join('')}</table></details>`;

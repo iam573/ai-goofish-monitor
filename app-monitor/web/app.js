@@ -142,6 +142,7 @@ async function loadDeals() {
     return {
       ...item, item_price: item.price, model: value.model, storage: value.storage, grade: value.grade,
       status: "pending", quote_price: null, quote_upper: value.value_high,
+      reference_grade: value.reference_grade,
       assessment_id: record.id, matched_at: record.created_at,
       notification_status: record.notification_status, reason: reasons.join("；") || value.reason,
     };
@@ -167,7 +168,7 @@ function renderDeals() {
       none: ["未推送", "muted"], shadow: ["仅记录", "muted"], duplicate: ["已处理", "muted"],
       sending: ["推送中", "muted"], pending: ["待推送", "muted"] }[deal.notification_status];
     const quote = pending
-      ? `${deal.grade || "成色待确认"} · ${deal.quote_upper != null ? `参考上限 ¥${money(deal.quote_upper)}` : "回收估值待确认"}`
+      ? `${deal.grade || "成色待确认"} · ${deal.quote_upper != null ? `${deal.reference_grade || ""}参考上限 ¥${money(deal.quote_upper)}` : "回收估值待确认"}`
       : `${deal.grade || "参考"}回收估值 ¥${money(deal.quote_price)}`;
     return `<article class="deal ${pending ? "is-pending" : ""}">
       <div class="deal-main">
@@ -417,7 +418,7 @@ async function updateRuleHints() {
     `<div class="formula-main">推送：<b>${escapeHtml(ratio ? `¥${money(Math.round(sample * ratio))}` : "¥0")}</b> ≤ 挂牌价 ≤ <b>${sourceName}${escapeHtml(values.quote_grade)}价 + ¥${money(over)}</b></div>
      <div class="hint">例：回收报价 ¥${money(sample)} → 挂牌价 ¥${money(sample + over)} 以内推送${ratio ? `，低于 ¥${money(Math.round(sample * ratio))} 视为引流或非整机` : ""}。</div>`;
 
-  if (smartEnabled) document.querySelector("#price-formula").innerHTML = `<div class="formula-main">关键词判成色 → 扣费后回收价 + ¥${money(over)}</div><div class="hint">候选用允许成色的最高价初筛，未说明项按正常处理，矛盾信息列为待确认。低价比例仅标记风险。${state.smart.shadow ? '验证模式：只记录，不发通知。' : ''}</div>`;
+  if (smartEnabled) document.querySelector("#price-formula").innerHTML = `<div class="formula-main">关键词判成色 → 扣费后回收价 + ¥${money(over)}</div><div class="hint">候选用允许成色的最高价初筛，详情成色不明按小花报价参考；未说明项按正常处理，矛盾信息列为待确认。低价比例仅标记风险。${state.smart.shadow ? '验证模式：只记录，不发通知。' : ''}</div>`;
 
   // 搜索方式与耗时估算：每次搜索 = 打开搜索 + 区域筛选 + 逐个容量筛选并读「新发」
   const scrolls = Math.max(0, values.scroll_pages || 0);
@@ -734,7 +735,7 @@ function runItemQuote(item) {
     const range = low != null ? (high != null && high !== low ? `${amount(low)}–${amount(high)}` : amount(low))
       : high != null ? `≤ ${amount(high)}（待确认）` : "待确认";
     const details = [];
-    if (value?.base_price != null) details.push(`基础报价 ${amount(value.base_price)}`);
+    if (value?.base_price != null) details.push(`基础报价${value.reference_grade ? `（${escapeHtml(value.reference_grade)}参考）` : ""} ${amount(value.base_price)}`);
     for (const deduction of value?.deductions || []) {
       const fee = deduction.min === deduction.max ? amount(deduction.min) : `${amount(deduction.min)}–${amount(deduction.max)}`;
       details.push(`${escapeHtml(deduction.name)} −${fee}${deduction.open_ended ? "起" : ""}`);

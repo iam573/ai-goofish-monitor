@@ -150,7 +150,8 @@ class NotificationService:
                           f"低于{'保守' if high is not None and low != high else ''}估值 ¥{-difference:g}" if difference < 0 else "与估值持平")
             lines.append(f"回收估值：{price} · {comparison}")
         elif high is not None:
-            lines.append(f"回收参考：≤ ¥{high:g}（候选上限，待确认）")
+            reference = f"{escape(value['reference_grade'])}参考" if value.get("reference_grade") else "候选上限"
+            lines.append(f"回收参考：≤ ¥{high:g}（{reference}，待确认）")
         else:
             lines.append("回收估值：待确认")
         if value.get("deductions"):
@@ -160,37 +161,25 @@ class NotificationService:
                 deductions.append(f"{escape(row['name'])} −{amount}{'起' if row.get('open_ended') else ''}")
             base = f"基础 ¥{value['base_price']:g} · " if value.get("base_price") is not None else ""
             lines.append(f"扣费：{base}{'；'.join(deductions)}")
-        uncertainties = []
-        for reason in value.get("uncertainties", []):
-            if not grade and reason in {"成色无法确定", "未取得确定成色的报价，使用候选上限"}:
-                continue  # Already explicit in the heading and candidate ceiling.
-            if reason == "未取得确定成色的报价，使用候选上限":
-                reason = "该成色暂无对应报价"
-            if reason not in uncertainties:
-                uncertainties.append(reason)
-        if uncertainties:
-            lines.append("待确认：" + escape("；".join(uncertainties)))
         return lines
 
     @staticmethod
-    def _deduction_rows(item: dict[str, Any]) -> list[tuple[str, str, str]]:
-        """扣费项：(名称, 扣多少, 扣后回收价)。扣后回收价 = 参考成色回收价 − 该项扣费。"""
+    def _deduction_rows(item: dict[str, Any]) -> list[tuple[str, str]]:
+        """报价参考扣费项：(名称, 扣多少)。"""
         reference = item.get("quote_reference") or {}
         money = NotificationService._money
-        base = (item.get("smart_assessment") or {}).get("base_price", item.get("quote_price"))
         rows = []
         for value in reference.get("deductions") or []:
             low = float(value["amount_min"])
             high = float(value.get("amount_max") or low)
             if value.get("open_ended"):
-                amount, after = f"−{money(low)} 起", (f"≤ {money(float(base) - low)}" if base is not None else "")
+                amount = f"−{money(low)} 起"
             elif high > low:
                 # 全角「～」：避免 Markdown 把成对的 ~ 当成删除线
                 amount = f"−{money(low)}～{money(high)}"
-                after = f"{money(float(base) - high)}～{money(float(base) - low)}" if base is not None else ""
             else:
-                amount, after = f"−{money(low)}", (money(float(base) - low) if base is not None else "")
-            rows.append((str(value["name"]), amount, after))
+                amount = f"−{money(low)}"
+            rows.append((str(value["name"]), amount))
         return rows
 
     @staticmethod
@@ -225,8 +214,8 @@ class NotificationService:
                 lines.append(f"{other}·{reference.get('grade', '')} {money(reference['other_price'])}")
         deductions = NotificationService._deduction_rows(item)
         if deductions:
-            lines.extend(("", f"🔧 {subject}扣费项（→ 扣后回收价）"))
-            lines.extend(f"· {name}  {amount}{f' → {after}' if after else ''}" for name, amount, after in deductions)
+            lines.extend(("", f"🔧 {subject}扣费项"))
+            lines.extend(f"· {name}  {amount}" for name, amount in deductions)
         elif grades:
             lines.extend(("", f"🔧 {subject}扣费项：报价单未识别到"))
         notes = reference.get("notes") or []
@@ -285,8 +274,8 @@ class NotificationService:
             )
         deductions = NotificationService._deduction_rows(item)
         if deductions:
-            rows = "\n".join(f"| {cell(name)} | {amount} | {after} |" for name, amount, after in deductions)
-            tail.append(f"**🔧 {subject}扣费项**\n\n| 项目 | 扣费 | 扣后回收价 |\n| :-- | --: | --: |\n{rows}")
+            rows = "\n".join(f"| {cell(name)} | {amount} |" for name, amount in deductions)
+            tail.append(f"**🔧 {subject}扣费项**\n\n| 项目 | 扣费 |\n| :-- | --: |\n{rows}")
         elif grades:
             tail.append(f"**🔧 {subject}扣费项**：报价单未识别到")
         notes = reference.get("notes") or []

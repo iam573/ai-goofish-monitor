@@ -21,8 +21,8 @@ FAULTS = {
     "function_fault": [r"不开机", r"不能开机", r"无法开机", r"无法(?:插卡|通话|联网)", r"插不了卡", r"面容(?:损坏|失灵|不可用)", r"无面容", r"触摸(?:失灵|故障)", r"触控(?:失灵|故障)", r"功能(?:异常|故障)", r"坏机", r"安卓爆改", r"爆改机"],
     "locked": [r"(?:id|激活|账户|账号)锁", r"(?:id|激活)机", r"卡贴(?:机)?", r"监管机", r"有锁", r"黑解", r"扩容机"],
     "repaired": [r"拆修", r"拆机", r"维修", r"修过", r"换过?(?:屏|电池|壳|后盖|主板)", r"更换过?(?:屏幕|电池|后盖|主板)", r"翻新", r"进水", r"泡水", r"扩容", r"爆改"],
-    "screen_replaced": [r"换过?屏", r"更换过?屏幕", r"第三方屏", r"组装屏"],
-    "battery_replaced": [r"换过?电池", r"更换过?电池", r"第三方电池", r"电池维修"],
+    "screen_replaced": [r"换(?:过|了)?屏", r"更换(?:过|了)?屏幕", r"第三方屏", r"组装屏"],
+    "battery_replaced": [r"(?:更换|换)(?:过|了)?(?:原装|原厂|官方|品胜|德赛|第三方|非原装)?(?:的)?电池", r"第三方电池", r"电池维修"],
     "water_damage": [r"进水", r"泡水", r"水泡"],
     "back_glass_broken": [r"(?:后盖|后玻璃|背板)(?:有|已经)?(?:破|碎|裂)"]
 }
@@ -47,6 +47,8 @@ def mentions(text: str, patterns: list[str]) -> list[tuple[bool | None, str, int
         for match in re.finditer(pattern, text, re.I):
             left, right = _clause(text, match.start(), match.end())
             context = left + match.group() + right
+            if pattern in FAULTS["screen_watermark"] and re.search(r"摄像头|镜头|像头", context) and not re.search(r"屏幕|内屏|外屏|显示", context):
+                continue
             if pattern in FAULTS["screen_watermark"] and re.search(r"图片|照片|拍摄|图上|商品图|加水印", context) and not re.search(r"屏幕|内屏|外屏|显示", context):
                 continue
             uncertain = bool(UNCERTAIN.search(context))
@@ -148,14 +150,8 @@ def extract_local(item: dict, config, quotes: list[dict], rules) -> Facts:
                                      evidence=next((v[1] for v in non_whole if v[0] is True),title)[:500])
     findings["full_price"] = Finding(value="no" if any(v[0] is True for v in false_price) else "yes",
                                     evidence=next((v[1] for v in false_price if v[0] is True),f"页面挂牌价：¥{float(item['price']):g}")[:500])
-    for key, tokens in (("color", COLORS), ("variant", ("国行", "港澳版", "港版", "美版", "日版", "韩版"))):
-        values = list(dict.fromkeys(token for token in tokens if any(v[0] is True for v in mentions(all_text,[re.escape(token)]))))
-        if len(values) > 1:
-            # Longer color names can contain a shorter alias; remove nested aliases.
-            values = [v for v in values if not any(v != other and v in other for other in values)]
-        findings[key] = Finding(value=values[0] if len(values)==1 else None, evidence=values[0] if len(values)==1 else "")
-        if len(values)>1:
-            unknowns.append(f"{key}出现多个选项，需确认对应售价")
+    from .quote_rules import extra_findings
+    extra_findings(all_text, findings, unknowns)
     findings["warranty"] = Finding()
     matches = []
     for grade, words in config.grade_keywords.items():
@@ -174,33 +170,8 @@ def extract_local(item: dict, config, quotes: list[dict], rules) -> Facts:
 
 
 def automatic_policy(row: dict) -> Policy:
-    """Only compile unambiguous, supported quote conditions. Other notes stay unconfirmed."""
-    name = clean(row["name"]).strip()
-    text = clean(row["text"])
-    if name in {"不分颜色", "不区分颜色", "无颜色差价", "颜色不加减"}:
-        return Policy(reviewed=True,action="ignore")
-    if re.search(r"后盖(?:破|碎).*当大花收", text):
-        return Policy(reviewed=True,action="grade",field="back_glass_broken",operator="eq",value="yes",group="back_glass",grade="大花")
-    if row.get("amount_min") is None:
-        return Policy()
-    threshold = re.search(r"电池(?:健康度|健康|效率|容量)?(?:低于|小于|不足|<|＜)\s*(\d{2,3})",name)
-    if threshold and not re.search(r"(?:港|美|日|韩)版|(?:白|黑|银|蓝|紫)色",name):
-        return Policy(reviewed=True,field="battery_health",operator="lt",value=threshold.group(1),group="battery",tiered=True)
-    threshold = re.search(r"电池(?:健康度|健康|效率|容量)?\s*(\d{2,3})\s*%?以下",name)
-    if threshold:
-        return Policy(reviewed=True,field="battery_health",operator="le",value=threshold.group(1),group="battery",tiered=True)
-    known = {"换屏":("screen_replaced","screen"),"更换屏幕":("screen_replaced","screen"),
-             "换电池":("battery_replaced","battery"),"更换电池":("battery_replaced","battery"),
-             "水印":("screen_watermark","screen"),"屏幕水印":("screen_watermark","screen"),
-             "烧屏":("screen_watermark","screen"),"进水":("water_damage","repair"),
-             "拆修":("repaired","repair"),"后盖破":("back_glass_broken","back_glass")}
-    stripped = re.sub(r"[\s:：]+", "",name)
-    if stripped in known:
-        field, group=known[stripped]
-        return Policy(reviewed=True,field=field,operator="eq",value="yes",group=group)
-    if name in COLORS:
-        return Policy(reviewed=True,field="color",operator="eq",value=name,group="color")
-    return Policy()
+    from .quote_rules import compile_policy
+    return compile_policy(row)
 
 
 def merge_review(local: Facts, review: Facts) -> Facts:
@@ -243,16 +214,28 @@ def merge_review(local: Facts, review: Facts) -> Facts:
 
 def note_might_apply(row: dict, item: dict, facts: Facts) -> bool:
     """Do not penalize absent conditions; surface explicitly mentioned unsupported quote notes."""
-    text = clean(item.get("description", ""))
+    text = clean("\n".join([item.get("title", ""), item.get("description", ""),
+                            *item.get("detail_parameters", [])]))
     name = clean(row["name"])
+    below = re.search(r"电池(?:健康度|健康|效率|容量)?(?:低于|小于|不足|<)\s*(\d{2,3})", name)
+    at_most = re.search(r"电池(?:健康度|健康|效率|容量)?\s*(\d{2,3})\s*%?以下", name)
+    if below or at_most:
+        battery = facts.findings.get("battery_health")
+        if not battery or battery.value is None:
+            return bool(battery and battery.evidence)
+        threshold = float((below or at_most).group(1))
+        health = float(battery.value)
+        return health < threshold if below else health <= threshold
+    if re.search(r"电池(?:鼓|膨胀)|鼓包", name):
+        # Scope “不” to this fault; globally treating it as negation would hide “不开机”.
+        swelling_text = re.sub(r"不(?=鼓包|膨胀)", "无", text)
+        return any(value is not False for value, *_ in mentions(
+            swelling_text, [r"鼓包", r"膨胀", r"电池(?:有|出现|已经)?鼓(?:起)?"]))
     for key, patterns in FAULTS.items():
         finding = facts.findings.get(key)
         if finding and (finding.value == "yes" or finding.value is None and finding.evidence):
             if any(re.search(pattern, name, re.I) for pattern in patterns):
                 return True
-    battery = facts.findings.get("battery_health")
-    if "电池" in name and battery and battery.value is not None:
-        return True
     for key in ("color", "variant"):
         finding = facts.findings.get(key)
         if finding and finding.value and clean(finding.value) in name:

@@ -65,6 +65,56 @@ def test_deterministic_pricing_uses_quote_money_and_fixed_deduction(database):
     assert (result['base_price'],result['value_low'],result['value_high'],result['threshold_low'])==(5200,4900,4900,5100)
 
 
+@pytest.mark.parametrize('price,fee,status,ceiling', [
+    (4800, 0, 'pending', 4600), (4801, 0, 'rejected', 4600),
+    (4500, 300, 'pending', 4300), (4501, 300, 'rejected', 4300),
+])
+def test_unknown_grade_uses_xiaohua_and_applies_deductions(database, price, fee, status, ceiling):
+    f = facts(); f.grade = None; f.grade_evidence = ''
+    value = price_facts({**ITEM, 'price': price}, f, quote_setup(database), [deduction(fee, fee)] if fee else [],
+                        SmartConfig(), Rules(), '17', '256')
+    assert value['status'] == status and value['grade'] is None
+    assert value['reference_grade'] == '小花' and value['base_price'] == 4600
+    assert value['value_high'] == ceiling and value['threshold_high'] == ceiling + 200
+    assert value['value_low'] is None and value['threshold_low'] is None
+    assert value['quote_entry_id'] is None
+
+
+@pytest.mark.parametrize('missing_quote', [True, False])
+def test_unknown_grade_does_not_use_liangji_if_xiaohua_is_unavailable(database, missing_quote):
+    quotes = quote_setup(database)
+    config = SmartConfig()
+    if missing_quote:
+        quotes = [quote for quote in quotes if quote['grade'] != '小花']
+    else:
+        config = SmartConfig(accepted_grades=['靓机'])
+    f = facts(); f.grade = None
+    value = price_facts(ITEM, f, quotes, [], config, Rules(), '17', '256')
+    assert value['status'] == 'rejected' and '小花报价' in value['reason']
+    assert value['base_price'] is None and value['value_high'] is None
+
+
+async def test_pricing_version_recalculates_without_repeating_ai_facts(database, monkeypatch):
+    from app_monitor import smart
+    quote_setup(database)
+    database.state_set('smart_config', SmartConfig(ai_enabled=True).model_dump())
+    service = SmartService(database, settings)
+    calls = []
+    async def extract(*args):
+        calls.append(True)
+        f = facts(); f.grade = None; f.grade_evidence = ''
+        return f
+    monkeypatch.setattr(service, 'request_facts', extract)
+    rules = Rules(max_over_quote=600)
+    item = {**ITEM, 'description': TEXT.replace('无明显划痕无磕碰。', '')}
+    first = await service.assess(item, rules, '17', '256', True)
+    monkeypatch.setattr(smart, 'PRICING_VERSION', 'test-new-pricing-version')
+    second = await service.assess(item, rules, '17', '256', True)
+    assert first['id'] != second['id'] and calls == [True]
+    assert second['result']['base_price'] == 4600 and second['result']['grade'] is None
+    assert service.get(first['id'])['result'] == first['result']
+
+
 @pytest.mark.parametrize('price,status',[(5000,'matched'),(5100,'pending'),(5201,'rejected')])
 def test_interval_deduction_uses_conservative_threshold(database,price,status):
     result=price_facts({**ITEM,'price':price},facts(),quote_setup(database),[deduction(200,400)],SmartConfig(),Rules(),'17','256')
@@ -90,7 +140,7 @@ def test_default_blocked_fault_and_non_whole_price_reject(database):
 
 def test_unconfirmed_and_overlapping_rules_require_review(database):
     quotes=quote_setup(database); row=deduction();row['policy']['reviewed']=False
-    assert price_facts(ITEM,facts(),quotes,[row],SmartConfig(),Rules(),'17','256')['status']=='pending'
+    assert price_facts(ITEM,facts(),quotes,[row],SmartConfig(),Rules(),'17','256')['status']=='rejected'
     result=price_facts(ITEM,facts(),quotes,[deduction(),deduction()],SmartConfig(),Rules(),'17','256')
     assert result['status']=='pending' and any('重复' in text for text in result['uncertainties'])
 
@@ -143,17 +193,18 @@ class Notifier:
 
 
 async def test_pending_dedup_upgrade_and_shadow_delivery(database,monkeypatch):
+    rules=Rules(region_city='厦门',max_over_quote=600)
     quote_setup(database);config=SmartConfig(enabled=True,shadow=False,ai_enabled=True)
-    database.state_set('smart_config',config.model_dump());save_rules(database,Rules(region_city='厦门'))
+    database.state_set('smart_config',config.model_dump());save_rules(database,rules)
     notifier=Notifier();service=MonitorService(database,None,notifier)
     async def extract(*args):f=facts();f.grade=None;return f
     monkeypatch.setattr(service.smart,'request_facts',extract)
-    await service.process_items([ITEM],Rules(region_city='厦门'),'iPhone 17',True,'256',expected_model='17')
-    await service.process_items([ITEM],Rules(region_city='厦门'),'iPhone 17',True,'256',expected_model='17')
+    await service.process_items([ITEM],rules,'iPhone 17',True,'256',expected_model='17')
+    await service.process_items([ITEM],rules,'iPhone 17',True,'256',expected_model='17')
     assert len(notifier.sent)==1 and notifier.sent[0]['smart_assessment']['status']=='pending'
-    record=await service.smart.assess(ITEM,Rules(region_city='厦门'),'17','256',True,force=True,manual=facts())
-    await service.publish_smart(record,Rules(region_city='厦门'))
-    await service.publish_smart(record,Rules(region_city='厦门'))
+    record=await service.smart.assess(ITEM,rules,'17','256',True,force=True,manual=facts())
+    await service.publish_smart(record,rules)
+    await service.publish_smart(record,rules)
     assert len(notifier.sent)==2 and notifier.sent[-1]['smart_assessment']['status']=='matched'
     assert notifier.sent[-1]['seller_name']=='小鱼'
     database.state_set('smart_config',config.model_copy(update={'shadow':True}).model_dump())
@@ -164,11 +215,11 @@ async def test_pending_dedup_upgrade_and_shadow_delivery(database,monkeypatch):
 
 def test_pending_notification_shows_bounds_and_seller_not_profit(database):
     f=facts();f.grade=None
-    value=price_facts(ITEM,f,quote_setup(database),[],SmartConfig(),Rules(),'17','256')
+    value=price_facts(ITEM,f,quote_setup(database),[],SmartConfig(),Rules(max_over_quote=600),'17','256')
     item={**ITEM,'model':'17','storage':'256','smart_assessment':value,'assessment_facts':f.model_dump()}
     title,body=NotificationService._format_message(item,'','',[])
     assert title=='【待确认】iPhone 17 256G'
-    assert '成色待确认' in body and '回收参考：≤ ¥5200（候选上限，待确认）' in body
+    assert '成色待确认' in body and '回收参考：≤ ¥4600（小花参考，待确认）' in body
     assert '低于估值' not in body and '成色无法确定' not in body
     assert '小鱼（鱼小铺）' in body and '利润' not in body
 

@@ -1,7 +1,7 @@
 import pytest
 
 from app_monitor.config import Settings
-from app_monitor.iphone_collector import IPhoneCollector
+from app_monitor.iphone_collector import IPhoneCollector, PhoneCard
 
 
 class Clock:
@@ -105,6 +105,52 @@ def test_element_lookup_filters_on_device_in_a_single_command():
     assert len(driver.queries) == 1
 
 
+def test_candidate_lookup_filters_on_device_but_requires_exact_name_and_position():
+    from appium.webdriver.common.appiumby import AppiumBy
+    card = PhoneCard('iPhone 14 256G 自用', 2000, '厦门', 20, 400)
+    class Element:
+        def __init__(self, name, y):
+            self.name, self.rect = name, {'y': y}
+        def get_attribute(self, name):
+            assert name == 'name'
+            return self.name
+        def is_displayed(self):
+            pytest.fail('可见性已在同次原生查询中核对')
+    expected = Element('  ' + card.title + '\n', 420)
+    class Driver:
+        queries = []
+        def find_elements(self, strategy, query):
+            assert strategy == AppiumBy.IOS_PREDICATE
+            assert "type == 'XCUIElementTypeStaticText'" in query and 'visible == true' in query
+            assert f"name CONTAINS '{card.title}'" in query
+            self.queries.append(query)
+            return [Element(card.title + ' 手机壳', 400), Element(card.title, 60), expected]
+    driver = Driver()
+    assert IPhoneCollector._candidate_title(driver, card) is expected
+    assert len(driver.queries) == 1
+
+
+@pytest.mark.parametrize('name,y', [('iPhone 14 256G 自用 手机壳', 400),
+                                 ('iPhone 14 256G 自用', 500), ('iPhone 14 256G 自用', 300)])
+def test_candidate_prefilter_never_accepts_partial_title_or_other_position(name, y):
+    class Element:
+        rect = {'y': y}
+        def get_attribute(self, _): return name
+    class Driver:
+        def find_elements(self, *args): return [Element()]
+    card = PhoneCard('iPhone 14 256G 自用', 2000, '厦门', 20, 400)
+    assert IPhoneCollector._candidate_title(Driver(), card) is None
+
+
+def test_candidate_query_quotes_apostrophes_and_backslashes():
+    class Driver:
+        def find_elements(self, strategy, query):
+            assert "name CONTAINS 'iPhone 14 owner\\'s \\\\ 自用'" in query
+            return []
+    card = PhoneCard("iPhone 14 owner's \\ 自用", 2000, '厦门', 20, 400)
+    assert IPhoneCollector._candidate_title(Driver(), card) is None
+
+
 def test_capacity_waits_for_selection_and_popup_closure(monkeypatch):
     class Element:
         def __init__(self, driver, name):
@@ -112,10 +158,10 @@ def test_capacity_waits_for_selection_and_popup_closure(monkeypatch):
             self.rect = {'y': 370 if name == '新发' else 411}
 
         def is_displayed(self):
-            return True
+            pytest.fail('容量入口的可见性应合并进原生查询')
 
         def get_attribute(self, key):
-            return 'XCUIElementTypeStaticText'
+            pytest.fail('容量入口类型应合并进原生查询')
 
         def click(self):
             driver = self.driver
@@ -166,7 +212,8 @@ def test_capacity_waits_for_selection_and_popup_closure(monkeypatch):
               <XCUIElementTypeStaticText name="{self.current}" y="411" x="78" width="44" visible="true" />
               {picker}</XCUIElementTypeApplication>'''
 
-        def find_elements(self, *args):
+        def find_elements(self, strategy, query):
+            assert "type == 'XCUIElementTypeStaticText'" in query and 'visible == true' in query
             return [Element(self, '128GB')]
 
     driver = Driver()

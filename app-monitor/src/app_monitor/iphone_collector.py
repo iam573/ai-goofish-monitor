@@ -793,6 +793,19 @@ class IPhoneCollector:
         return next(iter(elements), None)
 
     @staticmethod
+    def _candidate_title(driver: Any, card: PhoneCard) -> Any | None:
+        from appium.webdriver.common.appiumby import AppiumBy
+
+        quoted = card.title.replace("\\", "\\\\").replace("'", "\\'")
+        # CONTAINS retains names with surrounding whitespace. Only an exact
+        # stripped name at the observed card position may actually be clicked.
+        query = (f"type == 'XCUIElementTypeStaticText' AND visible == true "
+                 f"AND name CONTAINS '{quoted}'")
+        return next((element for element in driver.find_elements(AppiumBy.IOS_PREDICATE, query)
+                     if str(element.get_attribute("name") or "").strip() == card.title
+                     and abs(element.rect["y"] - card.y) < 100), None)
+
+    @staticmethod
     def _close_share_sheet(driver: Any) -> None:
         from appium.webdriver.common.appiumby import AppiumBy
 
@@ -1016,7 +1029,7 @@ class IPhoneCollector:
     def _reveal_storage_chip(self, driver: Any) -> tuple[str, list[str]]:
         restored: list[str] = []
         vertical_attempts = horizontal_attempts = 0
-        for _ in range(6):
+        for _ in range(12):
             source = driver.page_source
             current = active_storage_chip(source)
             if current is not None:
@@ -1027,16 +1040,21 @@ class IPhoneCollector:
             root = ET.fromstring(source)
             app = next(root.iter("XCUIElementTypeApplication"), root)
             width = int(app.get("width") or 0)
-            if (hidden is not None and width and horizontal_attempts < 2
+            if (hidden is not None and width and horizontal_attempts < 8
                     and (int(hidden.get("x") or 0) + int(hidden.get("width") or 0) > width
                          or int(hidden.get("x") or 0) < 0)):
-                # The capacity chip can sit beyond the edge on narrow phones.
-                # Drag only the observed chip row, using this device's geometry.
+                # Correct the observed overflow in small steps. A full-width
+                # drag can fling the chip across the opposite edge on iOS.
                 off_right = int(hidden.get("x") or 0) + int(hidden.get("width") or 0) > width
                 y = int(hidden.get("y") or 0) + int(hidden.get("height") or 0) // 2
-                driver.execute_script("mobile: dragFromToForDuration", {
-                    "duration": 0.3, "fromX": int(width * (0.85 if off_right else 0.25)), "fromY": y,
-                    "toX": int(width * (0.25 if off_right else 0.85)), "toY": y,
+                overflow = (int(hidden.get("x") or 0) + int(hidden.get("width") or 0) - width
+                            if off_right else -int(hidden.get("x") or 0))
+                distance = min(width * .4, max(45, overflow + 24))
+                start = width * (.75 if off_right else .25)
+                driver.execute_script("mobile: dragFromToWithVelocity", {
+                    "pressDuration": 0.5, "holdDuration": 0.5, "velocity": 180,
+                    "fromX": int(start), "fromY": y,
+                    "toX": int(start - distance if off_right else start + distance), "toY": y,
                 })
                 horizontal_attempts += 1
                 restored.append("横向显示容量筛选")
@@ -1063,14 +1081,36 @@ class IPhoneCollector:
         apple, confirm = bounds
         x = (int(apple.get("x") or 0) + int(apple.get("width") or 0)
              + int(confirm.get("x") or 0) + int(confirm.get("width") or 0)) / 2
-        top = int(apple.get("y") or 0) + 80
-        bottom = int(confirm.get("y") or 0) - 45
-        driver.execute_script("mobile: dragFromToForDuration", {
-            "duration": 0.35, "fromX": x, "toX": x,
-            "fromY": bottom if direction == "up" else top,
-            "toY": top if direction == "up" else bottom,
+        top = int(apple.get("y") or 0) + 12
+        bottom = int(confirm.get("y") or 0) - 20
+        middle = (top + bottom) / 2
+        distance = min(180, (bottom - top) * .45)
+        if distance <= 0:
+            raise RuntimeError("机型面板滚动区域无效")
+        # Keep successive viewports overlapping. The old fast, long gesture
+        # could fling past an entire model series between snapshots.
+        start, end = middle + distance / 2, middle - distance / 2
+        driver.execute_script("mobile: dragFromToWithVelocity", {
+            "pressDuration": 0.5, "holdDuration": 0.5, "velocity": 180,
+            "fromX": x, "toX": x,
+            "fromY": start if direction == "up" else end,
+            "toY": end if direction == "up" else start,
         })
-        time.sleep(0.4)
+
+    @staticmethod
+    def _model_picker_position(source: str) -> tuple[tuple[str, str], ...]:
+        """Only panel model cells describe scroll progress, never product text."""
+        bounds = _model_picker_bounds(source)
+        if bounds is None:
+            return ()
+        apple, confirm = bounds
+        return tuple((_text(node), node.get("y", ""))
+                     for cell in ET.fromstring(source).iter("XCUIElementTypeCell")
+                     if cell.get("visible") == "true"
+                     and int(cell.get("x") or 0) >= int(apple.get("x") or 0) + int(apple.get("width") or 0)
+                     and int(cell.get("y") or 0) < int(confirm.get("y") or 0)
+                     for node in cell.iter("XCUIElementTypeStaticText")
+                     if node.get("visible") == "true")
 
     def _apply_model(self, driver: Any, keyword: str) -> list[str]:
         """精确核对面板选中态，并确认提交后的品牌标签已生效。"""
@@ -1107,7 +1147,9 @@ class IPhoneCollector:
         self._tap_node(driver, bounds[0])
         clicked.append("苹果/Apple")
         # 「全部」可消除上次勾选，防止再次点击当前机型反而取消选中。
-        for _ in range(7):
+        previous_position = None
+        unchanged = 0
+        for attempt in range(25):
             source = driver.page_source
             bounds = _model_picker_bounds(source)
             if bounds is None:
@@ -1121,10 +1163,15 @@ class IPhoneCollector:
                 self._tap_node(driver, all_option)
                 clicked.append("全部")
                 break
+            position = self._model_picker_position(source)
+            unchanged = unchanged + 1 if position == previous_position else 0
+            if attempt == 24 or unchanged >= 2:
+                raise RuntimeError("无法清空品牌面板中的旧机型")
+            previous_position = position
             self._scroll_model_picker(driver, bounds, "down")
-        else:
-            raise RuntimeError("无法清空品牌面板中的旧机型")
-        for _ in range(7):
+        previous_position = None
+        unchanged = 0
+        for attempt in range(25):
             source = driver.page_source
             option = model_picker_option(source, keyword)
             if option is not None:
@@ -1134,9 +1181,12 @@ class IPhoneCollector:
             bounds = _model_picker_bounds(source)
             if bounds is None:
                 raise RuntimeError("机型选项面板意外关闭")
+            position = self._model_picker_position(source)
+            unchanged = unchanged + 1 if position == previous_position else 0
+            if attempt == 24 or unchanged >= 2:
+                raise RuntimeError(f"苹果品牌下未找到精确机型「{keyword}」，未继续采集")
+            previous_position = position
             self._scroll_model_picker(driver, bounds, "up")
-        else:
-            raise RuntimeError(f"苹果品牌下未找到精确机型「{keyword}」，未继续采集")
         def selected_model_ready(xml: str) -> bool:
             return (_model_picker_bounds(xml) is not None
                     and {normalize_search_text(name) for name in checked_models(xml, driver.get_screenshot_as_png())}
@@ -1166,10 +1216,11 @@ class IPhoneCollector:
             return [*restored, f"已确认 {target}"]
         sort = self._find(driver, "新发", ("XCUIElementTypeStaticText",))
         sort_y = sort.rect["y"] if sort else -1000
-        choices = driver.find_elements(AppiumBy.IOS_PREDICATE, f"name == '{current}' OR label == '{current}'")
-        entrance = next((element for element in choices if element.is_displayed()
-                         and element.get_attribute("type") == "XCUIElementTypeStaticText"
-                         and sort_y + 20 <= element.rect["y"] <= sort_y + 70), None)
+        choices = driver.find_elements(AppiumBy.IOS_PREDICATE,
+                                       f"(name == '{current}' OR label == '{current}') "
+                                       "AND type == 'XCUIElementTypeStaticText' AND visible == true")
+        entrance = next((element for element in choices
+                         if sort_y + 20 <= element.rect["y"] <= sort_y + 70), None)
         if entrance is None:
             raise RuntimeError(f"找不到容量入口「{current}」")
         entrance.click()
@@ -1230,9 +1281,7 @@ class IPhoneCollector:
     ) -> str:
         from appium.webdriver.common.appiumby import AppiumBy
 
-        title = next((el for el in driver.find_elements(AppiumBy.CLASS_NAME, "XCUIElementTypeStaticText")
-                      if el.is_displayed() and str(el.get_attribute("name") or "").strip() == card.title
-                      and abs(el.rect["y"] - card.y) < 100), None)
+        title = self._candidate_title(driver, card)
         if title is None:
             raise RuntimeError("候选卡片已离开当前屏，跳过以免点错商品")
         actions = actions if actions is not None else []

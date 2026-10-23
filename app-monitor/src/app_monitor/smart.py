@@ -20,7 +20,8 @@ from .quotes import GRADE_COLUMNS, deduction_storages, latest_deductions, latest
 from .rules import Rules
 
 logger = logging.getLogger(__name__)
-VERSION = "local-first-v2"
+VERSION = "local-quote-facts-v3"
+PRICING_VERSION = "compound-deductions-v3"
 BATTERY_PATTERN = re.compile(r"(?:电池(?:健康度|健康|效率|容量|寿命)?|健康度|电池寿命)\s*[为是约:：]?\s*(?:百分之)?\s*(100(?:\.0+)?|[1-9]?\d(?:\.\d+)?)\s*(?:%|％)?(?![\d.])", re.I)
 FACT_FIELDS = ("model", "storage", "whole_phone", "full_price", "battery_health", "screen_watermark",
                "screen_broken", "function_fault", "locked", "repaired", "screen_replaced", "battery_replaced", "water_damage", "back_glass_broken", "warranty", "color", "variant")
@@ -29,6 +30,14 @@ FACT_LABELS = {"model": "机型", "storage": "容量", "whole_phone": "整机", 
                "function_fault": "功能故障", "locked": "激活锁/监管/卡贴/有锁", "repaired": "拆修情况",
                "screen_replaced": "换屏", "battery_replaced": "换电池", "water_damage": "进水", "back_glass_broken": "后盖破损",
                "warranty": "保修情况", "color": "颜色", "variant": "版本"}
+QUOTE_FLAGS = {"screen_original": "原装更换屏", "screen_popup": "屏幕弹窗", "battery_popup": "电池弹窗",
+               "battery_third_party": "第三方电池", "battery_swollen": "电池鼓包", "overseas": "海外版本",
+               "face_id_fault": "面容故障", "rear_camera_replaced": "后摄更换", "camera_watermark": "镜头水印",
+               "screen_aging": "屏幕老化", "front_camera_spots": "前摄彩点", "rear_camera_spots": "后摄彩点",
+               "front_camera_flare": "前镜头蓝光", "rear_camera_flare": "后镜头蓝光",
+               "true_tone_missing": "缺少原彩", "full_set_missing": "缺少全套配件"}
+FACT_FIELDS += tuple(QUOTE_FLAGS)
+FACT_LABELS.update(QUOTE_FLAGS)
 DEFAULT_GRADES = {
     "靓机": "99新、九九新、几乎全新、近全新、充新或无明显使用痕迹，可初判靓机；具体瑕疵和故障优先。无拆修单独不代表靓机。",
     "小花": "明确描述轻微划痕或轻微使用痕迹，没有明显磕碰掉漆或屏幕功能缺陷。",
@@ -120,6 +129,7 @@ class Facts(BaseModel):
         if set(values) - set(FACT_FIELDS):
             raise ValueError("未知的商品事实字段")
         flags = {"whole_phone", "full_price", "screen_watermark", "screen_broken", "function_fault", "locked", "repaired", "screen_replaced", "battery_replaced", "water_damage", "back_glass_broken"}
+        flags.update(QUOTE_FLAGS)
         for key, finding in values.items():
             if key in flags and finding.value not in {None, "yes", "no"}:
                 raise ValueError(f"{key} 仅允许 yes/no/null")
@@ -153,29 +163,17 @@ class Facts(BaseModel):
         return self
 
 
-class Policy(BaseModel):
+class Condition(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    reviewed: bool = False
-    action: Literal["deduct", "grade", "ignore"] = "deduct"
     field: str = "battery_health"
-    operator: Literal["eq", "contains", "lt", "le", "gt", "ge"] = "lt"
+    operator: Literal["eq", "contains", "in", "lt", "le", "gt", "ge"] = "lt"
     value: str = Field(default="80", max_length=150)
-    group: str = Field(default="battery", min_length=1, max_length=60)
-    grade: str = "大花"
-    tiered: bool = False
 
     @field_validator("field")
     @classmethod
     def known_field(cls, value: str) -> str:
         if value not in FACT_FIELDS:
             raise ValueError("不支持的扣费触发字段")
-        return value
-
-    @field_validator("grade")
-    @classmethod
-    def known_grade(cls, value: str) -> str:
-        if value not in GRADE_COLUMNS:
-            raise ValueError("不支持的降档成色")
         return value
 
     def matches(self, finding: Finding | None) -> bool | None:
@@ -186,6 +184,8 @@ class Policy(BaseModel):
             return actual.casefold() == self.value.casefold()
         if self.operator == "contains":
             return self.value.casefold() in actual.casefold()
+        if self.operator == "in":
+            return actual.casefold() in {value.casefold() for value in self.value.split("|")}
         try:
             a, b = float(actual), float(self.value)
         except ValueError:
@@ -195,21 +195,60 @@ class Policy(BaseModel):
         return {"lt": a < b, "le": a <= b, "gt": a > b, "ge": a >= b}[self.operator]
 
 
+class Policy(Condition):
+    reviewed: bool = False
+    action: Literal["deduct", "grade", "ignore"] = "deduct"
+    group: str = Field(default="battery", min_length=1, max_length=60)
+    grade: str = "大花"
+    tiered: bool = False
+    requires: list[Condition] = Field(default_factory=list, max_length=10)
+    alternatives: list[Condition] = Field(default_factory=list, max_length=10)
+    grades: list[str] = Field(default_factory=list)
+    covers: list[str] = Field(default_factory=list)
+    priority: int = 0
+    automatic: bool = False
+
+    @field_validator("grade")
+    @classmethod
+    def known_grade(cls, value: str) -> str:
+        if value not in GRADE_COLUMNS:
+            raise ValueError("不支持的降档成色")
+        return value
+
+    @field_validator("grades")
+    @classmethod
+    def known_grades(cls, values):
+        if any(value not in GRADE_COLUMNS for value in values):
+            raise ValueError("不支持的适用成色")
+        return values
+
+    def applies(self, facts: Facts, grade: str | None) -> bool | None:
+        if self.grades and grade not in self.grades:
+            return False
+        candidates = [self.matches(facts.findings.get(self.field)),
+                      *(condition.matches(facts.findings.get(condition.field)) for condition in self.alternatives)]
+        primary = True if True in candidates else None if None in candidates else False
+        values = [primary, *(condition.matches(facts.findings.get(condition.field)) for condition in self.requires)]
+        return False if False in values else None if None in values else True
+
+
 def load_config(database: Database) -> SmartConfig:
     return SmartConfig.model_validate(database.state_get("smart_config", {}))
 
 
 def policies_for(database: Database, model: str, category: str, storage: str | None = None) -> list[dict]:
-    from .local_rules import automatic_policy
+    from .quote_rules import compile_rows
     key = "warranty" if category == "100027" else "no_warranty"
     saved = database.state_get("smart_policies", {})
     values = []
-    for row in latest_deductions(database, model).get(key, []):
-        specs = deduction_storages(row["text"])
+    for row in compile_rows(latest_deductions(database, model).get(key, [])):
+        if any(digest([category, model, *identity]) in saved for identity in row.get("_parent_rule_identities", [])):
+            continue  # A manual rule on a source note owns it; do not silently add derived tiers.
+        specs = deduction_storages(row["name"])
         if storage and specs and storage not in specs:
             continue
-        rule_key = digest([category, model, row["name"], row["kind"], bool(row["open_ended"]), row["column_index"], row["position"]])
-        values.append({**row, "rule_key": rule_key, "policy": saved.get(rule_key, automatic_policy(row).model_dump())})
+        rule_key = digest([category, model, *row.get("_rule_identity", [row["name"], row["kind"], bool(row["open_ended"]), row["column_index"], row["position"]])])
+        values.append({**row, "rule_key": rule_key, "policy": saved.get(rule_key, row["policy"])})
     return values
 
 
@@ -286,7 +325,16 @@ def price_facts(item: dict, facts: Facts, quotes: list[dict], policies: list[dic
     if config.require_no_repair and (not facts.findings.get("repaired") or facts.findings["repaired"].value is None):
         unknown.append("拆修情况未明确")
     active, grade_overrides = [], []
+    unpriced_notes = []
     handled_conditions = set()
+    scope_facts = facts.model_copy(deep=True)
+    if not scope_facts.findings.get("storage") or not scope_facts.findings["storage"].value:
+        scope_facts.findings["storage"] = Finding(value=storage)
+    scope_grade = facts.grade or "小花"
+    downgrades = {p.grade for row in policies if (p := Policy.model_validate(row["policy"])).reviewed
+                  and p.action == "grade" and p.applies(scope_facts, scope_grade)}
+    if len(downgrades) == 1:
+        scope_grade = next(iter(downgrades))
     triggered: dict[str, list[tuple[dict, Policy]]] = {}
     for row in policies:
         policy = Policy.model_validate(row["policy"])
@@ -294,44 +342,77 @@ def price_facts(item: dict, facts: Facts, quotes: list[dict], policies: list[dic
             from .local_rules import note_might_apply
             if note_might_apply(row, item, facts):
                 unknown.append(f"可能适用的报价备注尚未识别：{row['text']}")
+                unpriced_notes.append(row["text"])
             continue
         if policy.action == "ignore":
-            if policy.matches(facts.findings.get(policy.field)):
+            if policy.applies(scope_facts, scope_grade):
                 handled_conditions.add(policy.field)
             continue
-        match = policy.matches(facts.findings.get(policy.field))
+        match = policy.applies(scope_facts, (facts.grade or "小花") if policy.action == "grade" else scope_grade)
         if match is None:
-            finding = facts.findings.get(policy.field)
-            if finding and finding.evidence:
+            relevant = [facts.findings.get(condition.field) for condition in [policy, *policy.requires, *policy.alternatives]]
+            if any(finding and finding.evidence for finding in relevant):
                 unknown.append(f"扣费条件存在歧义：{row['name']}")
         elif match:
             triggered.setdefault(policy.group, []).append((row, policy))
+    if "replacement_bundle" in triggered:
+        triggered.pop("screen_part", None)
+        triggered.pop("battery_part", None)
+    if any(policy.field == "battery_health" for _,policy in triggered.get("battery_part", [])):
+        triggered.pop("battery_health", None)  # “按弹电” replaces the health tier rather than charging it twice.
     for group, matches in triggered.items():
         if len(matches) > 1 and all(p.tiered and p.field == "battery_health" and p.operator in {"lt", "le"} and p.action == "deduct" for _, p in matches):
             threshold = min(float(p.value) for _, p in matches)
             matches = [(row, p) for row, p in matches if float(p.value) == threshold]
+        from .quote_rules import resolve_automatic_group
+        matches = resolve_automatic_group(matches, scope_facts, policies, scope_grade, unknown)
         if len(matches) > 1:
             unknown.append(f"扣费/降档可能重复：{group}，需人工确认")
-            continue  # Keep the optimistic ceiling; neither overlapping rule is silently applied.
+            if all(p.action == "deduct" and row.get("amount_min") is not None for row,p in matches):
+                first, p = matches[0]
+                merged = {**first, "amount_min": min(float(row["amount_min"]) for row,_ in matches),
+                          "amount_max": max(float(row.get("amount_max") or row["amount_min"]) for row,_ in matches),
+                          "open_ended": any(row.get("open_ended") for row,_ in matches),
+                          "text": "；".join(dict.fromkeys(row["text"] for row,_ in matches))}
+                matches = [(merged,p)]
+            else:
+                unpriced_notes.extend(row["text"] for row,_ in matches)
+                continue
         row, policy = matches[0]
         handled_conditions.add(policy.field)
+        handled_conditions.update(policy.covers)
         if policy.action == "grade":
             grade_overrides.append(policy.grade)
         elif row.get("amount_min") is None:
             unknown.append(f"扣费金额不明确：{row['text']}")
+            unpriced_notes.append(row["text"])
         else:
             low, high = float(row["amount_min"]), float(row.get("amount_max") or row["amount_min"])
             if not math.isfinite(low) or not math.isfinite(high) or low < 0 or high < low:
                 unknown.append(f"扣费金额异常：{row['text']}")
+                unpriced_notes.append(row["text"])
             else:
                 active.append(row)
-    for key in ("screen_replaced", "battery_replaced", "water_damage", "back_glass_broken", "repaired"):
+    unpriced = []
+    for key in ("screen_replaced", "battery_replaced", "water_damage", "back_glass_broken", "repaired", *QUOTE_FLAGS):
         finding = facts.findings.get(key)
         if finding and finding.value == "yes" and key not in handled_conditions:
+            if key in {"overseas", "full_set_missing"}:
+                relevant = any(re.search(r"水货|港澳|版本" if key == "overseas" else r"全套|配件", row["text"])
+                               and not (row["policy"].get("reviewed") and row["policy"].get("action") == "ignore") for row in policies)
+                if not relevant:
+                    continue
             # A specific replacement deduction already covers the generic repair flag.
             if key == "repaired" and handled_conditions & {"screen_replaced", "battery_replaced", "water_damage"}:
                 continue
+            if key in {"screen_original", "screen_popup"} and "screen_replaced" in handled_conditions:
+                continue
+            if key in {"battery_third_party", "battery_popup"} and "battery_replaced" in handled_conditions:
+                continue
+            if key == "overseas" and "variant" in handled_conditions:
+                continue
             unknown.append(f"明确存在{FACT_LABELS[key]}，但无可确定的适用扣费或降档规则")
+            unpriced.append(key)
     grade = facts.grade
     if grade_overrides:
         if len(set(grade_overrides)) > 1:
@@ -342,9 +423,16 @@ def price_facts(item: dict, facts: Facts, quotes: list[dict], policies: list[dic
     if grade and grade not in config.accepted_grades:
         return reject(f"降档后成色不在接受范围：{grade}")
     quote = next((q for q in available if q["grade"] == grade), None)
-    if quote is None:
+    reference = quote
+    if grade is None:
+        reference = next((q for q in allowed if q["grade"] == "小花"), None)
+        if reference is None:
+            return reject("成色未确定，且没有可用的小花报价，无法计价")
+        result["reference_grade"] = "小花"
+    elif quote is None:
         unknown.append("未取得确定成色的报价，使用候选上限")
-    base = float(quote["price"]) if quote else max(float(q["price"]) for q in allowed)
+        reference = max(allowed, key=lambda q: float(q["price"]))
+    base = float(reference["price"])
     result["base_price"] = base
     result["quote_entry_id"] = quote["id"] if quote else None
     low, high = base, base
@@ -356,6 +444,10 @@ def price_facts(item: dict, facts: Facts, quotes: list[dict], policies: list[dic
                                       "open_ended": bool(row["open_ended"]), "source": row["text"]})
         if row["open_ended"]:
             unknown.append(f"扣费没有明确上限：{row['name']}")
+    if unpriced or unpriced_notes:
+        result["unpriced_conditions"] = unpriced
+        result["unpriced_notes"] = unpriced_notes
+        return reject("已识别影响报价的条件，但缺少适用扣费，无法确定推送门槛")
     result["value_high"] = max(0, high)
     result["value_low"] = max(0, low) if not unknown else None
     result["threshold_high"] = max(0, high) + rules.max_over_quote
@@ -382,6 +474,7 @@ battery_health(数字字符串)、screen_watermark、screen_broken、function_fa
 whole_phone/full_price仅在描述能支持整机和完整售价时给yes，订金/配件/换购补差给no。
 同一字段矛盾时用null并在uncertainties解释。不要把照片水印当成屏幕水印。
 """
+SYSTEM_PROMPT += "\n还可提取以下明确事实（yes/no/null，必须附原文依据）：" + "、".join(f"{key}（{label}）" for key,label in QUOTE_FLAGS.items())
 
 
 class SmartService:
@@ -398,7 +491,7 @@ class SmartService:
         with self.database.connect() as c:
             reviewed = c.execute("SELECT COUNT(DISTINCT item_id) FROM smart_assessments WHERE reviewed=1").fetchone()[0]
         return {**config.model_dump(), "key_configured": bool(self.api_key), "reviewed_samples": reviewed,
-                "fact_fields": FACT_FIELDS, "version": VERSION}
+                "fact_fields": FACT_FIELDS, "version": f"{VERSION}/{PRICING_VERSION}"}
 
     def save_config(self, config: SmartConfig, api_key: str | None = None):
         if config.ai_enabled and (not config.base_url or not config.model):
@@ -451,7 +544,7 @@ class SmartService:
             settings = {**config.model_dump(), "quote_category": rules.quote_category,
                         "max_over_quote": rules.max_over_quote, "min_price_ratio": rules.min_price_ratio,
                         "region_city": rules.region_city, "exclude_keywords": rules.exclude_keywords}
-            identity = digest([VERSION, snapshot | {"observed_at": ""}, settings, quotes, policies])
+            identity = digest([VERSION, PRICING_VERSION, snapshot | {"observed_at": ""}, settings, quotes, policies])
             if not force and manual is None:
                 with self.database.connect() as c:
                     previous = c.execute("SELECT * FROM smart_assessments WHERE fingerprint=? AND status<>'analysis_failed'", (identity,)).fetchone()

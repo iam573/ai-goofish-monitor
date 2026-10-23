@@ -93,10 +93,15 @@ _STORAGE_SPEC = re.compile(r"(?:64|128|256|512|1T|2T)(?:G|GB)?(?:/(?:64|128|256|
 _DEDUCTION_HEADERS = {"扣费项", "颜色差价", "备注扣费", "扣费"}
 
 
+def normalize_deduction_text(text: str) -> str:
+    """Correct the battery-note OCR error verified against the source chart."""
+    return re.sub(r"(电池(?:低于|小于|不足|[<＜])\s*\d{2,3}\s*[%％]?\s*按)\s*3\s*单电", r"\1弹电", text)
+
+
 def parse_deduction_text(text: str) -> tuple[str, float | None, float | None, bool, str]:
     """「港澳版-600-800」→ (港澳版, 600, 800, False, deduct)；「后盖破当大花收」→ note。"""
-    clean = _DASH.sub("-", re.sub(r"\s+", "", text)).strip("，,;；")
-    match = re.fullmatch(r"(?P<name>.+?)-(?P<a>\d+)(?:-(?P<b>\d+))?(?P<more>以上)?", clean)
+    clean = _DASH.sub("-", re.sub(r"\s+", "", normalize_deduction_text(text))).strip("，,;；")
+    match = re.fullmatch(r"(?P<name>.+?)-(?P<a>\d+)(?:-(?P<b>\d+))?(?P<more>以上|起)?", clean)
     if match and match.group("name").strip("-"):
         low = float(match.group("a"))
         high = float(match.group("b")) if match.group("b") else low
@@ -328,6 +333,7 @@ class QuoteImageParser:
         for (owner, column), lines in sorted(grouped.items()):
             model = ordered[owner]["model"]
             for position, text in enumerate(merge_wrapped_lines(lines)):
+                text = normalize_deduction_text(text)
                 name, low, high, more, kind = parse_deduction_text(text)
                 result.append(QuoteDeduction(model, column, position, text, name, low, high, more, kind))
         # 同一机型可能占多个区块（报价表分段重复表头），按内容去重
@@ -818,7 +824,8 @@ _STORAGE_MENTION = re.compile(r"(64|128|256|512|1T|2T)(?:GB|G)?", re.I)
 
 def deduction_storages(name: str) -> list[str]:
     """扣费项名称里提到的容量，例如「512/1T银色黑色」→ ["512", "1T"]；没提到时为空（适用所有容量）。"""
-    return [match.group(1).upper() for match in _STORAGE_MENTION.finditer(str(name))]
+    prefix = re.match(r"^(?:水货)?((?:64|128|256|512|[12]T)(?:GB|G)?(?:/(?:64|128|256|512|[12]T)(?:GB|G)?)*)", str(name), re.I)
+    return [match.group(1).upper() for match in _STORAGE_MENTION.finditer(prefix.group(1))] if prefix else []
 
 
 def quote_reference(

@@ -558,7 +558,7 @@ def test_capacity_strip_is_revealed_horizontally_on_narrow_phone(monkeypatch, ch
         </XCUIElementTypeApplication>'''
 
         def execute_script(self, command, args):
-            assert command == "mobile: dragFromToForDuration"
+            assert command == "mobile: dragFromToWithVelocity"
             assert args["fromY"] == args["toY"] == 195
             assert 0 < args["toX"] < args["fromX"] < 390
             self.page_source = self.page_source.replace(f'x="{chip_x}"', 'x="193"').replace('visible="false"', 'visible="true"')
@@ -566,6 +566,33 @@ def test_capacity_strip_is_revealed_horizontally_on_narrow_phone(monkeypatch, ch
     monkeypatch.setattr("app_monitor.iphone_collector.time.sleep", lambda _: None)
     label, restored = IPhoneCollector(Settings())._reveal_storage_chip(Driver())
     assert label == "存储容量" and restored == ["横向显示容量筛选"]
+
+
+def test_capacity_strip_rechecks_position_after_overshoot_instead_of_scrolling_products(monkeypatch):
+    class Driver:
+        positions = [427, -47, 381, 193]
+        gestures = []
+
+        @property
+        def page_source(self):
+            x = self.positions[len(self.gestures)]
+            return f'''<XCUIElementTypeApplication width="390" height="844">
+              <XCUIElementTypeStaticText name="新发" x="216" y="146" visible="true" />
+              <XCUIElementTypeStaticText name="筛选" x="346" y="146" visible="true" />
+              <XCUIElementTypeStaticText name="存储容量" x="{x}" y="187" width="54" height="17" visible="true" />
+            </XCUIElementTypeApplication>'''
+
+        def execute_script(self, command, args):
+            assert command == 'mobile: dragFromToWithVelocity'
+            assert args['fromY'] == args['toY'] == 195
+            assert abs(args['toX'] - args['fromX']) <= 390 * .4
+            self.gestures.append(args)
+
+    monkeypatch.setattr('app_monitor.iphone_collector.time.sleep', lambda _: None)
+    driver = Driver()
+    label, restored = IPhoneCollector(Settings())._reveal_storage_chip(driver)
+    assert label == '存储容量' and restored == ['横向显示容量筛选'] * 3
+    assert [gesture['toX'] > gesture['fromX'] for gesture in driver.gestures] == [False, True, False]
 
 
 def test_unnamed_checkmark_is_scoped_to_picker_option_row():

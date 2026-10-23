@@ -202,7 +202,8 @@ def test_reference_prices_come_last_in_plain_text():
         "📋 iPhone 15 Pro 256G 各成色回收价（苹果无保 10-21）\n"
     )
     assert "靓机 4,700 ｜ 小花 4,500 ✓ ｜ 大花 4,200\n有保·小花 4,800" in content
-    assert "🔧 iPhone 15 Pro 256G 扣费项（→ 扣后回收价）\n· 换屏  −300 → 4,200\n· 电池低于80%  −200～300 → 4,200～4,300\n· 有锁  −1,500 起 → ≤ 3,000" in content
+    assert "🔧 iPhone 15 Pro 256G 扣费项\n· 换屏  −300\n· 电池低于80%  −200～300\n· 有锁  −1,500 起" in content
+    assert '扣后回收价' not in content and ' → ' not in content
     assert content.endswith("💬 后盖破当大花收；不分颜色")
 
 
@@ -221,6 +222,25 @@ def test_markdown_keeps_classic_header_and_puts_reference_tables_last():
     assert tail.startswith("**📋 iPhone 15 Pro 256G 各成色回收价**（苹果无保 10-21）\n\n| 靓机 | 小花 | 大花 | 有保·小花 |")
     assert "| 4,700 | **4,500** | 4,200 | 4,800 |" in tail
     assert "**🔧 iPhone 15 Pro 256G 扣费项**" in tail
-    assert "| 项目 | 扣费 | 扣后回收价 |\n| :-- | --: | --: |\n| 换屏 | −300 | 4,200 |" in tail
-    assert "| 电池低于80% | −200～300 | 4,200～4,300 |" in tail
+    assert "| 项目 | 扣费 |\n| :-- | --: |\n| 换屏 | −300 |" in tail
+    assert "| 电池低于80% | −200～300 |" in tail
+    assert "| 有锁 | −1,500 起 |" in tail
+    assert '扣后回收价' not in tail
     assert tail.endswith("> 💬 后盖破当大花收；不分颜色")
+
+
+def test_pending_push_keeps_product_status_and_value_without_review_reasons():
+    assessment = {'status': 'pending', 'grade': None, 'reference_grade': '小花',
+                  'value_low': None, 'value_high': 4500,
+                  'uncertainties': ['成色无法确定', '可能适用的报价备注尚未识别：电池鼓-80']}
+    item = {**REFERENCE_ITEM, 'smart_assessment': assessment}
+    title, plain = NotificationService._format_message(item, '待确认原因不应重复输出', '', [])
+    markdown = NotificationService._format_webhook_content(item, '待确认原因不应重复输出', '', [])
+    assert title == '【待确认】iPhone 15 Pro 256G'
+    for body in (plain, markdown):
+        assert '成色待确认' in body and '回收参考：≤ ¥4500（小花参考，待确认）' in body
+        assert item['item_url'] in body
+        assert '待确认：' not in body and '待确认原因不应重复输出' not in body
+        assert all(reason not in body for reason in assessment['uncertainties'])
+        assert '扣后回收价' not in body
+    assert assessment['uncertainties'] == ['成色无法确定', '可能适用的报价备注尚未识别：电池鼓-80']
