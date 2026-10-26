@@ -8,7 +8,7 @@ import xml.etree.ElementTree as ET
 from .appium_server import ensure_appium_server
 from .collector import CollectResult, emit_safely
 from .iphone_collector import (IPhoneCollector, _VerificationRequired, _raise_if_verification,
-                               _brief_error, _text, detail_content, detail_seller, is_search_results)
+                               _brief_error, _text, detail_back_rect, detail_content, detail_seller, is_search_results)
 from .matching import normalize_search_text
 
 
@@ -23,7 +23,8 @@ def detail_view(source, description, expected_price=None):
     root = ET.fromstring(source)
     visible = [node for node in root.iter() if node.get("visible") != "false"]
     controls = {_text(node) for node in visible}
-    if not controls.intersection({"分享按钮", "返回按钮"}) or "确定" in controls:
+    if (not controls.intersection({"分享按钮", "返回按钮"}) and detail_back_rect(source) is None
+            or "确定" in controls):
         raise ValueError("尚未进入商品详情页")
     rendered = [normalize_search_text(_text(node)) for node in visible
                 if node.tag in {"XCUIElementTypeTextView", "XCUIElementTypeStaticText", "XCUIElementTypeOther"}]
@@ -50,7 +51,7 @@ def detail_below_fold(source):
     if not width or not height:
         return None
     visible = [node for node in root.iter() if node.get("visible") != "false"]
-    if not any(_text(node) in {"分享按钮", "返回按钮"} for node in visible):
+    if not any(_text(node) in {"分享按钮", "返回按钮"} for node in visible) and detail_back_rect(source) is None:
         return None
     from .proxy_protocol import price
     low_price = any(node.tag in {"XCUIElementTypeStaticText", "XCUIElementTypeOther"}
@@ -207,6 +208,7 @@ class IPhoneProxyCollector(IPhoneCollector):
                             candidates += 1
                             item = {**raw, "acquisition_stage": "detail"}
                             opened = False
+                            detail_error = None
                             try:
                                 opened = True
                                 emit_safely(on_items, stage=f"代理读取 {storage} 候选详情", storage=storage)
@@ -220,15 +222,25 @@ class IPhoneProxyCollector(IPhoneCollector):
                                 pass_items.append(item)
                                 result.items.append(item)
                                 emit_safely(on_items, [item], **meta)
-                            except _VerificationRequired:
+                            except _VerificationRequired as exc:
+                                detail_error = exc
                                 raise
                             except Exception as exc:
+                                detail_error = exc
                                 emit_safely(on_items, cards=[{**item, "link_error": _brief_error(exc)}], **meta)
                                 actions.append({"action": "读取代理详情", "target": raw["item_id"],
                                                 "success": False, "error": _brief_error(exc)})
                             finally:
-                                if opened:
-                                    self._return_to_results(driver, actions)
+                                if opened and not isinstance(detail_error, _VerificationRequired):
+                                    try:
+                                        self._return_to_results(driver, actions)
+                                    except _VerificationRequired:
+                                        raise
+                                    except Exception as return_error:
+                                        if detail_error is not None:
+                                            raise RuntimeError(f"详情读取失败：{_brief_error(detail_error)}；"
+                                                               f"返回列表失败：{_brief_error(return_error)}") from detail_error
+                                        raise
                     except Exception as exc:
                         error = _brief_error(exc)
                     entry = {"label": "新发", "storage": storage, "channel": "proxy", "model_applied": True,

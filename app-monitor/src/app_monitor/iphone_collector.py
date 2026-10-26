@@ -45,6 +45,28 @@ class _VerificationRequired(RuntimeError):
     pass
 
 
+class _SearchEntryUnavailable(RuntimeError):
+    pass
+
+
+def _check_search_page(source: str) -> None:
+    _raise_if_verification(source)
+
+    def walk(node: ET.Element) -> None:
+        if node.get("visible") == "false":
+            return
+        if node.tag == "XCUIElementTypeAlert" and node.get("visible") == "true":
+            raise RuntimeError("系统弹窗阻挡搜索，请处理弹窗后重试")
+        if (node.tag == "XCUIElementTypeButton" and node.get("visible") == "true"
+                and _text(node) in {"登录", "立即登录", "登录/注册", "登录或注册"}):
+            raise RuntimeError("闲鱼需要登录，请在手机完成登录后重试")
+        if node.tag != "XCUIElementTypeTextView":
+            for child in node:
+                walk(child)
+
+    walk(ET.fromstring(source))
+
+
 def _raise_if_verification(source: str) -> None:
     texts = set()
 
@@ -506,6 +528,52 @@ def is_search_results(source: str) -> bool:
                and int(node.get("y") or 0) < 180 for node in visible)
 
 
+def detail_back_rect(source: str) -> dict[str, int] | None:
+    """Recognize the unnamed back container of the alternate native detail layout."""
+    root = ET.fromstring(source)
+    app = next(root.iter("XCUIElementTypeApplication"), root)
+    width, height = int(app.get("width") or 0), int(app.get("height") or 0)
+    if not width or not height:
+        return None
+    visible = []
+    def walk(node: ET.Element) -> None:
+        if node.get("visible") == "false":
+            return
+        if node.get("visible") == "true":
+            visible.append(node)
+        for child in node:
+            walk(child)
+    walk(app)
+    # Never treat a list, picker or covering panel as a detail navigation bar.
+    if any(node.tag == "XCUIElementTypeAlert" or _text(node) in {"确定", "复制链接"} for node in visible):
+        return None
+    footer = {_text(node) for node in visible if height * .85 <= int(node.get("y") or 0) < height}
+    if not {"留言按钮", "收藏"} <= footer:
+        return None
+    more = [node for node in visible if _text(node) == "更多"
+            and int(node.get("x") or 0) > width * .8 and 30 <= int(node.get("y") or 0) < 120]
+    if len(more) != 1:
+        return None
+    top = int(more[0].get("y") or 0)
+    bars = [node for node in visible if node.tag == "XCUIElementTypeOther"
+            and 35 <= int(node.get("x") or 0) < width * .25
+            and int(node.get("width") or 0) >= width * .5
+            and abs(int(node.get("y") or 0) - top) <= 12
+            and 24 <= int(node.get("height") or 0) <= 60]
+    if not bars:
+        return None
+    candidates = set()
+    for node in visible:
+        x, y, w, h = (int(node.get(key) or 0) for key in ("x", "y", "width", "height"))
+        if (node.tag == "XCUIElementTypeOther" and not _text(node)
+                and 0 <= x <= 12 and abs(y - top) <= 5 and 24 <= w <= 64 and 24 <= h <= 64
+                and x + w <= int(bars[0].get("x") or 0) and y + h <= height):
+            candidates.add((x, y, w, h))
+    if len(candidates) != 1:
+        return None
+    return dict(zip(("x", "y", "width", "height"), candidates.pop()))
+
+
 def search_entry_points(source: str) -> list[dict[str, Any]]:
     """Choose text inside the search field, never arbitrary top/history text."""
     root = ET.fromstring(source)
@@ -958,7 +1026,9 @@ class IPhoneCollector:
         """Only take the shortcut when the actual second bottom tab matches."""
         returned = 0
         for _ in range(5):
-            tabs = home_tabs(driver.page_source)
+            source = driver.page_source
+            _check_search_page(source)
+            tabs = home_tabs(source)
             if tabs:
                 if returned:
                     actions.append({"action": "返回首页", "target": f"返回 {returned} 次", "success": True})
@@ -1019,30 +1089,121 @@ class IPhoneCollector:
     def _open_search_input(self, driver: Any, actions: list[dict[str, Any]]) -> Any:
         for attempt in range(2):
             self._ensure_foreground(driver, actions)
+            source = driver.page_source
+            _check_search_page(source)
             field = self._search_input(driver)
             if field is not None:
                 return field
-            source = driver.page_source
-            if any(node.get("visible") == "true" for node in ET.fromstring(source).iter("XCUIElementTypeAlert")):
-                raise RuntimeError("系统弹窗阻挡搜索，停止点击；请处理弹窗后重试")
             points = search_entry_points(source)
             if not points:
-                raise RuntimeError("当前页面没有可确认的搜索入口，已停止以免点击历史记录或商品")
+                def entry_ready(source: str) -> bool:
+                    _check_search_page(source)
+                    return bool(search_entry_points(source) or self._search_input(driver) is not None)
+                try:
+                    source = self._wait_for_source(driver, entry_ready, "搜索入口尚未就绪", timeout=3)
+                except _PageWaitTimeout as exc:
+                    raise _SearchEntryUnavailable("当前页面没有可确认的搜索入口") from exc
+                field = self._search_input(driver)
+                if field is not None:
+                    return field
+                points = search_entry_points(source)
+                if not points:
+                    raise _SearchEntryUnavailable("当前页面没有可确认的搜索入口")
             target = points[min(attempt, len(points) - 1)]
             logger.info("iPhone 点击搜索入口 attempt=%s target=%s method=%s point=(%s,%s)",
                         attempt + 1, target["target"], target["method"], target["x"], target["y"])
             driver.execute_script("mobile: tap", {"x": target["x"], "y": target["y"]})
             actions.append({"action": "点击搜索入口", "target": target["target"], "success": True,
                             "method": f"{target['method']} ({target['x']}, {target['y']})，第{attempt + 1}次"})
-            for _ in range(8):
+            observed = []
+            def input_ready(source: str) -> bool:
+                _check_search_page(source)
                 field = self._search_input(driver)
                 if field is not None:
-                    actions.append({"action": "搜索输入框确认", "success": True,
-                                    "method": str(field.get_attribute("type"))})
-                    return field
-                time.sleep(0.3)
+                    observed.append(field)
+                return bool(observed)
+            try:
+                self._wait_for_source(driver, input_ready, "搜索输入框尚未就绪", timeout=2.4)
+            except _PageWaitTimeout:
+                pass
+            if observed:
+                field = observed[-1]
+                actions.append({"action": "搜索输入框确认", "success": True,
+                                "method": str(field.get_attribute("type"))})
+                return field
             logger.warning("iPhone 点击搜索入口后尚未出现输入框 attempt=%s", attempt + 1)
-        raise RuntimeError("点击搜索入口并重新定位重试后仍未出现输入框")
+        raise _SearchEntryUnavailable("点击搜索入口并重新定位重试后仍未出现输入框")
+
+    def _recover_search_home(self, driver: Any, actions: list[dict[str, Any]]) -> bool:
+        """Navigate only through observed home/back controls, at most three times."""
+        for _ in range(3):
+            self._ensure_foreground(driver, actions)
+            source = driver.page_source
+            _check_search_page(source)
+            tabs = home_tabs(source)
+            if tabs:
+                target, label = tabs[0], "首页"
+            else:
+                root = ET.fromstring(source)
+                target = next((node for node in root.iter("XCUIElementTypeButton")
+                               if node.get("visible") == "true" and _text(node) in {"返回", "返回按钮"}
+                               and 0 <= int(node.get("y") or 0) < 180
+                               and int(node.get("width") or 0) > 0
+                               and int(node.get("height") or 0) > 0), None)
+                label = "返回"
+                if target is None:
+                    rect = detail_back_rect(source)
+                    if rect is not None:
+                        target = ET.Element("XCUIElementTypeOther", {key: str(value) for key, value in rect.items()})
+            if target is None:
+                return False
+            driver.execute_script("mobile: tap", {
+                "x": int(target.get("x") or 0) + int(target.get("width") or 0) // 2,
+                "y": int(target.get("y") or 0) + int(target.get("height") or 0) // 2,
+            })
+            actions.append({"action": "恢复搜索页面", "target": label, "success": True})
+            def page_ready(xml: str) -> bool:
+                _check_search_page(xml)
+                return bool(search_entry_points(xml) or self._search_input(driver) is not None
+                            or not tabs and xml != source and home_tabs(xml))
+            try:
+                self._wait_for_source(driver, page_ready, "返回后搜索入口尚未就绪", timeout=3)
+            except _PageWaitTimeout:
+                if tabs:
+                    return False
+                continue
+            if tabs:
+                return True
+        return False
+
+    def _prepare_search_input(self, driver: Any, region_hint: str, actions: list[dict[str, Any]]) -> tuple[Any, bool]:
+        for stage in range(3):
+            if stage == 1:
+                self._recover_search_home(driver, actions)
+            elif stage == 2:
+                self._ensure_foreground(driver, actions)
+                _check_search_page(driver.page_source)
+                driver.terminate_app(self.settings.bundle_id)
+                driver.activate_app(self.settings.bundle_id)
+                self._ensure_foreground(driver, actions)
+                actions.append({"action": "重启闲鱼恢复搜索", "target": "本次仅重启一次", "success": True})
+                def launched(source: str) -> bool:
+                    _check_search_page(source)
+                    return bool(home_tabs(source) or search_entry_points(source)
+                                or self._search_input(driver) is not None)
+                try:
+                    self._wait_for_source(driver, launched, "重启后页面尚未就绪", timeout=8)
+                except _PageWaitTimeout:
+                    pass
+                self._recover_search_home(driver, actions)
+            home_confirmed = self._select_home_city(driver, region_hint, actions) if region_hint else False
+            try:
+                return self._open_search_input(driver, actions), home_confirmed
+            except _SearchEntryUnavailable as exc:
+                actions.append({"action": "搜索入口检查", "target": str(exc), "success": False})
+                if stage == 2:
+                    raise _SearchEntryUnavailable("返回首页并重启闲鱼一次后，仍未找到可用搜索输入框，请检查手机页面") from exc
+        raise AssertionError("unreachable")
 
     def _search(
         self, driver: Any, keyword: str, region_hint: str = "",
@@ -1060,8 +1221,7 @@ class IPhoneCollector:
                 back.click()
             else:
                 driver.back()
-        home_confirmed = self._select_home_city(driver, region_hint, actions) if region_hint else False
-        field = self._open_search_input(driver, actions)
+        field, home_confirmed = self._prepare_search_input(driver, region_hint, actions)
         field.click()
         field.clear()
         field.send_keys(keyword)
@@ -1465,7 +1625,7 @@ class IPhoneCollector:
         clicked_back = False
         for _ in range(8):
             source = driver.page_source
-            _raise_if_verification(source)
+            _check_search_page(source)
             if is_search_results(source):
                 collapsed = active_storage_chip(source) is None
                 actions.append({"action": "确认搜索列表", "success": True,
@@ -1474,15 +1634,24 @@ class IPhoneCollector:
                 return
             has_share = any("分享按钮" in {node.get("name"), node.get("label"), _text(node)} and node.get("visible") != "false"
                             for node in ET.fromstring(source).iter())
-            if not clicked_back and has_share:
-                back = self._find(driver, "返回按钮")
+            if not clicked_back:
+                back = self._find(driver, "返回按钮") if has_share else None
                 if back:
                     back.click()
                     clicked_back = True
                     actions.append({"action": "详情返回", "target": "返回按钮", "success": True})
+                else:
+                    rect = detail_back_rect(source)
+                    if rect is not None:
+                        driver.execute_script("mobile: tap", {"x": rect["x"] + rect["width"] // 2,
+                                                             "y": rect["y"] + rect["height"] // 2})
+                        clicked_back = True
+                        actions.append({"action": "详情返回", "target": "详情顶部返回容器", "success": True,
+                                        "method": "详情底栏、顶部搜索区及菜单共同确认"})
             time.sleep(0.5)
         actions.append({"action": "确认搜索列表", "success": False, "error": "未识别到搜索结果页"})
-        raise RuntimeError("返回后未到搜索结果页，停止继续采集")
+        reason = "点击详情返回后未到搜索结果页" if clicked_back else "未识别到可安全点击的详情返回入口"
+        raise RuntimeError(f"{reason}，停止继续采集")
 
     def _copy_from_share(
         self, driver: Any, actions: list[dict[str, Any]], *, detail_card: PhoneCard, wait_confirmation=True,
