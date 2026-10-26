@@ -733,13 +733,14 @@ function runItemQuote(item, outcome = runOutcome(item)) {
     notes.push(outcome.basis === "fixed" ? (outcome.grade ? `按${escapeHtml(outcome.grade)}档参考` : "固定档位参考")
       : outcome.grade ? `成色：${escapeHtml(outcome.grade)}` : "成色待确认");
     if (outcome.referenceGrade) notes.push(`按${escapeHtml(outcome.referenceGrade)}参考`);
-    if (outcome.code === "unpriced_condition") notes.push("缺少适用扣费，无法计价");
+    if (outcome.code === "unpriced_condition") notes.push("当时因缺少扣费未计价（旧策略）");
     else if (outcome.deductions) {
       const low = outcome.deductions.reduce((sum, row) => sum + Number(row.min || 0), 0);
       const high = outcome.deductions.reduce((sum, row) => sum + Number(row.max ?? row.min ?? 0), 0);
-      notes.push(!outcome.deductions.length ? "未扣费" : outcome.deductions.some(row => row.open_ended)
+      notes.push(!outcome.deductions.length ? (outcome.unpriced ? "无对应扣费，按0计算" : "未扣费") : outcome.deductions.some(row => row.open_ended)
         ? `至少扣 ${amount(low)}` : low === high ? `已扣 ${amount(low)}`
           : outcome.low == null ? `按最低扣费 ${amount(low)}参考` : `扣费 ${amount(low)}–${amount(high)}`);
+      if (outcome.unpriced && outcome.deductions.length) notes.push("其他无对应扣费项按0计算");
     }
   }
   const limit = outcome.limit != null ? `${outcome.basis === "candidate" ? "初筛" : "判价"}上限 <strong>${amount(outcome.limit)}</strong>` : null;
@@ -762,7 +763,8 @@ function runItem(item, fresh = false) {
   const priceDetails = outcome.base != null && outcome.deductions ? `<details class="run-item-evidence-preview">
     <summary>报价与扣费明细</summary><div class="run-item-price-details">
       <div>基础报价${outcome.referenceGrade ? `（${escapeHtml(outcome.referenceGrade)}参考）` : ""}：¥${money(outcome.base)}</div>
-      ${outcome.deductions.length ? outcome.deductions.map(row => `<div>${escapeHtml(row.name)}：扣 ¥${money(row.min)}${row.max !== row.min ? `–${money(row.max)}` : ""}${row.open_ended ? "起" : ""}</div>`).join("") : outcome.code === "unpriced_condition" ? "<div>已知问题缺少适用扣费，尚无调整后估值</div>" : "<div>无适用扣费</div>"}
+      ${outcome.deductions.length ? outcome.deductions.map(row => `<div>${escapeHtml(row.name)}：扣 ¥${money(row.min)}${row.max !== row.min ? `–${money(row.max)}` : ""}${row.open_ended ? "起" : ""}</div>`).join("") : outcome.code === "unpriced_condition" ? "<div>旧策略因缺少扣费未计价，保留当时结论</div>" : "<div>无适用扣费</div>"}
+      ${outcome.unpriced && outcome.code !== "unpriced_condition" ? "<div>没有对应扣费金额的项目按0计算，已匹配项目照常扣除</div>" : ""}
     </div></details>` : "";
   return `<article class="run-item ${isHit ? "hit" : ""} ${fresh ? "fresh" : ""}">
     <div class="run-item-main">

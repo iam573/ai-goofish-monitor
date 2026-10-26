@@ -140,7 +140,9 @@ def test_default_blocked_fault_and_non_whole_price_reject(database):
 
 def test_unconfirmed_and_overlapping_rules_require_review(database):
     quotes=quote_setup(database); row=deduction();row['policy']['reviewed']=False
-    assert price_facts(ITEM,facts(),quotes,[row],SmartConfig(),Rules(),'17','256')['status']=='rejected'
+    result=price_facts(ITEM,facts(),quotes,[row],SmartConfig(),Rules(),'17','256')
+    assert result['status']=='pending' and result['value_high']==5200
+    assert not result['deductions'] and result['unpriced_notes']
     result=price_facts(ITEM,facts(),quotes,[deduction(),deduction()],SmartConfig(),Rules(),'17','256')
     assert result['status']=='pending' and any('重复' in text for text in result['uncertainties'])
 

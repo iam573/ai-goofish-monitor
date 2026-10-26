@@ -20,7 +20,8 @@ def share_phone(monkeypatch):
       name="【闲鱼】https://www.goofish.com/item?id=1091531543430 点击链接直接打开" /></XCUIElementTypeApplication>'''
     events = []
     state = SimpleNamespace(screen="detail", native=True, old_popup=False, copies=0,
-                            clipboard="old-link", second_copy=True, switched=False, change_on_marker=False)
+                            clipboard="old-link", second_copy=True, switched=False, change_on_marker=False,
+                            confirmation=confirmation)
 
     class Element:
         rect = {"x": 20, "y": 400, "width": 100, "height": 30}
@@ -29,12 +30,15 @@ def share_phone(monkeypatch):
             state.screen = "panel"
 
     class Driver:
+        def get_window_size(self):
+            return {"width": 390, "height": 844}
+
         @property
         def page_source(self):
             if state.switched:
                 return full.replace('name="1350"', 'name="1500"')
             if state.screen == "confirmation" or state.screen == "panel" and state.old_popup:
-                return confirmation
+                return state.confirmation
             return full
 
         def find_elements(self, *args):
@@ -80,6 +84,15 @@ def share_phone(monkeypatch):
 
 def test_native_confirmation_never_prepares_or_reads_clipboard(share_phone):
     collector, driver, card, _, events = share_phone
+    assert collector._share_item_id(driver, "test", card) == "1091531543430"
+    assert events == ["copy1", "returned"]
+
+
+def test_new_url_without_fixed_copy_wording_uses_fast_path(share_phone):
+    collector, driver, card, state, events = share_phone
+    state.confirmation = '''<XCUIElementTypeApplication>
+      <XCUIElementTypeStaticText name="https://www.goofish.com/item?id=1091531543430" visible="true" />
+      </XCUIElementTypeApplication>'''
     assert collector._share_item_id(driver, "test", card) == "1091531543430"
     assert events == ["copy1", "returned"]
 

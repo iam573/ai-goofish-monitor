@@ -44,13 +44,13 @@ test("详情快照保留未知成色、小花参考和扣费后的上限", () =>
   assert.equal(result.deductions[0].min, 200);
 });
 
-test("缺少适用金额时不把基础报价冒充扣费后金额，不倒推旧记录", () => {
+test("旧策略未计价记录保留当时缺失金额，不倒推旧记录", () => {
   const missing = runOutcome({ code: "unpriced_condition", quote_basis: "detail", valuation: {
     base_price: 3750, value_low: null, value_high: null, threshold_high: null,
   } });
   assert.equal(missing.high, null);
   assert.equal(missing.limit, null);
-  assert.equal(missing.label, "缺少扣费依据");
+  assert.equal(missing.label, "旧策略未计价");
   const old = runOutcome({ code: "smart_rejected", quote_basis: "detail", threshold_price: 3750,
     decision: "挂牌价高于可计算的回收价上限加议价空间" });
   assert.equal(old.high, null); // No current/default negotiation amount may be subtracted.
@@ -58,6 +58,19 @@ test("缺少适用金额时不把基础报价冒充扣费后金额，不倒推�
   const legacyNoLink = runOutcome({ code: "no_link", quote_price: 3750 });
   assert.equal(legacyNoLink.basis, "candidate");
   assert.equal(legacyNoLink.stage, null);
+});
+
+test("未匹配扣费按0的新记录保留参考金额和待确认结果", () => {
+  const value = runOutcome({ code: "pending", quote_basis: "detail", price: 1600, valuation: {
+    grade: "小花", base_price: 1750, value_low: null, value_high: 1750,
+    threshold_high: 1950, deductions: [], unpriced_conditions: ["rear_camera_replaced"],
+  } });
+  assert.equal(value.bucket, "pending");
+  assert.equal(value.high, 1750);
+  assert.equal(value.limit, 1950);
+  assert.equal(value.grade, "小花");
+  assert.equal(value.unpriced, true);
+  assert.equal(value.label, "待确认");
 });
 
 test("已确认使用稳妥门槛，待确认保留候选上限，取链接失败仍属未完成", () => {

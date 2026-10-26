@@ -21,7 +21,7 @@ from .rules import Rules
 
 logger = logging.getLogger(__name__)
 VERSION = "local-cell-facts-v4"
-PRICING_VERSION = "compound-deductions-v3"
+PRICING_VERSION = "missing-deduction-zero-v4"
 BATTERY_PATTERN = re.compile(r"(?:(?:电池|电芯)(?:健康度|健康|效率|容量|寿命)?|健康度|电池寿命)\s*[为是约:：]?\s*(?:百分之)?\s*(100(?:\.0+)?|[1-9]?\d(?:\.\d+)?)\s*(?:%|％)?(?![\d.])", re.I)
 FACT_FIELDS = ("model", "storage", "whole_phone", "full_price", "battery_health", "screen_watermark",
                "screen_broken", "function_fault", "locked", "repaired", "screen_replaced", "battery_replaced", "water_damage", "back_glass_broken", "warranty", "color", "variant")
@@ -409,7 +409,7 @@ def price_facts(item: dict, facts: Facts, quotes: list[dict], policies: list[dic
                 if not relevant:
                     continue
             # A specific replacement deduction already covers the generic repair flag.
-            if key == "repaired" and handled_conditions & {"screen_replaced", "battery_replaced", "water_damage"}:
+            if key == "repaired" and handled_conditions & {"screen_replaced", "battery_replaced", "water_damage", "rear_camera_replaced"}:
                 continue
             if key in {"screen_original", "screen_popup"} and "screen_replaced" in handled_conditions:
                 continue
@@ -417,7 +417,7 @@ def price_facts(item: dict, facts: Facts, quotes: list[dict], policies: list[dic
                 continue
             if key == "overseas" and "variant" in handled_conditions:
                 continue
-            unknown.append(f"明确存在{FACT_LABELS[key]}，但无可确定的适用扣费或降档规则")
+            unknown.append(f"明确存在{FACT_LABELS[key]}，无对应扣费规则，该项按0扣费")
             unpriced.append(key)
     grade = facts.grade
     if grade_overrides:
@@ -453,7 +453,7 @@ def price_facts(item: dict, facts: Facts, quotes: list[dict], policies: list[dic
     if unpriced or unpriced_notes:
         result["unpriced_conditions"] = unpriced
         result["unpriced_notes"] = unpriced_notes
-        return reject("已识别影响报价的条件，但缺少适用扣费，无法确定推送门槛", "unpriced_condition")
+        result["basis"] += "；未匹配到金额的扣费项按0计算，已匹配扣费照常扣除"
     result["value_high"] = max(0, high)
     result["value_low"] = max(0, low) if not unknown else None
     result["threshold_high"] = max(0, high) + rules.max_over_quote

@@ -2,7 +2,7 @@
 export const codeLabels = {
   matched: "命中", pending: "待确认", price_high: "价格偏高", region: "地区不符",
   other_model: "机型不符", storage_mismatch: "容量不符", excluded: "命中排除规则",
-  grade_not_accepted: "不接受成色", no_quote: "缺少报价", unpriced_condition: "缺少扣费依据",
+  grade_not_accepted: "不接受成色", no_quote: "缺少报价", unpriced_condition: "旧策略未计价",
   not_whole: "非整机", not_full_price: "非整机售价", not_item_or_price: "商品或售价不符", unrecognized: "无法识别",
   too_cheap: "价格异常偏低", smart_rejected: "其他不符合", other: "其他不符合",
   no_link: "核验未完成", verification_incomplete: "核验未完成",
@@ -56,5 +56,6 @@ export function runOutcome(item) {
     referenceGrade: value?.reference_grade || null,
     base: numeric(value?.base_price) ?? (savedBase ? Number(savedBase[1].replaceAll(",", "")) : null),
     deductions: Array.isArray(value?.deductions) ? value.deductions : null,
+    unpriced: Boolean(value?.unpriced_conditions?.length || value?.unpriced_notes?.length),
   };
 }

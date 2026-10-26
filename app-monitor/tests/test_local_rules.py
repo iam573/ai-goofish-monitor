@@ -114,8 +114,7 @@ def test_unsupported_battery_note_requires_its_condition(quotes, description, no
         name=note, text=note, amount_min=None, policy=automatic_policy({'name': note, 'text': note}).model_dump())
     result = price_facts(item, facts, quotes, [row], SmartConfig(), Rules(), '17', '256')
     supported = note == '电池鼓' and applies and '疑似' not in description
-    uncertain = '疑似' in description
-    assert result['status'] == ('matched' if supported or not applies else 'pending' if uncertain else 'rejected')
+    assert result['status'] == ('matched' if supported or not applies else 'pending')
     assert bool(result['uncertainties']) == (applies and not supported)
     assert len(result['deductions']) == int(supported)
     if supported:
@@ -173,12 +172,12 @@ def test_model_and_capacity_evidence_must_support_values():
         Facts(findings={'storage':Finding(value='512',evidence='256G')}).verify('256G')
 
 
-def test_stated_repair_without_price_rule_is_pending_not_free(quotes):
+def test_stated_repair_without_price_rule_is_pending_with_zero_deduction(quotes):
     item=listing('99新，换过屏')
     facts=extract_local(item,SmartConfig(),quotes,Rules())
     result=price_facts(item,facts,quotes,[],SmartConfig(),Rules(),'17','256')
-    assert result['status']=='rejected' and any('换屏' in u for u in result['uncertainties'])
-    assert result['value_high'] is None
+    assert result['status']=='pending' and any('换屏' in u for u in result['uncertainties'])
+    assert result['deductions']==[] and result['value_high']==5200 and result['threshold_high']==5400
     result=price_facts(item,facts,quotes,[fee('换屏',300)],SmartConfig(),Rules(),'17','256')
     assert result['status']=='matched' and result['value_low']==4900
 

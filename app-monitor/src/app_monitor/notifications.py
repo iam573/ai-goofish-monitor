@@ -139,7 +139,7 @@ class NotificationService:
     def _deduction_summary(value: dict, *, upper_only: bool = False) -> str:
         rows = value.get("deductions") or []
         if not rows:
-            return "未扣费"
+            return "无对应扣费，按0计算" if value.get("unpriced_conditions") or value.get("unpriced_notes") else "未扣费"
         low = sum(float(row["min"]) for row in rows)
         high = sum(float(row["max"]) for row in rows)
         if any(row.get("open_ended") for row in rows):
@@ -164,7 +164,8 @@ class NotificationService:
             deduction = NotificationService._deduction_summary(value)
             lines.append(f"回收估值：{price}（{deduction}） · {comparison}")
         elif high is not None:
-            reference = f"{escape(value['reference_grade'])}参考" if value.get("reference_grade") else "候选上限"
+            reference_grade = value.get("reference_grade") or grade
+            reference = f"{escape(reference_grade)}参考" if reference_grade else "候选上限"
             deduction = NotificationService._deduction_summary(value, upper_only=True)
             lines.append(f"回收参考：≤ ¥{high:g}（{reference}，{deduction}，待确认）")
         else:

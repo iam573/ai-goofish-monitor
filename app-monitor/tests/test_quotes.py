@@ -59,6 +59,50 @@ def test_quote_parser_maps_capacity_and_grade_columns_to_nearest_model():
     assert values[("16", "128", "靓机")] == 3100
 
 
+def test_pro_max_label_just_beyond_old_gap_limit_preserves_both_model_blocks():
+    tokens = [
+        OCRToken("16 PRO", .021409, 2940.80375), OCRToken("MAX", .034483, 2986.355),
+        OCRToken("16 PRO", .021424, 3267.875625),
+        OCRToken("256", .24, 2863.083125), OCRToken("5150", .32, 2863.083125),
+        OCRToken("512", .24, 2965), OCRToken("5500", .32, 2965),
+        OCRToken("1T", .24, 3065.47875), OCRToken("5950", .32, 3065.47875),
+        OCRToken("128", .24, 3153), OCRToken("3750", .32, 3153),
+        OCRToken("256", .24, 3227.396875), OCRToken("4550", .32, 3227.396875),
+        OCRToken("512", .24, 3305), OCRToken("4900", .32, 3305),
+        OCRToken("1T", .24, 3381.204375), OCRToken("5400", .32, 3381.204375),
+        OCRToken("港澳版-500-800", .75, 2965),
+        OCRToken("水货三网-1000-1500", .75, 3305),
+    ]
+    parser = QuoteImageParser()
+    entries = {(e.model,e.storage):e.price for e in parser.parse_tokens(tokens)}
+    assert entries == {
+        ("16 Pro Max","256"):5150, ("16 Pro Max","512"):5500, ("16 Pro Max","1T"):5950,
+        ("16 Pro","128"):3750, ("16 Pro","256"):4550, ("16 Pro","512"):4900, ("16 Pro","1T"):5400,
+    }
+    deductions = {(e.model,e.name) for e in parser.parse_deductions(tokens)}
+    assert ("16 Pro Max","港澳版") in deductions
+    assert ("16 Pro","水货三网") in deductions
+    assert ("16 Pro","港澳版") not in deductions
+
+
+def test_max_suffix_belongs_only_to_nearest_model_and_is_not_added_twice():
+    parser = QuoteImageParser()
+    models = parser._model_tokens([
+        OCRToken("16 PRO", .03, 100), OCRToken("15 PRO", .03, 140), OCRToken("MAX", .04, 150),
+    ])
+    assert [normalize_model(t.text) for t in models] == ["16 Pro","15 Pro Max"]
+    models = parser._model_tokens([OCRToken("16 PRO MAX", .03, 100),OCRToken("MAX", .04, 120)])
+    assert [normalize_model(t.text) for t in models] == ["16 Pro Max"]
+
+
+@pytest.mark.parametrize('text,expected', [('4250.',4250),('4250',4250),('>5000',None),('4250.50',None)])
+def test_quote_price_trailing_ocr_dot_is_allowed_but_range_or_fraction_is_not(text,expected):
+    entries = QuoteImageParser().parse_tokens([
+        OCRToken('16 PRO MAX',.03,100),OCRToken('512',.24,100),OCRToken(text,.58,100),
+    ])
+    assert ([e.price for e in entries] if entries else []) == ([expected] if expected is not None else [])
+
+
 # ---------------------------------------------------------------- 版式与扣费项
 from app_monitor.quotes import (  # noqa: E402
     NO_WARRANTY_LAYOUT,

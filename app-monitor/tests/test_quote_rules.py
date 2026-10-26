@@ -135,10 +135,79 @@ def test_unknown_popup_keeps_quoted_alternatives_instead_of_assuming_popup():
     assert result['deductions'][0]['max']==700
 
 
-def test_identified_but_unpriced_repair_does_not_push_at_original_price():
+def test_identified_but_unpriced_repair_uses_zero_deduction_and_continues():
     result,_=assess('99新，换过屏',[])
-    assert result['status']=='rejected' and result['value_high'] is None
+    assert result['status']=='pending' and result['value_high']==3000
+    assert result['threshold_high']==3200 and result['deductions']==[]
     assert 'screen_replaced' in result['unpriced_conditions']
+
+
+@pytest.mark.parametrize('price,status', [(3000,'pending'),(3001,'rejected')])
+def test_missing_camera_fee_keeps_xiaohua_and_negotiation_boundary(price,status):
+    result,_=assess('轻微划痕，换过后摄',[],price=price)
+    assert result['grade']=='小花' and result['base_price']==2800
+    assert result['value_high']==2800 and result['threshold_high']==3000
+    assert result['status']==status and result['deductions']==[]
+    assert 'rear_camera_replaced' in result['unpriced_conditions']
+    if status=='rejected':
+        assert result['rejection_code']=='price_high'
+
+
+def test_missing_fee_does_not_discard_existing_battery_deduction():
+    result,_=assess('轻微划痕，换过后摄，电池健康78%',notes('电池低于80%扣50'),price=2950)
+    assert result['status']=='pending' and result['grade']=='小花'
+    assert result['value_high']==2750 and result['threshold_high']==2950
+    assert len(result['deductions'])==1 and result['deductions'][0]['min']==50
+    assert 'rear_camera_replaced' in result['unpriced_conditions']
+
+
+def test_camera_replacement_fee_also_covers_generic_repair():
+    result,_=assess('轻微划痕，换过后摄，电池健康78%',notes('后换像头-700','电池低于80%扣50'))
+    assert result['status']=='matched' and result['value_high']==2050
+    assert result['threshold_high']==2250 and len(result['deductions'])==2
+    assert not result.get('unpriced_conditions')
+
+
+def test_unknown_grade_with_missing_fee_still_uses_xiaohua():
+    result,_=assess('换过后摄',[],price=3000)
+    assert result['grade'] is None and result['reference_grade']=='小花'
+    assert result['status']=='pending' and result['value_high']==2800 and result['threshold_high']==3000
+
+
+@pytest.mark.parametrize('amount', [None,-100,float('nan')])
+def test_missing_or_invalid_fee_amount_is_zero_not_a_rejection(amount):
+    rows=notes('后换像头-700')
+    rows[0].update(amount_min=amount,amount_max=amount)
+    result,_=assess('轻微划痕，换过后摄',rows)
+    assert result['status']=='pending' and result['value_high']==2800
+    assert result['deductions']==[] and result['unpriced_notes']
+
+
+async def test_missing_fee_pending_item_is_delivered_with_usable_reference(database):
+    from app_monitor.service import MonitorService
+    from app_monitor.notifications import NotificationService
+
+    class Notifier:
+        def __init__(self):self.sent=[]
+        async def send(self,item,reason):
+            self.sent.append(item)
+            return {'mock':{'success':True}}
+
+    add_quotes(database,[('14','256','靓机',1950),('14','256','小花',1750)])
+    notifier=Notifier(); service=MonitorService(database,None,notifier)
+    item={'item_id':'1090413599999','title':'iPhone 14 256G 国行','description':'轻微划痕，换过后摄',
+          'price':1600,'item_url':'https://www.goofish.com/item?id=1090413599999','display_region':'厦门'}
+    result=await service.process_items([item],Rules(),'iPhone 14',True,'256',expected_model='14')
+    assert result['notified']==1 and len(notifier.sent)==1
+    value=notifier.sent[0]['smart_assessment']
+    assert value['status']=='pending' and value['base_price']==1750
+    assert value['value_high']==1750 and value['threshold_high']==1950
+    assert result['decisions'][0]['code']=='pending'
+    _,body=NotificationService._format_message(notifier.sent[0],'','',[])
+    assert '小花参考，无对应扣费，按0计算' in body
+    assert '无法计价' not in body and '待确认：' not in body
+    await service.process_items([item],Rules(),'iPhone 14',True,'256',expected_model='14')
+    assert len(notifier.sent)==1
 
 
 def test_legacy_rule_identity_and_manual_override_survive_compilation(database):

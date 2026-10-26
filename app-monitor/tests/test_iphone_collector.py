@@ -353,6 +353,9 @@ def test_share_keeps_copied_id_when_returned_sort_bar_is_hidden(monkeypatch, cli
     class Driver:
         page_source = seller_source('<XCUIElementTypeImage name="鱼小铺" x="136" y="108" width="40" height="15" visible="true" />').replace('</XCUIElementTypeApplication>', '<XCUIElementTypeStaticText name="3200" y="157" visible="true" /></XCUIElementTypeApplication>')
 
+        def get_window_size(self):
+            return {"width": 390, "height": 844}
+
         def find_elements(self, *args):
             return [Element()]
 
@@ -643,6 +646,7 @@ def test_share_waits_for_detail_and_uses_its_actual_price(monkeypatch,delayed):
         def click(self):pass
     class Driver:
         reads=0
+        def get_window_size(self):return {'width':390,'height':844}
         def find_elements(self,*args):return [Element()]
         @property
         def page_source(self):

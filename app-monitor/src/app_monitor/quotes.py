@@ -241,7 +241,7 @@ class QuoteImageParser:
                     for token in values
                     if left <= token.x < right
                     and abs(token.global_y - capacity_token.global_y) <= 24
-                    and re.fullmatch(r"\d{2,5}", token.text.replace(" ", ""))
+                    and re.fullmatch(r"\d{2,5}\.?", token.text.replace(" ", ""))
                 ]
                 if not candidates:
                     continue
@@ -365,9 +365,12 @@ class QuoteImageParser:
                 (index, suffix)
                 for index, suffix in enumerate(suffixes)
                 if index not in used_suffixes
-                and 5 <= abs(suffix.global_y - base.global_y) <= 45
+                # Two label lines on the current chart are about 46px apart;
+                # OCR box rounding must not turn Pro Max into another Pro.
+                and 5 <= abs(suffix.global_y - base.global_y) <= 60
+                and min(raw, key=lambda token: abs(token.global_y - suffix.global_y)) is base
             ]
-            if "PRO" in base.text.upper() and nearby:
+            if normalize_model(base.text).endswith(" Pro") and nearby:
                 index, suffix = min(
                     nearby, key=lambda item: abs(item[1].global_y - base.global_y)
                 )

@@ -10,6 +10,7 @@ import logging
 import re
 import tempfile
 import time
+import unicodedata
 import uuid
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
@@ -29,7 +30,7 @@ from .matching import normalize_search_text
 logger = logging.getLogger(__name__)
 _PRICE = re.compile(r"^[¥￥]\s*([1-9]\d{1,6}(?:\.\d{1,2})?)\s*(?:元)?$")
 _PRICE_OTHER = re.compile(r"^([1-9]\d{1,6}(?:\.\d{1,2})?)\s*元$")
-_URL = re.compile(r"https?://[^\s<>\"']+")
+_URL = re.compile(r"https?://[^\s<>\"'，。；、！？（）【】「」『』《》“”‘’\)]+")
 _SHARE_HOSTS = {"m.tb.cn", "www.goofish.com", "h5.m.goofish.com"}
 _ITEM_ID = re.compile(r"(?:[?&](?:id|itemId|item_id)=)(\d{8,})")
 _IGNORED = {"新发", "综合", "价格", "筛选", "区域", "刚刚发布", "包邮", "验货宝", "想要", "搜索"}
@@ -38,6 +39,29 @@ _STORAGE_LABEL = re.compile(r"^(?:\d+GB|\d+TB)$")
 
 class _PageWaitTimeout(RuntimeError):
     pass
+
+
+class _VerificationRequired(RuntimeError):
+    pass
+
+
+def _raise_if_verification(source: str) -> None:
+    texts = set()
+
+    def walk(node: ET.Element) -> None:
+        if node.get("visible") == "false":
+            return
+        if node.tag in {"XCUIElementTypeOther", "XCUIElementTypeStaticText", "XCUIElementTypeWebView"}:
+            texts.update(node.get(key) or "" for key in ("name", "label", "value"))
+        # Product descriptions cannot establish a security challenge.
+        if node.tag != "XCUIElementTypeTextView":
+            for child in node:
+                walk(child)
+
+    walk(ET.fromstring(source))
+    prompts = {"亲，请按照说明进行验证哦", "请拖动下方滑块还原拼图", "拖动左侧滑块完成上方拼图"}
+    if "验证码拦截" in texts or len(texts & prompts) >= 2:
+        raise _VerificationRequired("闲鱼要求安全验证，请在手机完成验证后重试")
 
 
 @dataclass(frozen=True)
@@ -130,16 +154,55 @@ def item_id_from_share(share_text: str, page_html: str) -> str:
     return ""
 
 
-def share_confirmation_text(source: str) -> str:
-    """Read only the App's visible copy-confirmation text, never a hidden link."""
-    for node in ET.fromstring(source).iter():
-        text = _text(node)
-        if (node.tag not in {"XCUIElementTypeOther", "XCUIElementTypeStaticText", "XCUIElementTypeTextView"}
-                or node.get("visible") != "true" or "【闲鱼】" not in text or "点击链接" not in text):
+def _normalize_share_text(text: str) -> str:
+    text = unicodedata.normalize("NFKC", html.unescape(text))
+    return "".join(char for char in text if unicodedata.category(char) != "Cf")
+
+
+def _visible_share_messages(source: str) -> list[tuple[str, bool]]:
+    messages = []
+
+    def walk(node: ET.Element, *, visible=True, popup=False, description=False) -> None:
+        visible = visible and node.get("visible") != "false"
+        if not visible:
+            return
+        popup = popup or node.tag == "XCUIElementTypeAlert"
+        description = description or node.tag == "XCUIElementTypeTextView" and not popup
+        if (not description and node.get("visible") == "true"
+                and node.tag in {"XCUIElementTypeOther", "XCUIElementTypeStaticText", "XCUIElementTypeTextView"}):
+            for text in dict.fromkeys(node.get(key) or "" for key in ("value", "label", "name")):
+                if text:
+                    messages.append((_normalize_share_text(text), popup))
+        for child in node:
+            walk(child, visible=visible, popup=popup, description=description)
+
+    walk(ET.fromstring(source))
+    return messages
+
+
+def _share_urls(text: str) -> set[str]:
+    urls = set()
+    for url in _URL.findall(text):
+        try:
+            if urlparse(url).hostname in _SHARE_HOSTS:
+                urls.add(url)
+        except ValueError:
             continue
-        if any(urlparse(url).hostname in _SHARE_HOSTS for url in _URL.findall(text)):
-            return text
-    return ""
+    return urls
+
+
+def share_confirmation_text(source: str, *, before_source: str | None = None) -> str:
+    """Accept one fresh visible share URL; fixed copy wording is not required."""
+    previous = set()
+    if before_source is not None:
+        previous = set().union(*(_share_urls(text) for text, _ in _visible_share_messages(before_source)))
+    urls = set()
+    for text, popup in _visible_share_messages(source):
+        # Without a before/after comparison this is only a stale-popup check.
+        if before_source is None and not popup and "点击链接直接打开" not in normalize_search_text(text):
+            continue
+        urls.update(_share_urls(text) - previous)
+    return next(iter(urls)) if len(urls) == 1 else ""
 
 
 def current_detail(source: str) -> dict[str, Any]:
@@ -612,6 +675,7 @@ class IPhoneCollector:
             source = driver.page_source
             polls += 1
             try:
+                _raise_if_verification(source)
                 if ready(source):
                     logger.debug("iPhone 页面条件满足 elapsed=%.3fs polls=%s", time.monotonic() - started, polls)
                     return source
@@ -750,6 +814,7 @@ class IPhoneCollector:
                             actions.append({"action": "上滑列表", "target": f"第 {page + 1} 屏", "success": True})
                         emit_safely(on_items, stage=f"iPhone 读取 {storage_label} 第 {page + 1}/{max(0, scroll_pages) + 1} 屏",
                                     storage=storage)
+                        _raise_if_verification(source)
                         cards = parse_cards(source, region_hint)
                         logger.info("iPhone 列表 udid=%s storage=%s page=%s cards=%s", udid[-6:], storage, page, len(cards))
                         for card in cards:
@@ -783,6 +848,8 @@ class IPhoneCollector:
                                 actions.append({"action": stage, "target": card.title[:40],
                                                 "success": False, "error": _brief_error(exc)})
                                 emit_safely(on_items, cards=[{**raw, **seller_info, "link_error": _brief_error(exc)}], **card_meta)
+                                if isinstance(exc, _VerificationRequired):
+                                    raise
                                 if not is_search_results(driver.page_source):
                                     raise RuntimeError("分享失败后未回到搜索列表，停止本机采集") from exc
                                 continue
@@ -855,16 +922,36 @@ class IPhoneCollector:
                      and abs(element.rect["y"] - card.y) < 100), None)
 
     @staticmethod
-    def _close_share_sheet(driver: Any) -> None:
+    def _copy_link_rect(driver: Any) -> dict[str, float] | None:
+        """The share image may be on screen while XCTest reports visible=false."""
         from appium.webdriver.common.appiumby import AppiumBy
 
+        elements = driver.find_elements(AppiumBy.IOS_PREDICATE,
+                                        "name == '复制链接' OR label == '复制链接'")
+        if not elements:
+            return None
+        size = driver.get_window_size()
+        for element in elements:
+            rect = element.rect
+            x, y, width, height = (rect[key] for key in ("x", "y", "width", "height"))
+            # Ignore cached/off-screen and zero-sized nodes. Only the copy
+            # control gets this exception; ordinary element lookup stays strict.
+            if (width > 20 and height > 0 and x >= 0 and y >= 0
+                    and x + width <= size["width"] and y + height <= size["height"]):
+                return rect
+        return None
+
+    @staticmethod
+    def _close_share_sheet(driver: Any) -> None:
         for _ in range(3):
-            if not driver.find_elements(AppiumBy.IOS_PREDICATE, "name == '复制链接'"):
+            _raise_if_verification(driver.page_source)
+            if IPhoneCollector._copy_link_rect(driver) is None:
                 return
             size = driver.get_window_size()
             driver.execute_script("mobile: tap", {"x": size["width"] // 2, "y": 200})
             time.sleep(0.5)
-        if driver.find_elements(AppiumBy.IOS_PREDICATE, "name == '复制链接'"):
+        _raise_if_verification(driver.page_source)
+        if IPhoneCollector._copy_link_rect(driver) is not None:
             raise RuntimeError("分享面板未关闭，停止后续点击")
 
     def _select_home_city(self, driver: Any, city: str, actions: list[dict[str, Any]]) -> bool:
@@ -1011,6 +1098,7 @@ class IPhoneCollector:
 
     def _scroll_results(self, driver: Any, source: str) -> str:
         """A bounded drag keeps adjacent viewports overlapping; wait for progress."""
+        _raise_if_verification(source)
         if not is_search_results(source):
             raise RuntimeError("列表滚动前未确认搜索结果页")
         root = ET.fromstring(source)
@@ -1377,6 +1465,7 @@ class IPhoneCollector:
         clicked_back = False
         for _ in range(8):
             source = driver.page_source
+            _raise_if_verification(source)
             if is_search_results(source):
                 collapsed = active_storage_chip(source) is None
                 actions.append({"action": "确认搜索列表", "success": True,
@@ -1395,37 +1484,54 @@ class IPhoneCollector:
         actions.append({"action": "确认搜索列表", "success": False, "error": "未识别到搜索结果页"})
         raise RuntimeError("返回后未到搜索结果页，停止继续采集")
 
-    def _copy_from_share(self, driver: Any, actions: list[dict[str, Any]], *, wait_confirmation=True) -> str:
-        from appium.webdriver.common.appiumby import AppiumBy
-
-        share = self._find(driver, "分享按钮")
-        if share is None:
-            raise RuntimeError("详情页找不到分享按钮")
-        share.click()
-        actions.append({"action": "打开分享面板", "target": "分享按钮", "success": True})
-        for _ in range(10):
-            choices = driver.find_elements(AppiumBy.IOS_PREDICATE,
-                                          "(name == '复制链接' OR label == '复制链接') AND visible == true")
-            rect = next((bounds for element in choices if (bounds := element.rect)["width"] > 20), None)
-            if rect:
+    def _copy_from_share(
+        self, driver: Any, actions: list[dict[str, Any]], *, detail_card: PhoneCard, wait_confirmation=True,
+    ) -> str:
+        for opening in range(2):
+            if opening:
+                self._close_share_sheet(driver)
+                self._wait_for_source(driver, lambda xml: detail_matches(xml, detail_card),
+                                      "重新打开分享面板前详情发生变化，已跳过复制")
+                actions.append({"action": "重试分享面板", "success": True,
+                                "method": "未定位到复制入口，核对原详情后重开"})
+            share = self._find(driver, "分享按钮")
+            if share is None:
+                _raise_if_verification(driver.page_source)
+                raise RuntimeError("详情页找不到分享按钮")
+            share.click()
+            actions.append({"action": "点击分享按钮", "target": "分享按钮", "success": True})
+            for attempt in range(10):
+                rect = self._copy_link_rect(driver)
+                if rect is not None:
+                    break
+                if attempt < 9:
+                    time.sleep(.3)
+            if rect is not None:
                 break
-            time.sleep(.3)
+            _raise_if_verification(driver.page_source)
         else:
-            raise RuntimeError("分享菜单没有复制链接")
-        if share_confirmation_text(driver.page_source):
+            raise RuntimeError("未能定位复制链接按钮（已核对详情并重试分享）")
+        before_copy = driver.page_source
+        _raise_if_verification(before_copy)
+        if share_confirmation_text(before_copy):
             raise RuntimeError("分享面板仍有旧的复制确认文案，已跳过以免关联旧商品")
+        actions.append({"action": "定位复制链接", "success": True,
+                        "method": "名称/标签与屏幕内有效位置，不依赖可见标记"})
         driver.execute_script("mobile: tap", {
             "x": int(rect["x"] + rect["width"] / 2), "y": int(rect["y"] + rect["height"] * .9),
         })
+        actions.append({"action": "点击复制链接", "success": True})
         if not wait_confirmation:
             return ""
         try:
-            source = self._wait_for_source(driver, lambda xml: bool(share_confirmation_text(xml)),
-                                           "未读到本次复制确认文案", timeout=3)
+            source = self._wait_for_source(driver, lambda xml: bool(share_confirmation_text(xml, before_source=before_copy)),
+                                           "未读到本次复制的新链接", timeout=3)
         except _PageWaitTimeout:
+            actions.append({"action": "切换链接读取方式", "success": True,
+                            "method": "已点击复制，未识别到新链接，改用手机剪贴板"})
             return ""
-        actions.append({"action": "读取分享确认文案", "target": "本次可见确认框", "success": True})
-        return share_confirmation_text(source)
+        actions.append({"action": "读取本次复制链接", "target": "复制后新出现的单一闲鱼链接", "success": True})
+        return share_confirmation_text(source, before_source=before_copy)
 
     def _share_item_id(
         self, driver: Any, udid: str, card: PhoneCard,
@@ -1448,6 +1554,7 @@ class IPhoneCollector:
             read_error = "详情尚未加载"
             for attempt in range(6):
                 source = driver.page_source
+                _raise_if_verification(source)
                 try:
                     observed = current_detail(source)
                 except (ValueError, ET.ParseError) as exc:
@@ -1502,7 +1609,7 @@ class IPhoneCollector:
             # Most copies expose a fresh confirmation. Avoid switching apps
             # and preparing a clipboard marker unless that path is unavailable.
             copy_started = time.monotonic()
-            after = self._copy_from_share(driver, actions)
+            after = self._copy_from_share(driver, actions, detail_card=detail_card)
             method = "本次确认框"
             if not after:
                 method = "标记后重新复制并读剪贴板"
@@ -1515,7 +1622,7 @@ class IPhoneCollector:
                 actions.append({"action": "准备手机剪贴板", "target": "本次复制标记已核验", "success": True})
                 # A second copy AFTER marker preparation is mandatory. Never
                 # fall back to reading a clipboard left by the first attempt.
-                self._copy_from_share(driver, actions, wait_confirmation=False)
+                self._copy_from_share(driver, actions, detail_card=detail_card, wait_confirmation=False)
                 for _ in range(4):
                     after = _pasteboard(driver, settings=self.settings)
                     if after and marker not in after:
@@ -1524,6 +1631,7 @@ class IPhoneCollector:
                 if not after or marker in after:
                     raise RuntimeError("手机剪贴板未产生新链接")
             logger.info("iPhone 分享复制 method=%s elapsed=%.3fs", method, time.monotonic() - copy_started)
+            after = _normalize_share_text(after)
             short_urls = [url.rstrip("，。)）") for url in _URL.findall(after)
                           if urlparse(url).hostname in _SHARE_HOSTS]
             if not short_urls:
@@ -1546,6 +1654,8 @@ class IPhoneCollector:
         finally:
             try:
                 self._return_to_results(driver, actions)
+            except _VerificationRequired:
+                raise
             except Exception as return_error:
                 if operation_error is not None:
                     raise RuntimeError(f"{_brief_error(operation_error)}；{_brief_error(return_error)}") from operation_error
