@@ -1,0 +1,251 @@
+"""App-triggered searches/details, proxy product data; UI collector stays independent."""
+from __future__ import annotations
+
+import asyncio
+import time
+import xml.etree.ElementTree as ET
+
+from .appium_server import ensure_appium_server
+from .collector import CollectResult, emit_safely
+from .iphone_collector import (IPhoneCollector, _VerificationRequired, _raise_if_verification,
+                               _brief_error, _text, detail_content, detail_seller, is_search_results)
+from .matching import normalize_search_text
+
+
+def checked(events):
+    if any(event.get("event") == "verification" for event in events):
+        raise _VerificationRequired("闲鱼要求验证或限制请求，请在手机处理后重试")
+    return events
+
+
+def detail_view(source, description, expected_price=None):
+    """Bind a complete network body to either native text layout before reading price."""
+    root = ET.fromstring(source)
+    visible = [node for node in root.iter() if node.get("visible") != "false"]
+    controls = {_text(node) for node in visible}
+    if not controls.intersection({"分享按钮", "返回按钮"}) or "确定" in controls:
+        raise ValueError("尚未进入商品详情页")
+    rendered = [normalize_search_text(_text(node)) for node in visible
+                if node.tag in {"XCUIElementTypeTextView", "XCUIElementTypeStaticText", "XCUIElementTypeOther"}]
+    expected = normalize_search_text(description)
+    body_matched = bool(expected and (any(expected in value for value in rendered) or expected in "".join(rendered)))
+    avatar = next((node for node in visible if "用户头像" in {node.get("name"), node.get("label")}), None)
+    top = max(100, float(avatar.get("y") or 0) + float(avatar.get("height") or 0)) if avatar is not None else 100
+    from .proxy_protocol import price
+    amounts = {amount for node in visible if node.tag in {"XCUIElementTypeStaticText", "XCUIElementTypeOther"}
+               and top <= float(node.get("y") or 0) < max(300, top + 180)
+               and (amount := price(_text(node).replace(",", ""))) is not None}
+    if len(amounts) != 1:
+        raise ValueError("详情售价未就绪或存在多个数值")
+    amount = amounts.pop()
+    if not body_matched and (expected_price is None or amount != expected_price):
+        raise ValueError("当前页面尚未对应代理正文或售价")
+    return {"price": amount, "body_matched": body_matched}
+
+
+def detail_below_fold(source):
+    root = ET.fromstring(source)
+    app = root if root.tag == "XCUIElementTypeApplication" else root.find(".//XCUIElementTypeApplication")
+    width, height = (float(app.get(key) or 0) for key in ("width", "height")) if app is not None else (0, 0)
+    if not width or not height:
+        return None
+    visible = [node for node in root.iter() if node.get("visible") != "false"]
+    if not any(_text(node) in {"分享按钮", "返回按钮"} for node in visible):
+        return None
+    from .proxy_protocol import price
+    low_price = any(node.tag in {"XCUIElementTypeStaticText", "XCUIElementTypeOther"}
+                    and height * .5 < float(node.get("y") or 0) < height * .9
+                    and price(_text(node)) is not None for node in visible)
+    return (width, height) if low_price else None
+
+
+class IPhoneProxyCollector(IPhoneCollector):
+    def __init__(self, settings, proxy):
+        super().__init__(settings)
+        self.proxy = proxy
+
+    async def collect(self, udid, os_version, keyword, region_hint, region_steps, storages, scroll_pages,
+                      is_candidate, on_items=None, check_detail=None, *, client_ip):
+        return await asyncio.to_thread(self._collect_proxy, udid, os_version, keyword, region_hint,
+                                      region_steps, storages, scroll_pages, is_candidate, on_items,
+                                      check_detail, client_ip)
+
+    def _connect(self, udid, os_version):
+        from appium import webdriver
+        from appium.options.ios import XCUITestOptions
+        if not self.settings.ios_wda_bundle_id:
+            raise RuntimeError("未配置 IOS_WDA_BUNDLE_ID")
+        ensure_appium_server(self.settings)
+        caps = {"platformName": "iOS", "appium:automationName": "XCUITest", "appium:udid": udid,
+                "appium:bundleId": self.settings.bundle_id, "appium:noReset": True,
+                "appium:shouldTerminateApp": False, "appium:usePrebuiltWDA": True,
+                "appium:derivedDataPath": str(self.settings.ios_wda_derived_data_path),
+                "appium:updatedWDABundleId": self.settings.ios_wda_bundle_id,
+                "appium:wdaLocalPort": 8101, "appium:newCommandTimeout": 300,
+                "appium:waitForIdleTimeout": 0.5,
+                "appium:settings": {"waitForIdleTimeout": 0.5, "animationCoolOffTimeout": 0.3}}
+        if os_version:
+            caps["appium:platformVersion"] = os_version
+        return webdriver.Remote(self.settings.appium_server_url, options=XCUITestOptions().load_capabilities(caps))
+
+    def _drag_list(self, driver):
+        source = driver.page_source
+        _raise_if_verification(source)
+        if not is_search_results(source):
+            raise RuntimeError("代理翻页前未确认搜索列表")
+        size = driver.get_window_size()
+        driver.execute_script("mobile: dragFromToForDuration", {"duration": 0.35,
+            "fromX": size["width"] * .48, "fromY": size["height"] * .84,
+            "toX": size["width"] * .48, "toY": size["height"] * .3})
+
+    def _pages(self, driver, client_ip, keyword, since, scroll_pages):
+        events = checked(self.proxy.wait(client_ip, since, keyword=keyword, timeout=18))
+        if not events:
+            _raise_if_verification(driver.page_source)
+            raise RuntimeError("未收到本次搜索的代理数据；请检查手机 Wi-Fi 代理、证书与设备 IP")
+        # The new-sort tap must generate the observed request, not an older response.
+        first = events[-1]
+        if first.get("sort_field") != "create" or first.get("sort_value") != "desc":
+            raise RuntimeError("代理响应未确认新发排序，停止采集")
+        fingerprint = first["filter_fingerprint"]
+        batches = [event for event in events if event.get("filter_fingerprint") == fingerprint]
+        last_sequence = max(event["sequence"] for event in batches)
+        for _ in range(max(0, scroll_pages)):
+            if batches[-1].get("has_more") is False:
+                break
+            self._drag_list(driver)
+            more = checked(self.proxy.wait(client_ip, since, keyword=keyword, fingerprint=fingerprint,
+                                           after_sequence=last_sequence, timeout=1.5))
+            if more:
+                batches.extend(more)
+                last_sequence = max(event["sequence"] for event in more)
+        _raise_if_verification(driver.page_source)
+        result = {}
+        for batch in batches:
+            for item in batch.get("items", []):
+                result.setdefault(item["item_id"], item)
+        return list(result.values()), len(batches)
+
+    def _detail(self, driver, raw, client_ip, actions):
+        target, since = raw["item_id"], time.time()
+        driver.execute_script("mobile: deepLink", {"url": f"fleamarket://item?id={target}",
+                                                  "bundleId": self.settings.bundle_id})
+        actions.append({"action": "打开候选详情", "target": target, "method": "商品 ID", "success": True})
+        events = checked(self.proxy.wait(client_ip, since, kind="detail", target=target, timeout=15))
+        if not events:
+            _raise_if_verification(driver.page_source)
+            raise RuntimeError("未收到该商品本次详情返回，未使用列表摘要或旧缓存代替")
+        item = events[-1].get("item")
+        if not item or item.get("item_id") != target or not item.get("description"):
+            raise RuntimeError("代理详情缺少对应商品的完整正文")
+        item = {**raw, **item, "image_urls": item.get("image_urls") or raw.get("image_urls", [])}
+        observed = {}
+        def ready(xml):
+            try:
+                current = detail_view(xml, item["description"], item.get("price"))
+                observed.update(current)
+                return True
+            except (ValueError, ET.ParseError):
+                return False
+        source = driver.page_source
+        _raise_if_verification(source)
+        for _ in range(2):
+            if ready(source):
+                break
+            bounds = detail_below_fold(source)
+            if bounds is None:
+                break
+            width, height = bounds
+            driver.execute_script("mobile: dragFromToForDuration", {"duration": .35,
+                "fromX": width * .5, "fromY": height * .82, "toX": width * .5, "toY": height * .34})
+            actions.append({"action": "展开详情正文", "method": "大图布局，按售价位置受控下滑", "success": True})
+            source = driver.page_source
+            _raise_if_verification(source)
+        if not observed:
+            source = self._wait_for_source(driver, ready, "代理详情尚未对应当前页面正文与售价")
+        # Display price is authoritative while native price layouts are still varied.
+        item["price"] = observed["price"]
+        if observed["body_matched"]:
+            extra = detail_content(source)
+            item["detail_parameters"] = list(dict.fromkeys(item.get("detail_parameters", []) + extra.get("detail_parameters", [])))
+            item.update(detail_seller(source))
+        item.update(item_url=f"https://www.goofish.com/item?id={target}", acquisition_stage="valuation")
+        actions.append({"action": "读取代理详情", "target": target, "success": True})
+        return item
+
+    def _collect_proxy(self, udid, os_version, keyword, region_hint, region_steps, storages, scroll_pages,
+                       is_candidate, on_items, check_detail, client_ip):
+        self.proxy.wait_ready()
+        result, driver, setup = CollectResult(items=[]), None, []
+        with self.proxy.session(client_ip):
+            try:
+                driver = self._connect(udid, os_version)
+                emit_safely(on_items, stage="代理模式 · 搜索", storage=None)
+                inherited = self._search(driver, keyword, region_hint, setup)
+                if region_hint:
+                    if not inherited:
+                        self._apply_region(driver, region_hint, region_steps)
+                    result.region_applied = True
+                emit_safely(on_items, stage="代理模式 · 筛选机型", storage=None)
+                self._apply_model(driver, keyword)
+                setup.append({"action": "机型及地区筛选", "target": keyword, "success": True})
+                for storage in storages:
+                    actions, pass_items, cards, candidates, error = setup.copy(), [], [], 0, None
+                    setup = []
+                    meta = {"storage": storage, "region_applied": result.region_applied, "filter_applied": True}
+                    try:
+                        self._apply_storage(driver, storage)
+                        since = time.time()
+                        self._sort_new(driver)
+                        emit_safely(on_items, stage=f"代理读取 {storage} 列表", storage=storage)
+                        cards, batches = self._pages(driver, client_ip, keyword, since, scroll_pages)
+                        actions.append({"action": "批量读取代理列表", "target": f"{batches} 批 · {len(cards)} 件", "success": True})
+                        for raw in cards:
+                            if not is_candidate(raw, result.region_applied, storage):
+                                emit_safely(on_items, cards=[raw], **meta)
+                                continue
+                            candidates += 1
+                            item = {**raw, "acquisition_stage": "detail"}
+                            opened = False
+                            try:
+                                opened = True
+                                emit_safely(on_items, stage=f"代理读取 {storage} 候选详情", storage=storage)
+                                item = self._detail(driver, raw, client_ip, actions)
+                                decision = check_detail(item, result.region_applied, storage) if check_detail else None
+                                if decision and not decision.get("matched") and decision.get("code") != "pending":
+                                    emit_safely(on_items, cards=[{**item, "detail_rejection": decision}], **meta)
+                                    continue
+                                item.pop("acquisition_stage", None)
+                                item.update(source_storage=storage, source_pass="新发", source_channel="proxy")
+                                pass_items.append(item)
+                                result.items.append(item)
+                                emit_safely(on_items, [item], **meta)
+                            except _VerificationRequired:
+                                raise
+                            except Exception as exc:
+                                emit_safely(on_items, cards=[{**item, "link_error": _brief_error(exc)}], **meta)
+                                actions.append({"action": "读取代理详情", "target": raw["item_id"],
+                                                "success": False, "error": _brief_error(exc)})
+                            finally:
+                                if opened:
+                                    self._return_to_results(driver, actions)
+                    except Exception as exc:
+                        error = _brief_error(exc)
+                    entry = {"label": "新发", "storage": storage, "channel": "proxy", "model_applied": True,
+                             "region_applied": result.region_applied, "filter_applied": error is None,
+                             "observed": len(pass_items), "cards": len(cards), "candidates": candidates,
+                             "card_samples": cards[:40], "cards_truncated": len(cards) > 40,
+                             "items": pass_items[:25], "items_total": len(pass_items),
+                             "items_truncated": len(pass_items) > 25, "actions": actions, "error": error}
+                    result.passes.append(entry)
+                    emit_safely(on_items, pass_info=entry, storage=storage)
+                    if error:
+                        break
+            except Exception as exc:
+                result.passes.append({"label": "新发", "storage": None, "channel": "proxy",
+                                      "error": _brief_error(exc), "observed": 0, "actions": setup})
+            finally:
+                if driver is not None:
+                    driver.quit()
+        result.filter_applied = bool(result.passes) and all(entry.get("filter_applied") for entry in result.passes)
+        return result

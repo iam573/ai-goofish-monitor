@@ -521,3 +521,58 @@ def test_detail_quote_keeps_assessed_grade_and_adjusted_price(database):
     }})
     assert decision.quote_grade == "小花" and decision.quote_basis == "detail"
     assert decision.quote_price == 3700 and decision.threshold_price == 3900
+
+
+async def test_per_device_proxy_selection_routes_only_future_runs(database):
+    service, _ = setup(database)
+    calls = []
+    class Phone:
+        def __init__(self, name):
+            self.name = name
+        async def collect(self, *args, **kwargs):
+            calls.append((self.name, kwargs.get("client_ip")))
+            return CollectResult(items=[], passes=[{"label": "新发", "storage": "256", "filter_applied": True}])
+    service.iphone_collector = Phone("ui")
+    service.iphone_proxy_collector = Phone("proxy")
+    service.proxy.configure = lambda clients: None
+    rules = load_rules(database)
+    await service._collect_sources("iPhone 15 Pro", "15 Pro", ["256"], rules)
+    database.state_set("collector_device_channels", {"ios:test-phone": {"channel": "proxy", "client_ip": "192.168.1.20"}})
+    await service._collect_sources("iPhone 15 Pro", "15 Pro", ["256"], rules)
+    database.state_set("collector_device_channels", {"ios:test-phone": {"channel": "ui", "client_ip": "192.168.1.20"}})
+    await service._collect_sources("iPhone 15 Pro", "15 Pro", ["256"], rules)
+    assert calls == [("ui", None), ("proxy", "192.168.1.20"), ("ui", None)]
+
+
+def test_proxy_rejected_cards_keep_real_identity_and_clickable_link(database):
+    from app_monitor.db import utc_now
+    service, _ = setup(database)
+    with database.connect() as connection:
+        run_id = connection.execute("INSERT INTO search_runs(model,keyword,started_at) VALUES('15 Pro','iPhone 15 Pro',?)", (utc_now(),)).lastrowid
+    key = "1093306353441"
+    service._record_cards(run_id, [{"item_id": key, "title": "iPhone 15 Pro 256G", "price": 9000,
+                                   "display_region": "厦门"}], load_rules(database),
+                          {"storage": "256", "filter_applied": True}, "15 Pro")
+    with database.connect() as connection:
+        row = connection.execute("SELECT * FROM run_items WHERE run_id=?", (run_id,)).fetchone()
+    assert row["item_id"] == key and row["item_url"] == f"https://www.goofish.com/item?id={key}"
+
+
+async def test_mid_run_switch_waits_until_next_search_for_other_devices(database, monkeypatch):
+    service, _ = setup(database)
+    database.state_set("collector_devices", ["ios:one", "ios:two"])
+    monkeypatch.setattr("app_monitor.service.discover_devices", lambda: [
+        Device("ios:one", "One", "ios", True, "one"), Device("ios:two", "Two", "ios", True, "two")])
+    calls = []
+    class Adapter:
+        def __init__(self, name):
+            self.name = name
+        async def collect(self, udid, *args, **kwargs):
+            calls.append((self.name, udid))
+            if udid == "one":
+                database.state_set("collector_device_channels", {"ios:two": {"channel": "proxy", "client_ip": "192.168.1.20"}})
+            return CollectResult(items=[], passes=[{"label": "新发", "filter_applied": True}])
+    service.iphone_collector, service.iphone_proxy_collector = Adapter("ui"), Adapter("proxy")
+    for _ in range(2):
+        await service._collect_sources("iPhone 15 Pro", "15 Pro", ["256"], load_rules(database))
+    assert calls == [("ui", "one"), ("ui", "two"), ("ui", "one"), ("proxy", "two")]

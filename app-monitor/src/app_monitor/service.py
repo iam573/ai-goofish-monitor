@@ -14,8 +14,10 @@ from .collector import CollectResult
 from .db import Database, utc_now
 from .config import settings as default_settings
 from .smart import SmartService, assess_local, candidate_decision, load_config, policies_for
-from .devices import MAC_DEVICE, discover_devices, selected_devices
+from .devices import MAC_DEVICE, discover_devices, selected_devices, device_channel, proxy_clients
 from .iphone_collector import IPhoneCollector
+from .proxy_capture import ProxyCapture
+from .iphone_proxy_collector import IPhoneProxyCollector
 from .matching import MatchDecision, evaluate
 from .notifications import NotificationService, notification_result_text
 from .quotes import quote_reference, latest_entries
@@ -98,6 +100,8 @@ class MonitorService:
         self.collector = collector
         self.settings = getattr(collector, "settings", default_settings)
         self.iphone_collector = IPhoneCollector(self.settings)
+        self.proxy = ProxyCapture(self.settings)
+        self.iphone_proxy_collector = IPhoneProxyCollector(self.settings, self.proxy)
         self.smart = SmartService(database, self.settings)
         self.notifications = notifications
         self._lock = asyncio.Lock()
@@ -353,8 +357,14 @@ class MonitorService:
     async def _collect_sources(
         self, keyword: str, model: str, storages: list[str], rules: Rules, stream: ItemStream | None = None,
     ) -> CollectResult:
-        """Run selected devices in order. A failed device does not discard others."""
         selected = selected_devices(self.database)
+        channels = {key: device_channel(self.database, key) for key in selected}
+        clients = [value["client_ip"] for value in channels.values() if value["channel"] == "proxy" and value["client_ip"]]
+        with self.proxy.reserve(clients):
+            return await self._collect_selected_sources(keyword, model, storages, rules, stream, selected, channels)
+
+    async def _collect_selected_sources(self, keyword, model, storages, rules, stream, selected, channels) -> CollectResult:
+        """Run selected devices in order. A failed device does not discard others."""
         available = {device.id: device for device in await asyncio.to_thread(discover_devices)}
         combined = CollectResult(items=[])
         failures = []
@@ -408,11 +418,19 @@ class MonitorService:
                 if device is None or not device.connected:
                     status = device.connection_status if device else "未连接"
                     raise RuntimeError(f"iPhone {status or '未连接'}；已保留勾选，重连后可继续使用")
-                part = await self.iphone_collector.collect(
+                channel = channels[device_id]
+                adapter, options = self.iphone_collector, {}
+                if channel["channel"] == "proxy":
+                    if not channel["client_ip"]:
+                        raise RuntimeError("代理采集尚未配置手机 Wi-Fi IP，请在设备列表填写")
+                    self.proxy.configure(proxy_clients(self.database))
+                    adapter, options = self.iphone_proxy_collector, {"client_ip": channel["client_ip"]}
+                part = await adapter.collect(
                     device.udid, device.os_version, keyword, rules.region_city,
                     rules.region_steps, storages, rules.scroll_pages, is_candidate,
                     on_items=stream.for_device(device_id, label) if stream else None,
                     check_detail=check_detail,
+                    **options,
                 )
                 if any(not entry.get("error") for entry in part.passes):
                     successes += 1
@@ -480,7 +498,11 @@ class MonitorService:
                 )
                 decision = replace(decision, matched=False, code="no_link", reason=f"核验未完成，尚不能判断是否符合推送条件：{reason}")
             digest = hashlib.sha1(f"{storage}|{title}|{price}|{region}".encode("utf-8")).hexdigest()[:12]
-            item["item_id"] = f"card:{digest}"
+            real_id = str(card.get("item_id") or "")
+            item["item_id"] = real_id if real_id.isdigit() and len(real_id) >= 8 else f"card:{digest}"
+            if item["item_id"] == real_id:
+                item["item_url"] = f"https://www.goofish.com/item?id={real_id}"
+                item["publish_time"] = card.get("publish_time")
             self._save_run_item(run_id, label, item, decision, False)
             recorded += 1
         return recorded

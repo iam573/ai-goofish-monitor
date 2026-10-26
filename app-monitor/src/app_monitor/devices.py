@@ -3,15 +3,17 @@
 from __future__ import annotations
 
 import json
+import ipaddress
 import logging
 import subprocess
 from dataclasses import dataclass
 
-from .db import Database
+from .db import Database, utc_now
 
 logger = logging.getLogger(__name__)
 MAC_DEVICE = "mac"
 SELECTION_KEY = "collector_devices"
+CHANNELS_KEY = "collector_device_channels"
 
 
 @dataclass(frozen=True)
@@ -86,3 +88,73 @@ def set_selected_devices(database: Database, ids: list[str]) -> list[str]:
         raise ValueError(f"设备不存在：{', '.join(sorted(unknown))}")
     database.state_set(SELECTION_KEY, selected)
     return selected
+
+
+def device_channel(database: Database, device_id: str) -> dict:
+    saved = database.state_get(CHANNELS_KEY, {})
+    value = saved.get(device_id, {}) if isinstance(saved, dict) else {}
+    if not isinstance(value, dict):
+        value = {}
+    try:
+        address = str(ipaddress.ip_address(value.get("client_ip"))) if value.get("client_ip") else ""
+    except ValueError:
+        address = ""
+    return {"channel": value.get("channel") if value.get("channel") in {"ui", "proxy"} else "ui",
+            "client_ip": address}
+
+
+def proxy_clients(database: Database) -> list[str]:
+    saved = database.state_get(CHANNELS_KEY, {})
+    if not isinstance(saved, dict):
+        return []
+    result = set()
+    for key, value in saved.items():
+        if not key.startswith("ios:") or not isinstance(value, dict) or value.get("channel") != "proxy":
+            continue
+        try:
+            if value.get("client_ip"):
+                result.add(str(ipaddress.ip_address(value["client_ip"])))
+        except ValueError:
+            continue
+    return sorted(result)
+
+
+def proxy_enabled(database: Database) -> bool:
+    saved = database.state_get(CHANNELS_KEY, {})
+    return isinstance(saved, dict) and any(key.startswith("ios:") and isinstance(value, dict)
+        and value.get("channel") == "proxy" for key, value in saved.items())
+
+
+def set_device_channel(database: Database, device_id: str, channel: str, client_ip: str | None = None) -> dict:
+    if channel not in {"ui", "proxy"}:
+        raise ValueError("采集通道必须为原有采集或代理采集")
+    if device_id not in {device.id for device in discover_devices()}:
+        raise ValueError("设备不存在，请刷新设备列表")
+    previous = device_channel(database, device_id)
+    address = previous["client_ip"] if client_ip is None else client_ip.strip()
+    if address:
+        try:
+            address = str(ipaddress.ip_address(address))
+        except ValueError as exc:
+            raise ValueError("请填写手机 Wi-Fi 详情中的有效 IP 地址") from exc
+        if ipaddress.ip_address(address).is_loopback or ipaddress.ip_address(address).is_unspecified:
+            raise ValueError("请填写手机的局域网 IP，不能使用本机地址")
+    with database.connect() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        row = connection.execute("SELECT value FROM app_state WHERE key=?", (CHANNELS_KEY,)).fetchone()
+        saved = json.loads(row["value"]) if row else {}
+        saved = saved if isinstance(saved, dict) else {}
+        if client_ip is None:
+            prior = saved.get(device_id, {})
+            try:
+                address = str(ipaddress.ip_address(prior["client_ip"])) if isinstance(prior, dict) and prior.get("client_ip") else ""
+            except ValueError:
+                address = ""
+        if channel == "proxy" and address and any(key != device_id and isinstance(value, dict)
+                and value.get("channel") == "proxy" and value.get("client_ip") == address for key, value in saved.items()):
+            raise ValueError("该 IP 已绑定另一台代理设备，请核对手机 Wi-Fi IP")
+        result = {"channel": channel, "client_ip": address}
+        saved[device_id] = result
+        connection.execute("INSERT INTO app_state(key,value,updated_at) VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at",
+                           (CHANNELS_KEY, json.dumps(saved), utc_now()))
+    return result

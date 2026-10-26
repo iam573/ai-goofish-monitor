@@ -5,7 +5,7 @@ import json
 from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -16,7 +16,7 @@ from pydantic import BaseModel, Field
 
 from .config import ROOT, settings
 from .db import Database, rows_as_dicts, utc_now
-from .devices import discover_devices, selected_devices, set_selected_devices
+from .devices import discover_devices, selected_devices, set_selected_devices, device_channel, set_device_channel, proxy_clients, proxy_enabled
 from .notifications import NotificationService
 from .quotes import (
     APPLE_PHONE_CATEGORIES,
@@ -74,6 +74,12 @@ def quote_refresh_trigger() -> CronTrigger:
 async def lifespan(_: FastAPI):
     database.initialize()
     monitor_service.close_interrupted_runs()
+    if proxy_enabled(database):
+        monitor_service.proxy.configure(proxy_clients(database))
+        try:
+            monitor_service.proxy.start()
+        except (RuntimeError, OSError):
+            pass  # The device panel reports optional proxy startup failures.
     scheduler.add_job(
         refresh_quotes_if_stale,
         quote_refresh_trigger(),
@@ -99,6 +105,7 @@ async def lifespan(_: FastAPI):
     startup.cancel()
     backfill.cancel()
     scheduler.shutdown(wait=False)
+    await asyncio.to_thread(monitor_service.proxy.stop)
 
 
 app = FastAPI(title="闲鱼报价捡漏监控", version="0.3.4", lifespan=lifespan)
@@ -114,7 +121,41 @@ class DeviceSelectionPayload(BaseModel):
 async def devices() -> dict[str, Any]:
     selected = selected_devices(database)
     found = await asyncio.to_thread(discover_devices)
-    return {"devices": [device.as_dict(device.id in selected) for device in found], "selected": selected}
+    result = []
+    for device in found:
+        channel = device_channel(database, device.id)
+        result.append({**device.as_dict(device.id in selected), "collection_channel": channel["channel"],
+                       "proxy_client_ip": channel["client_ip"],
+                       "proxy_status": monitor_service.proxy.status(channel["client_ip"])})
+    return {"devices": result, "selected": selected}
+
+
+class DeviceChannelPayload(BaseModel):
+    channel: Literal["ui", "proxy"]
+    client_ip: str | None = Field(default=None, max_length=80)
+
+
+@app.put("/api/devices/{device_id}/channel")
+async def change_device_channel(device_id: str, payload: DeviceChannelPayload) -> dict[str, Any]:
+    try:
+        channel = await asyncio.to_thread(set_device_channel, database, device_id, payload.channel, payload.client_ip)
+        monitor_service.proxy.configure(proxy_clients(database))
+        if channel["channel"] == "proxy":
+            monitor_service.proxy.start()
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except (RuntimeError, OSError) as exc:
+        raise HTTPException(503, str(exc)) from exc
+    return {**channel, "next_run": monitor_service.busy,
+            "proxy_status": monitor_service.proxy.status(channel["client_ip"])}
+
+
+@app.get("/api/proxy/certificate")
+async def proxy_certificate() -> FileResponse:
+    path = monitor_service.proxy.certificate
+    if not path.is_file():
+        raise HTTPException(404, "请先在设备列表启用代理，等待证书准备完成")
+    return FileResponse(path, media_type="application/x-x509-ca-cert", filename="goofish-proxy-ca.cer")
 
 
 @app.put("/api/devices/selection")

@@ -220,18 +220,36 @@ function renderDevices() {
   document.querySelector("#device-options").innerHTML = state.devices.map(device => {
     const order = selected.indexOf(device);
     const meta = escapeHtml(device.os_version ? `iOS ${device.os_version}` : "iPhone");
-    return `<label class="device-row ${device.connected ? "" : "offline"}">
-      <input type="checkbox" value="${escapeHtml(device.id)}" ${device.selected ? "checked" : ""} />
+    const proxy = device.collection_channel === "proxy";
+    const status = device.proxy_status || {};
+    const address = status.addresses?.[0] || "电脑局域网 IP";
+    const proxyText = status.error || (!device.proxy_client_ip ? "待填写手机 IP" : status.tls_failed ? "证书未通过，请检查完全信任" : status.client_connected ? "已收到手机数据" : status.ready ? "等待手机连接" : "代理准备中…");
+    return `<div class="device-card" data-device="${escapeHtml(device.id)}"><div class="device-row ${device.connected ? "" : "offline"}">
+      <label class="device-select" aria-label="选择 ${escapeHtml(device.name)}"><input type="checkbox" data-device-selection value="${escapeHtml(device.id)}" ${device.selected ? "checked" : ""} /></label>
       <span class="device-glyph">${deviceIcons.ios}</span>
       <span class="device-info"><b>${escapeHtml(device.name)}</b>
         <small>${meta} · <span class="${device.connected ? "online-text" : "warn-text"}">${escapeHtml(device.connection_status || (device.connected ? "已连接" : "未连接"))}</span></small></span>
       ${selected.length > 1 && order >= 0 ? `<em class="device-order" title="采集顺序">${order + 1}</em>` : ""}
-    </label>`;
+      <select class="device-channel" data-device-channel aria-label="${escapeHtml(device.name)} 采集方式">
+        <option value="ui" ${!proxy ? "selected" : ""}>原有采集</option>
+        <option value="proxy" ${proxy ? "selected" : ""}>代理采集</option>
+      </select>
+    </div>${proxy ? `<div class="device-proxy">
+      <div class="device-proxy-state"><span class="dot ${status.client_connected ? "ok" : "warn"}"></span><span>${escapeHtml(proxyText)}</span></div>
+      <label class="device-proxy-ip">手机 Wi-Fi IP <input data-proxy-ip value="${escapeHtml(device.proxy_client_ip || "")}" placeholder="例如 192.168.1.20" inputmode="text" autocomplete="off" /><button type="button" class="secondary compact" data-save-proxy>保存</button></label>
+      <details><summary>手机代理设置</summary><div class="device-proxy-help">
+        <p>手机与电脑连接同一局域网，在手机 Wi-Fi 详情中将 HTTP 代理设为手动。</p>
+        <div class="device-proxy-address"><span>服务器 <b>${escapeHtml(address)}</b></span><span>端口 <b>${escapeHtml(String(status.port || 8899))}</b></span></div>
+        <p>手机 Safari 打开 <b>http://mitm.it</b> 安装证书，再到「通用 → 关于本机 → 证书信任设置」开启完全信任。</p>
+        <p>上方 IP 填手机 Wi-Fi 详情中的 IP 地址。切换通道从下一次搜索生效。</p>
+      </div></details>
+    </div>` : device.proxy_client_ip ? `<p class="device-channel-note">使用原有采集时，请在手机关闭 Wi-Fi 代理。</p>` : ""}</div>`;
   }).join("") || `<p class="hint">没有检测到 iPhone；Mac 采集已禁用。</p>`;
   document.querySelector("#device-summary").textContent = deviceSummary();
   const dot = document.querySelector("#device-dot");
-  dot.className = `dot ${!selected.length ? "bad" : selected.every(device => device.connected) ? "ok" : "warn"}`;
-  dot.title = !selected.length ? "未选择设备" : selected.every(device => device.connected) ? "所选设备都已连接" : "有设备未连接";
+  const ready = selected.every(device => device.connected && (device.collection_channel !== "proxy" || device.proxy_status?.client_connected));
+  dot.className = `dot ${!selected.length ? "bad" : ready ? "ok" : "warn"}`;
+  dot.title = !selected.length ? "未选择设备" : ready ? "所选设备已就绪" : selected.some(device => !device.connected) ? "有设备未连接" : "代理等待手机连接或配置";
 }
 
 function setDeviceMenu(open) {
@@ -1291,8 +1309,14 @@ document.querySelector("#refresh-devices").addEventListener("click", async event
   try { await loadDevices(); toast("设备列表已刷新"); } catch (error) { toast(error.message, true); }
   finally { button.classList.remove("spinning"); }
 });
-document.querySelector("#device-options").addEventListener("change", async () => {
-  const ids = [...document.querySelectorAll("#device-options input:checked")].map(input => input.value);
+document.querySelector("#device-options").addEventListener("change", async event => {
+  if (event.target.matches("[data-device-channel]")) {
+    const card = event.target.closest("[data-device]");
+    await saveDeviceChannel(card.dataset.device, event.target.value);
+    return;
+  }
+  if (!event.target.matches("[data-device-selection]")) return;
+  const ids = [...document.querySelectorAll("#device-options [data-device-selection]:checked")].map(input => input.value);
   try {
     if (!ids.length) throw new Error("至少选择一台采集设备");
     await api("/api/devices/selection", { method: "PUT", body: JSON.stringify({ ids }) });
@@ -1304,6 +1328,23 @@ document.querySelector("#device-options").addEventListener("change", async () =>
     toast(error.message, true);
     await loadDevices().catch(() => {});
   }
+});
+
+async function saveDeviceChannel(deviceId, channel, clientIp) {
+  try {
+    const saved = await api(`/api/devices/${encodeURIComponent(deviceId)}/channel`, {
+      method: "PUT", body: JSON.stringify({ channel, ...(clientIp === undefined ? {} : {client_ip: clientIp}) }),
+    });
+    await loadDevices();
+    toast(saved.next_run ? "已保存，下次搜索生效" : channel === "proxy" ? "代理采集已选择，请完成手机连接设置" : "已切换原有采集，请关闭手机 Wi-Fi 代理");
+  } catch (error) { toast(error.message, true); await loadDevices().catch(() => {}); }
+}
+
+document.querySelector("#device-options").addEventListener("click", event => {
+  const button = event.target.closest("[data-save-proxy]");
+  if (!button) return;
+  const card = button.closest("[data-device]");
+  saveDeviceChannel(card.dataset.device, "proxy", card.querySelector("[data-proxy-ip]").value.trim());
 });
 
 // 机型表
@@ -1500,6 +1541,7 @@ let refreshTick = 0;
 setInterval(() => {
   if (document.hidden) return;
   refreshTick += 1;
+  if (!document.querySelector("#device-menu").hidden && refreshTick % 2 === 0 && !document.activeElement?.closest("#device-options")) loadDevices().catch(() => {});
   const busy = Boolean(state.overview?.busy) || runView.running;
   if (busy || refreshTick % 10 === 0) loadOverview().catch(() => {});
   if (document.querySelector("#runs-panel.active")) loadRuns({ quiet: true }).catch(() => {});

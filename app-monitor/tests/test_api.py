@@ -35,6 +35,31 @@ async def _noop():
     return None
 
 
+async def test_device_channel_api_exposes_both_modes_and_only_the_public_ca(database, monkeypatch, tmp_path):
+    from types import SimpleNamespace
+    import app_monitor.devices as module
+    found = [Device("ios:one", "One", "ios", True)]
+    certificate = tmp_path / "public.cer"
+    certificate.write_text("PUBLIC CERTIFICATE")
+    (tmp_path / "mitmproxy-ca.pem").write_text("PRIVATE KEY")
+    calls = []
+    proxy = SimpleNamespace(certificate=certificate,
+        configure=lambda clients: calls.append(("clients", clients)), start=lambda: calls.append(("start",)),
+        status=lambda ip="": {"ready": True, "client_ip": ip}, stop=lambda: None)
+    monkeypatch.setattr(api, "database", database)
+    monkeypatch.setattr(api.monitor_service, "proxy", proxy)
+    monkeypatch.setattr(api, "discover_devices", lambda: found)
+    monkeypatch.setattr(module, "discover_devices", lambda: found)
+    assert (await api.devices())["devices"][0]["collection_channel"] == "ui"
+    saved = await api.change_device_channel("ios:one", api.DeviceChannelPayload(channel="proxy", client_ip="192.168.1.20"))
+    assert saved["channel"] == "proxy" and ("start",) in calls
+    assert (await api.devices())["devices"][0]["proxy_client_ip"] == "192.168.1.20"
+    await api.change_device_channel("ios:one", api.DeviceChannelPayload(channel="ui"))
+    assert (await api.devices())["devices"][0]["collection_channel"] == "ui"
+    response = await api.proxy_certificate()
+    assert response.path == certificate and "PRIVATE" not in certificate.read_text()
+
+
 def test_run_groups_merge_capacities_and_include_older_runs(tmp_path, monkeypatch):
     monkeypatch.setattr(api.database, "path", tmp_path / "run-groups.sqlite3")
     monkeypatch.setattr(api, "refresh_quotes_if_stale", _noop)
