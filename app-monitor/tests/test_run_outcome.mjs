@@ -91,3 +91,25 @@ test("旧泛化拒绝仅在有明确原因时细分，未知原因不猜测", ()
     ["并非整机或价格不是整机售价", "not_item_or_price"],
   ]) assert.equal(runOutcome({ code: "smart_rejected", decision: reason }).code, code);
 });
+
+test("收货范围过滤有独立原因，列表与详情记录都能筛选", () => {
+  const items = [
+    {code:"variant_filtered",quote_basis:"candidate",decision:"不收该版本：美版"},
+    {code:"seller_filtered",quote_basis:"detail",decision:"卖家昵称命中过滤词「通讯」"},
+  ];
+  assert.equal(runOutcome(items[0]).label,"版本已过滤");
+  assert.equal(runOutcome(items[0]).stage,"列表筛选");
+  assert.equal(runOutcome(items[1]).label,"卖家已过滤");
+  assert.equal(runOutcome(items[1]).stage,"详情判价");
+  assert.equal(runOutcome(items[1]).bucket,"rejected");
+  assert.equal(filterRunItems({items},{result:"rejected",code:"seller_filtered"}).items.length,1);
+});
+
+test("没有商品机型证据属于不符合，可按原因筛选", () => {
+  const item = {code:"model_unconfirmed",quote_basis:"candidate",decision:"商品文字未确认iPhone机型"};
+  const result = runOutcome(item);
+  assert.equal(result.label,"机型未确认");
+  assert.equal(result.bucket,"rejected");
+  assert.equal(result.high,null);
+  assert.equal(filterRunItems({items:[item]},{result:"rejected",code:"model_unconfirmed"}).items.length,1);
+});

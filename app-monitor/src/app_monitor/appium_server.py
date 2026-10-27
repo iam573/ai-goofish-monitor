@@ -13,6 +13,8 @@ from urllib.request import urlopen
 
 from .config import ROOT, Settings
 
+WDA_PORT = 8101
+
 logger = logging.getLogger(__name__)
 _owned_process: subprocess.Popen | None = None
 

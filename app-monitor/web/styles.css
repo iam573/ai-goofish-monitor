@@ -757,7 +757,7 @@ dialog::backdrop { background: rgba(10, 20, 16, .45); backdrop-filter: blur(2px)
 .valuation-controls .check { display: flex; flex-direction: row; align-items: center; gap: 6px; margin: 8px 0; }
 .valuation-controls input[type=checkbox] { width: auto; }
 .smart-checks { display: flex; flex-wrap: wrap; gap: 6px 12px; }
-.smart-policy { display: grid; gap: 8px; padding: 14px 0; border-bottom: 1px solid var(--line); }
+.scope-filter-group { margin-top: 14px; padding-top: 10px; border-top: 1px solid var(--line-soft); }
 #valuation-detail { width: min(780px, 94vw); max-height: 88vh; overflow: auto; }
 .valuation-dialog-head { display: flex; align-items: flex-start; gap: 16px; margin-bottom: 18px; padding-bottom: 14px; border-bottom: 1px solid var(--line-soft); }
 .valuation-dialog-head h3 { flex: 1; min-width: 0; font-size: 16px; line-height: 1.5; overflow-wrap: anywhere; }
@@ -767,3 +767,60 @@ dialog::backdrop { background: rgba(10, 20, 16, .45); backdrop-filter: blur(2px)
 #valuation-detail table { width: 100%; border-collapse: collapse; font-size: 13px; }
 #valuation-detail th, #valuation-detail td { padding: 8px; text-align: left; vertical-align: top; border-bottom: 1px solid var(--line); }
 #valuation-correction { display: grid; gap: 12px; margin: 12px 0; }
+
+/* Current iPhone screen */
+.device-row { gap: 8px; }
+.device-screen-button { display: inline-flex; align-items: center; justify-content: center; gap: 4px; flex: none; padding: 6px 8px; font-size: 12px; }
+.device-screen-button svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linejoin: round; }
+.device-screen-dialog { width: min(540px, calc(100vw - 24px)); max-height: 94dvh; padding: 0; overflow: hidden; }
+.device-screen-dialog[open] { display: flex; flex-direction: column; }
+.device-screen-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; padding: 17px 18px 10px; }
+.device-screen-head h3 { margin: 0; font-size: 16px; overflow-wrap: anywhere; }
+.device-screen-head p { margin: 4px 0 0; color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+.device-screen-head .icon-btn { flex: none; }
+.device-screen-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 0 18px 12px; }
+.device-screen-toolbar p { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.5; }
+.device-screen-toolbar p.error { color: var(--bad); }
+.device-screen-toolbar button { flex: none; }
+.device-screen-preview { display: flex; justify-content: center; min-height: 160px; overflow: auto; padding: 12px; background: var(--surface-2); border-top: 1px solid var(--line-soft); }
+.device-screen-preview img { display: block; max-width: 100%; max-height: 72dvh; width: auto; height: auto; object-fit: contain; border-radius: 10px; box-shadow: var(--shadow); }
+.device-screen-preview img[hidden] { display: none; }
+@media (max-width: 520px) {
+  .device-row { display: grid; grid-template-columns: 16px 32px minmax(0, 1fr) auto; row-gap: 8px; }
+  .device-select { grid-column: 1; grid-row: 1; }
+  .device-glyph { grid-column: 2; grid-row: 1; }
+  .device-info { grid-column: 3 / -1; grid-row: 1; }
+  .device-row:has(.device-order) .device-info { grid-column: 3; }
+  .device-order { grid-column: 4; grid-row: 1; }
+  .device-channel { grid-column: 3; grid-row: 2; width: 100%; }
+  .device-screen-button { grid-column: 4; grid-row: 2; }
+}
+
+/* Shared keyword settings */
+.keyword-grid { display: grid; gap: 10px; margin: 12px 0; }
+.keyword-card { padding: 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); min-width: 0; }
+.keyword-card[hidden] { display: none; }
+.keyword-card-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 9px; font-size: 13px; }
+.keyword-card-head .check { margin: 0; color: var(--muted); font-size: 12px; }
+.keyword-card .tag-editor { max-height: none; background: var(--surface-2); }
+.keyword-card .tags { display: contents; }
+.keyword-card .kw { max-width: 100%; overflow-wrap: anywhere; }
+.keyword-card .hint { margin: 8px 0 0; }
+.keyword-condition { margin: 0; padding: 9px 10px; border-radius: 7px; background: var(--surface-2); color: var(--ink-2); font-size: 12px; line-height: 1.7; }
+
+/* Pricing sections and their shared switch */
+.valuation-controls { padding-top: 0; border-top: 0; }
+#valuation-exclusions { margin-top: 0; padding-bottom: 14px; border-bottom: 1px solid var(--line); }
+#valuation-exclusions > .field { margin-top: 12px; }
+.scope-filter-group h4 { margin: 0 0 8px; color: var(--ink); font-size: 12px; font-weight: 600; }
+.valuation-master { display: flex; flex-direction: row; justify-content: space-between; align-items: center; gap: 12px; position: relative; margin: 16px 0 8px; color: var(--ink); font-size: 13px; font-weight: 600; cursor: pointer; }
+.valuation-master > input { position: absolute; right: 0; z-index: 1; opacity: 0; width: 36px !important; height: 22px; cursor: pointer; }
+.valuation-switch-track { position: relative; width: 36px; height: 22px; flex: none; border-radius: 12px; background: var(--faint); transition: background .15s; }
+.valuation-switch-track::before { content: ''; position: absolute; top: 3px; left: 3px; width: 16px; height: 16px; border-radius: 50%; background: #fff; box-shadow: 0 1px 2px #0002; transition: transform .15s; }
+.valuation-master > input:checked + .valuation-switch-track { background: var(--brand); }
+.valuation-master > input:checked + .valuation-switch-track::before { transform: translateX(14px); }
+.valuation-master > input:focus-visible + .valuation-switch-track { outline: 2px solid var(--brand); outline-offset: 3px; }
+.valuation-auto-settings { min-width: 0; margin: 0; padding: 0; border: 0; }
+.valuation-auto-settings > details { margin: 10px 0; }
+.valuation-auto-settings:disabled { opacity: .5; }
+#valuation-push { margin-top: 0; }

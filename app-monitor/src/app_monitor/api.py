@@ -10,12 +10,15 @@ from typing import Any, Literal
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from fastapi import FastAPI, HTTPException, Query, Request
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from .config import ROOT, settings
 from .db import Database, rows_as_dicts, utc_now
+from .instance_lock import monitor_instance
+from .item_identity import has_model_evidence, item_text
+from .device_screenshot import ScreenshotBusy, capture_screenshot
 from .devices import discover_devices, selected_devices, set_selected_devices, device_channel, set_device_channel, proxy_clients, proxy_enabled
 from .notifications import NotificationService
 from .quotes import (
@@ -71,7 +74,7 @@ def quote_refresh_trigger() -> CronTrigger:
 
 
 @asynccontextmanager
-async def lifespan(_: FastAPI):
+async def _monitor_lifespan(_: FastAPI):
     database.initialize()
     monitor_service.close_interrupted_runs()
     if proxy_enabled(database):
@@ -101,11 +104,22 @@ async def lifespan(_: FastAPI):
     # 启动补偿：服务在报价时间之后才启动时，立即检查一次当天报价。
     startup = asyncio.create_task(refresh_quotes_if_stale())
     backfill = asyncio.create_task(backfill_deductions())
-    yield
-    startup.cancel()
-    backfill.cancel()
-    scheduler.shutdown(wait=False)
-    await asyncio.to_thread(monitor_service.proxy.stop)
+    try:
+        yield
+    finally:
+        startup.cancel()
+        backfill.cancel()
+        scheduler.shutdown(wait=False)
+        await asyncio.to_thread(monitor_service.proxy.stop)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Acquire before initializing/closing old runs or starting the scheduler.
+    # A second bind address must not mark the first process's active run interrupted.
+    with monitor_instance(database.path):
+        async with _monitor_lifespan(app):
+            yield
 
 
 app = FastAPI(title="闲鱼报价捡漏监控", version="0.3.4", lifespan=lifespan)
@@ -128,6 +142,26 @@ async def devices() -> dict[str, Any]:
                        "proxy_client_ip": channel["client_ip"],
                        "proxy_status": monitor_service.proxy.status(channel["client_ip"])})
     return {"devices": result, "selected": selected}
+
+
+@app.get("/api/devices/{device_id}/screenshot")
+async def device_screenshot(device_id: str) -> Response:
+    found = await asyncio.to_thread(discover_devices)
+    device = next((value for value in found if value.id == device_id and value.kind == "ios"), None)
+    if device is None:
+        raise HTTPException(404, "未找到这台iPhone，请刷新设备列表")
+    if not device.connected:
+        raise HTTPException(409, "iPhone未连接，请连接手机后刷新设备列表")
+    try:
+        data = await asyncio.to_thread(capture_screenshot, device.udid)
+    except ScreenshotBusy as exc:
+        raise HTTPException(429, str(exc)) from None
+    except RuntimeError as exc:
+        raise HTTPException(503, str(exc)) from None
+    return Response(data, media_type="image/png", headers={
+        "Cache-Control": "no-store, private", "X-Captured-At": utc_now(),
+        "X-Content-Type-Options": "nosniff",
+    })
 
 
 class DeviceChannelPayload(BaseModel):
@@ -618,7 +652,7 @@ async def test_notification() -> dict[str, Any]:
 
 
 # Smart estimation uses only detail text. Credentials are never returned by these endpoints.
-from .smart import SmartConfig, Facts, Policy, policies_for, evidence_text
+from .smart import SmartConfig, Facts, Policy, policies_for, policy_templates_for, evidence_text
 
 
 class SmartConfigPayload(SmartConfig):
@@ -632,8 +666,6 @@ async def smart_config():
 
 @app.put("/api/smart/config")
 async def save_smart_config(payload: SmartConfigPayload):
-    if monitor_service.busy:
-        raise HTTPException(409, "请等当前采集结束后修改判价规则")
     try:
         return monitor_service.smart.save_config(SmartConfig.model_validate(payload.model_dump()), payload.api_key)
     except ValueError as exc:
@@ -659,33 +691,73 @@ async def smart_policies(model: str = Query(min_length=1, max_length=40)):
 
 class PolicyUpdate(BaseModel):
     rule_key: str = Field(min_length=64, max_length=64)
-    policy: Policy
+    policy: Policy | None = None
+
+
+def validate_policy(policy: Policy, has_amount: bool) -> None:
+    if not policy.reviewed or policy.action == "ignore":
+        return
+    if not policy.value.strip():
+        raise HTTPException(422, "已确认规则的触发值不能为空")
+    if policy.operator in {"lt", "le", "gt", "ge"}:
+        import math
+        try:
+            valid = math.isfinite(float(policy.value))
+        except ValueError:
+            valid = False
+        if not valid:
+            raise HTTPException(422, "数值比较条件需要有限数字")
+    if policy.action == "deduct" and not has_amount:
+        raise HTTPException(422, "没有金额的备注不能直接扣费，请选择降档或忽略")
+
+
+@app.get("/api/smart/policy-templates")
+async def smart_policy_templates():
+    category = load_rules(database).quote_category
+    return {"category": category, "category_name": APPLE_PHONE_CATEGORIES[category],
+            **policy_templates_for(database, category)}
+
+
+class TemplatePolicyUpdate(BaseModel):
+    template_key: str = Field(min_length=64, max_length=64)
+    policy: Policy | None = None
+
+
+@app.put("/api/smart/policy-templates")
+async def save_policy_templates(payload: list[TemplatePolicyUpdate]):
+    category = load_rules(database).quote_category
+    current = {row["template_key"]: row for row in policy_templates_for(database, category)["items"]}
+    saved = database.state_get("smart_policy_templates", {})
+    for update in payload:
+        if update.template_key not in current:
+            raise HTTPException(409, "报价类别或备注已更新，请刷新后重新确认")
+        if update.policy is None:
+            saved.pop(update.template_key, None)
+            continue
+        validate_policy(update.policy, current[update.template_key]["has_amount"])
+        saved[update.template_key] = update.policy.model_copy(update={"automatic": False}).model_dump()
+    database.state_set("smart_policy_templates", saved)
+    return await smart_policy_templates()
 
 
 @app.put("/api/smart/policies")
 async def save_smart_policies(payload: list[PolicyUpdate], model: str = Query(min_length=1, max_length=40)):
-    if monitor_service.busy:
-        raise HTTPException(409, "请等当前采集结束后修改扣费规则")
     current = {row["rule_key"]: row for row in policies_for(database, model, load_rules(database).quote_category)}
     saved = database.state_get("smart_policies", {})
     for update in payload:
         if update.rule_key not in current:
             raise HTTPException(409, "报价备注已更新，请刷新后重新确认")
         policy = update.policy
-        if policy.reviewed and policy.action != "ignore":
-            if not policy.value.strip():
-                raise HTTPException(422, "已确认规则的触发值不能为空")
-            if policy.operator in {"lt", "le", "gt", "ge"}:
-                import math
-                try:
-                    valid = math.isfinite(float(policy.value))
-                except ValueError:
-                    valid = False
-                if not valid:
-                    raise HTTPException(422, "数值比较条件需要有限数字")
-            if policy.action == "deduct" and current[update.rule_key]["amount_min"] is None:
-                raise HTTPException(422, "没有金额的备注不能直接扣费，请选择降档或忽略")
-        saved[update.rule_key] = policy.model_dump()
+        if policy is None:
+            saved.pop(update.rule_key, None)
+            continue
+        validate_policy(policy, current[update.rule_key]["amount_min"] is not None)
+        inherited = current[update.rule_key]
+        if (inherited["policy_source"] != "model" and policy.model_dump(exclude={"automatic"})
+                == Policy.model_validate(inherited["policy"]).model_dump(exclude={"automatic"})):
+            saved.pop(update.rule_key, None)
+            continue
+        saved[update.rule_key] = policy.model_copy(update={"automatic": False}).model_dump()
     database.state_set("smart_policies", saved)
     return await smart_policies(model)
 
@@ -699,7 +771,11 @@ async def smart_assessments(status: str = "", limit: int = Query(default=100, ge
         rows = c.execute(f"""SELECT a.* FROM smart_assessments a
             WHERE a.id=(SELECT MAX(b.id) FROM smart_assessments b WHERE b.item_id=a.item_id)
             {clause} ORDER BY a.id DESC LIMIT ?""", ([status, limit] if status else [limit])).fetchall()
-    return [monitor_service.smart.row(row) for row in rows]
+    values = [monitor_service.smart.row(row) for row in rows]
+    if status in {"pending", "matched"}:
+        # Hide old invalid candidates without rewriting their historical decisions.
+        values = [value for value in values if has_model_evidence(value["result"].get("model") or "", item_text(value["snapshot"]))]
+    return values
 
 
 @app.get("/api/smart/assessments/{record_id}")

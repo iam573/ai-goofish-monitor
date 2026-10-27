@@ -154,6 +154,37 @@
                 </section>
 
                 <section class="settings-pane" data-pane="price" role="tabpanel">
+                  <div id="valuation-controls" class="valuation-controls">
+                    <details id="valuation-exclusions"><summary>排除</summary>
+                  <div class="field">
+                    <span class="field-label">排除词 <span class="hint">标题含这些词不推送；回车或逗号添加</span></span>
+                    <div class="tag-editor" id="exclude-editor">
+                      <div class="tags" id="exclude-tags"></div>
+                      <input id="exclude-input" placeholder="添加排除词…" aria-label="添加排除词" />
+                    </div>
+                    <textarea name="exclude_keywords" hidden></textarea>
+                  </div>
+                      <div class="scope-filter-group">
+                        <h4>版本</h4>
+                        <label class="check"><input name="valuation_exclude_overseas" type="checkbox">排除选中的外版机器</label>
+                        <div id="valuation-variants" class="smart-checks"></div>
+                        <p class="hint">未写明版本的保留，不把配件版本当作整机版本。</p>
+                      </div>
+                      <div class="scope-filter-group">
+                        <h4>卖家</h4>
+                        <label class="check"><input name="valuation_exclude_trade_sellers" type="checkbox">按卖家昵称排除同行</label>
+                        <label>昵称命中词<textarea name="valuation_seller_exclude_keywords" rows="3" placeholder="通讯、通信、手机专卖、手机店…"></textarea></label>
+                        <label class="check"><input name="valuation_exclude_digital_shop_names" type="checkbox">同时排除以“数码”结尾或“数码…店”的商家昵称</label>
+                        <p class="hint">逗号或换行分隔，仅看卖家昵称。</p>
+                      </div>
+                      <div class="scope-filter-group">
+                        <h4>问题机</h4>
+                        <p class="hint">明确出现勾选的问题时排除。</p>
+                        <div id="valuation-blocked" class="smart-checks"></div>
+                      </div>
+                    </details>
+                    <label class="valuation-master"><span>成色与扣费</span><input name="valuation_enabled" type="checkbox" role="switch" aria-label="成色与扣费总开关"><span class="valuation-switch-track" aria-hidden="true"></span></label>
+                    <p id="valuation-summary" class="hint"></p>
                   <div class="field">
                     <span class="field-label">参考报价</span>
                     <div class="opts" role="radiogroup">
@@ -161,8 +192,8 @@
                       <label class="opt"><input type="radio" name="quote_category" value="100027" /><span>苹果有保</span></label>
                     </div>
                   </div>
-                  <div class="field">
-                    <span class="field-label">参考成色</span>
+                  <div class="field" id="fixed-grade-choice">
+                    <span class="field-label">固定参考成色 <span class="hint">关闭成色与扣费时使用</span></span>
                     <div class="opts grades" role="radiogroup">
                       <label class="opt"><input type="radio" name="quote_grade" value="靓机" /><span>靓机</span></label>
                       <label class="opt"><input type="radio" name="quote_grade" value="小花" /><span>小花</span></label>
@@ -179,20 +210,17 @@
                       <span class="affix"><input name="min_price_ratio" type="number" min="0" max="0.99" step="0.05" /><em>× 报价</em></span>
                     </label>
                   </div>
-                  <div id="valuation-controls" class="valuation-controls">
-                    <label class="check"><input name="valuation_enabled" type="checkbox">按描述关键词自动判成色与扣费</label>
-                    <p id="valuation-summary" class="hint"></p>
-                    <details><summary>成色关键词与收货范围</summary><div id="valuation-keywords"></div>
-                      <label>接受的成色</label><div id="valuation-grades" class="smart-checks"></div>
-                      <label>明确出现这些问题时不收</label><div id="valuation-blocked" class="smart-checks"></div>
-                      <label class="check"><input name="valuation_notify_pending" type="checkbox">也推送可能划算的待确认商品</label>
-                      <p class="hint">未写电池、拆修等信息，默认正常、不扣费；具体瑕疵优先于“99新”。待确认推送会说明不确定项。</p>
+                    <fieldset id="valuation-auto-settings" class="valuation-auto-settings" aria-label="自动成色与扣费设置">
+                    <details id="valuation-grade-rules" open><summary>成色 <span class="hint">所有机型共用</span></summary>
+                      <p class="hint">命中词决定成色，勾选可收货的档位。回车或逗号添加，点 × 删除；具体瑕疵优先于“99新”。</p>
+                      <div id="valuation-keywords" class="keyword-grid"></div>
+                      <p class="hint">成色未明确时按小花参考，保留待确认。</p>
                     </details>
-                    <details><summary>报价扣费与备注规则</summary><p class="hint">明确的电池分档、换屏、水印等规则自动匹配报价。不能识别且可能适用的备注列为待确认；不会编造扣费金额。</p>
-                      <label>机型<input id="valuation-policy-model" placeholder="例如 17 / 15 Pro"></label><button type="button" id="valuation-policy-load" class="secondary compact">加载报价备注</button>
-                      <div id="valuation-policy-rows"></div><button id="valuation-policy-save" type="button" class="secondary compact">保存本机型扣费规则</button>
+                    <details id="valuation-deductions"><summary>扣费 <span class="hint">所有机型共用</span></summary>
+                      <p class="hint">命中词可直接增删，后台按商品机型报价自动扣费。否定描述不当作异常，疑似描述保留待确认。</p>
+                      <div id="valuation-deduction-keywords" class="keyword-grid"></div>
                     </details>
-                    <details><summary>可选 AI 二次复核</summary>
+                    <details><summary>AI复核</summary>
                       <label class="check"><input name="valuation_ai_enabled" type="checkbox">对本地规则选出的候选再做 AI 复核</label>
                       <label>API 基础地址<input name="valuation_base_url" placeholder="https://服务地址/v1"></label>
                       <label>模型名称<input name="valuation_model" placeholder="填写服务支持的模型名称"></label>
@@ -200,17 +228,15 @@
                       <p class="hint">兼容 Chat Completions；没有接入模型时完全使用本地规则。启用AI后调用失败会记录，不冒充复核通过。密钥只写本地 .env，不回显。</p>
                       <button id="valuation-test" type="button" class="secondary compact">测试已保存的模型连接</button>
                     </details>
-                    <details><summary>验证模式</summary><label class="check"><input name="valuation_shadow" type="checkbox">仅记录，不发本地规则或AI通知</label></details>
+                    </fieldset>
+                    <details id="valuation-push"><summary>推送</summary>
+                      <label class="check"><input name="valuation_shadow" type="checkbox">仅记录</label>
+                      <label class="check"><input name="valuation_notify_pending" type="checkbox">推送待确认</label>
+                      <p class="hint">开启“仅记录”时不发送通知。</p>
+                    </details>
+                    <p class="hint">统一点击下方“保存规则”，下一轮生效。</p>
                   </div>
                   <div class="formula" id="price-formula"></div>
-                  <div class="field">
-                    <span class="field-label">排除词 <span class="hint">标题含这些词不推送；回车或逗号添加</span></span>
-                    <div class="tag-editor" id="exclude-editor">
-                      <div class="tags" id="exclude-tags"></div>
-                      <input id="exclude-input" placeholder="添加排除词…" aria-label="添加排除词" />
-                    </div>
-                    <textarea name="exclude_keywords" hidden></textarea>
-                  </div>
                 </section>
 
                 <section class="settings-pane" data-pane="search" role="tabpanel">
@@ -342,6 +368,15 @@
             <section id="run-detail" class="card run-detail" aria-live="polite"></section>
           </div>
         </section>
+
+        <dialog id="device-screen" class="device-screen-dialog" aria-labelledby="device-screen-title">
+          <header class="device-screen-head">
+            <div><h3 id="device-screen-title">iPhone · 当前画面</h3><p id="device-screen-time"></p></div>
+            <button type="button" id="device-screen-close" class="icon-btn" aria-label="关闭截图" title="关闭"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"/></svg></button>
+          </header>
+          <div class="device-screen-toolbar"><p id="device-screen-status" role="status"></p><button type="button" id="device-screen-refresh" class="secondary compact">刷新截图</button></div>
+          <div class="device-screen-preview"><img id="device-screen-image" alt="iPhone当前画面" hidden /></div>
+        </dialog>
 
         <dialog id="valuation-detail" aria-labelledby="valuation-detail-title">
           <header class="valuation-dialog-head">

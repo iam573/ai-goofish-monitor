@@ -1,3 +1,4 @@
+import { initDeviceScreen } from "./device-screen-ui.js";
 import { initSmart } from "./smart-ui.js";
 import { capacityOptions, filterRunItems, normalizeCapacity } from "./run-filters.js";
 import { codeLabels, codeOrder, runOutcome } from "./run-outcome.js";
@@ -234,6 +235,9 @@ function renderDevices() {
         <option value="ui" ${!proxy ? "selected" : ""}>原有采集</option>
         <option value="proxy" ${proxy ? "selected" : ""}>代理采集</option>
       </select>
+      <button type="button" class="secondary compact device-screen-button" data-device-screenshot ${device.connected ? "" : "disabled"} aria-label="查看 ${escapeHtml(device.name)} 截图" title="查看当前手机画面">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5l1.5-2h5L16 5h4v15H4V5z"/><circle cx="12" cy="12" r="3.5"/></svg>截图
+      </button>
     </div>${proxy ? `<div class="device-proxy">
       <div class="device-proxy-state"><span class="dot ${status.client_connected ? "ok" : "warn"}"></span><span>${escapeHtml(proxyText)}</span></div>
       <label class="device-proxy-ip">手机 Wi-Fi IP <input data-proxy-ip value="${escapeHtml(device.proxy_client_ip || "")}" placeholder="例如 192.168.1.20" inputmode="text" autocomplete="off" /><button type="button" class="secondary compact" data-save-proxy>保存</button></label>
@@ -1293,6 +1297,8 @@ document.querySelector("#rules-enabled").addEventListener("change", async event 
     loadOverview().catch(() => {});
   } catch (error) { toast(error.message, true); setPower(!enabled); }
 });
+
+initDeviceScreen({getDevice: id => state.devices.find(device => device.id === id), closeMenu: () => setDeviceMenu(false)});
 
 // 设备下拉
 document.querySelector("#device-picker-btn").addEventListener("click", () =>

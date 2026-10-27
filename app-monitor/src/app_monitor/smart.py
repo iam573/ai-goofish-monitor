@@ -8,7 +8,9 @@ import logging
 import math
 import re
 import uuid
-from dataclasses import replace
+from contextlib import contextmanager
+from contextvars import ContextVar
+from dataclasses import dataclass, field, replace
 from typing import Any, Literal
 
 import httpx
@@ -16,12 +18,15 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from .db import Database, utc_now
 from .matching import MatchDecision, evaluate, explicit_iphone_models, extract_storage, model_in_title, normalize_search_text
-from .quotes import GRADE_COLUMNS, deduction_storages, latest_deductions, latest_entries
+from .quotes import GRADE_COLUMNS, deduction_storages, latest_batch, latest_deductions, latest_entries
 from .rules import Rules
+from .item_identity import has_model_evidence, item_text
+from .keyword_rules import CONDITION_TERMS, default_condition_keywords, normalize_word
+from .scope_filters import DEFAULT_SELLER_KEYWORDS, VARIANT_LABELS, normalize_seller_name, scope_rejection
 
 logger = logging.getLogger(__name__)
 VERSION = "local-cell-facts-v4"
-PRICING_VERSION = "missing-deduction-zero-v4"
+PRICING_VERSION = "shared-keyword-rules-v6"
 BATTERY_PATTERN = re.compile(r"(?:(?:电池|电芯)(?:健康度|健康|效率|容量|寿命)?|健康度|电池寿命)\s*[为是约:：]?\s*(?:百分之)?\s*(100(?:\.0+)?|[1-9]?\d(?:\.\d+)?)\s*(?:%|％)?(?![\d.])", re.I)
 FACT_FIELDS = ("model", "storage", "whole_phone", "full_price", "battery_health", "screen_watermark",
                "screen_broken", "function_fault", "locked", "repaired", "screen_replaced", "battery_replaced", "water_damage", "back_glass_broken", "warranty", "color", "variant")
@@ -68,7 +73,13 @@ class SmartConfig(BaseModel):
     ai_enabled: bool = False
     notify_pending: bool = True
     require_no_repair: bool = False
+    exclude_overseas: bool = True
+    blocked_variants: list[str] = Field(default_factory=lambda: list(VARIANT_LABELS))
+    exclude_trade_sellers: bool = True
+    seller_exclude_keywords: list[str] = Field(default_factory=lambda: list(DEFAULT_SELLER_KEYWORDS), max_length=100)
+    exclude_digital_shop_names: bool = True
     grade_keywords: dict[str, list[str]] = Field(default_factory=lambda: default_keywords())
+    condition_keywords: dict[str, list[str]] = Field(default_factory=default_condition_keywords)
     base_url: str = ""
     model: str = Field(default="", max_length=150)
     accepted_grades: list[str] = Field(default_factory=lambda: ["靓机", "小花", "大花"])
@@ -76,6 +87,20 @@ class SmartConfig(BaseModel):
         default_factory=lambda: ["screen_watermark", "screen_broken", "function_fault", "locked"])
     grade_definitions: dict[str, str] = Field(default_factory=lambda: dict(DEFAULT_GRADES))
     grades_confirmed: bool = False
+
+    @field_validator("blocked_variants")
+    @classmethod
+    def valid_blocked_variants(cls, value):
+        if any(variant not in VARIANT_LABELS for variant in value):
+            raise ValueError("不支持的版本过滤选项")
+        return list(dict.fromkeys(value))
+
+    @field_validator("seller_exclude_keywords")
+    @classmethod
+    def valid_seller_keywords(cls, value):
+        if any(not normalize_seller_name(word) or len(word.strip()) > 40 for word in value):
+            raise ValueError("卖家昵称关键词不能为空，每项不超过40字")
+        return list(dict.fromkeys(word.strip() for word in value))
 
     @field_validator("grade_keywords")
     @classmethod
@@ -85,6 +110,15 @@ class SmartConfig(BaseModel):
         if any(not word.strip() or len(word) > 40 for words in value.values() for word in words):
             raise ValueError("关键词不能为空，每个不超过40字")
         return {grade: list(dict.fromkeys(word.strip() for word in words)) for grade, words in value.items()}
+
+    @field_validator("condition_keywords")
+    @classmethod
+    def valid_condition_keywords(cls, value):
+        if set(value) != set(CONDITION_TERMS) or any(len(words) > 50 for words in value.values()):
+            raise ValueError("扣费与问题关键词必须包含全部项目，每项不超过50个词")
+        if any(not normalize_word(word) or len(word) > 40 for words in value.values() for word in words):
+            raise ValueError("关键词不能为空，每个不超过40字")
+        return {key: list({normalize_word(word): word.strip() for word in words}.values()) for key, words in value.items()}
 
     @field_validator("base_url")
     @classmethod
@@ -233,40 +267,123 @@ class Policy(Condition):
         return False if False in values else None if None in values else True
 
 
+@dataclass(frozen=True)
+class _RunSettings:
+    database: Database
+    values: dict
+    api_key: str = field(repr=False)
+
+
+_run_settings: ContextVar[_RunSettings | None] = ContextVar("valuation_run_settings", default=None)
+
+
+def _setting(database: Database, key: str):
+    snapshot = _run_settings.get()
+    if snapshot is not None and snapshot.database is database:
+        return snapshot.values[key]
+    return database.state_get(key, {})
+
+
 def load_config(database: Database) -> SmartConfig:
-    return SmartConfig.model_validate(database.state_get("smart_config", {}))
+    return SmartConfig.model_validate(_setting(database, "smart_config"))
+
+
+def policy_template_key(category: str, name: str) -> str:
+    # The name retains thresholds and scope, but never contains the quoted fee.
+    return digest(["quote-note-v1", category, normalize_search_text(name)])
 
 
 def policies_for(database: Database, model: str, category: str, storage: str | None = None) -> list[dict]:
     from .quote_rules import compile_rows
     key = "warranty" if category == "100027" else "no_warranty"
-    saved = database.state_get("smart_policies", {})
+    saved = _setting(database, "smart_policies")
+    shared = _setting(database, "smart_policy_templates")
+    # Older UIs saved every displayed row. Only genuine manual exceptions own a row.
+    manual = {key: value for key, value in saved.items() if value.get("automatic") is not True}
     values = []
     for row in compile_rows(latest_deductions(database, model).get(key, [])):
-        if any(digest([category, model, *identity]) in saved for identity in row.get("_parent_rule_identities", [])):
+        if any(digest([category, model, *identity]) in manual
+               or policy_template_key(category, identity[0]) in shared
+               for identity in row.get("_parent_rule_identities", [])):
             continue  # A manual rule on a source note owns it; do not silently add derived tiers.
         specs = deduction_storages(row["name"])
         if storage and specs and storage not in specs:
             continue
         rule_key = digest([category, model, *row.get("_rule_identity", [row["name"], row["kind"], bool(row["open_ended"]), row["column_index"], row["position"]])])
-        values.append({**row, "rule_key": rule_key, "policy": saved.get(rule_key, row["policy"])})
+        template_key = policy_template_key(category, row["name"])
+        common = shared.get(template_key, row["policy"])
+        values.append({**row, "rule_key": rule_key, "template_key": template_key,
+                       "automatic_policy": row["policy"], "template_policy": common,
+                       "policy_source": "model" if rule_key in manual else "shared" if template_key in shared else "automatic",
+                       "policy": manual.get(rule_key, common)})
     return values
+
+
+def policy_templates_for(database: Database, category: str) -> dict:
+    batch = latest_batch(database, category)
+    if not batch:
+        return {"models": [], "items": []}
+    with database.connect() as connection:
+        models = [row[0] for row in connection.execute(
+            "SELECT DISTINCT model FROM quote_deductions WHERE batch_id=? ORDER BY model", (batch["id"],))]
+    templates = {}
+    for model in models:
+        for row in policies_for(database, model, category):
+            entry = templates.setdefault(row["template_key"], {
+                "template_key": row["template_key"], "name": row["name"],
+                "policy": row["template_policy"], "automatic_policy": row["automatic_policy"],
+                "policy_source": "shared" if row["template_policy"] != row["automatic_policy"] else "automatic",
+                "models": [], "override_models": [], "has_amount": True,
+            })
+            if model not in entry["models"]:
+                entry["models"].append(model)
+            if row["policy_source"] == "model" and model not in entry["override_models"]:
+                entry["override_models"].append(model)
+            entry["has_amount"] = entry["has_amount"] and row["amount_min"] is not None
+    return {"models": models, "items": sorted(templates.values(), key=lambda row: (row["policy"]["reviewed"], row["name"]))}
+
+
+def scope_decision(item: dict, config: SmartConfig, model=None, storage_hint=None,
+                   *, basis="candidate", detail=False) -> MatchDecision | None:
+    rejection = scope_rejection(item, config, detail=detail)
+    if rejection:
+        code, reason = rejection
+        return MatchDecision(False, reason, model=model, storage=extract_storage(item["title"]) or storage_hint,
+                             code=code, quote_basis=basis, region=item.get("display_region"))
+    if not config.enabled:
+        # Exclusions remain active when automatic grading/deductions are off.
+        from .local_rules import blocked_title_condition
+        blocked = blocked_title_condition(item_text(item) if detail else item["title"],
+                                          config.blocked_conditions, config.condition_keywords)
+        if blocked:
+            key, evidence = blocked
+            return MatchDecision(False, f"明确存在不收问题：{FACT_LABELS[key]}（{evidence}）", model=model,
+                                 storage=extract_storage(item["title"]) or storage_hint, code="excluded",
+                                 quote_basis=basis, region=item.get("display_region"))
+    return None
 
 
 def candidate_decision(item: dict, rules: Rules, quotes: list[dict], config: SmartConfig,
                        region_applied=False, storage_hint=None, expected_model=None) -> MatchDecision:
+    blocked_scope = scope_decision(item, config, expected_model, storage_hint)
+    if blocked_scope is not None:
+        return blocked_scope
     explicit_models = explicit_iphone_models(item["title"])
     if expected_model and explicit_models and not model_in_title(expected_model, item["title"]) and normalize_search_text(expected_model) not in {normalize_search_text(m) for m in explicit_models}:
         actual = " / ".join(explicit_models)
         return MatchDecision(False, f"标题明确为 iPhone {actual}，与当前搜索目标 {expected_model} 不一致",
                              model=actual, storage=extract_storage(item["title"]) or storage_hint, code="other_model", quote_basis="candidate")
+    possible_models = {expected_model, *explicit_models, *(quote["model"] for quote in quotes)}
+    if not any(has_model_evidence(model, item_text(item)) for model in possible_models if model):
+        return MatchDecision(False, "商品文字未确认iPhone机型，不能按搜索目标判价", model=expected_model,
+                             storage=storage_hint, code="model_unconfirmed", quote_basis="candidate")
     explicit_storage = extract_storage(item["title"])
     if storage_hint and explicit_storage and explicit_storage != storage_hint:
         return MatchDecision(False, f"商品容量为 {explicit_storage}，与当前筛选容量 {storage_hint} 不符",
                              model=expected_model, storage=explicit_storage, code="storage_mismatch",
                              quote_basis="candidate")
     from .local_rules import blocked_title_condition
-    blocked = blocked_title_condition(item["title"], config.blocked_conditions)
+    blocked = blocked_title_condition(item["title"], config.blocked_conditions, config.condition_keywords)
     if blocked:
         key, evidence = blocked
         return MatchDecision(False, f"标题明确存在不收问题：{FACT_LABELS[key]}（{evidence}）",
@@ -281,10 +398,17 @@ def candidate_decision(item: dict, rules: Rules, quotes: list[dict], config: Sma
     # Semantic exclusions are handled in detail, so “无水印/无拆修” aren't false positives.
     broad = replace(rules, min_price_ratio=0, exclude_keywords="")
     result = evaluate(item, broad, list(maxima.values()), region_applied, storage_hint, expected_model)
-    explicit_storage = extract_storage(item["title"])
-    if result.code == "unrecognized" and expected_model and storage_hint and explicit_storage in {None, storage_hint}:
-        context = {**item, "title": f"iPhone {expected_model} {storage_hint}G"}
-        result = evaluate(context, broad, list(maxima.values()), region_applied, storage_hint, expected_model)
+    if result.code == "unrecognized" and (item.get("description") or item.get("detail_parameters")):
+        # Full detail/parameters may supply identity missing from the summary.
+        # Only actual product words are used; never manufacture a phone title.
+        detail = {**item, "title": item_text(item)}
+        result = evaluate(detail, broad, list(maxima.values()), region_applied, storage_hint, expected_model)
+    if result.model and not has_model_evidence(result.model, item_text(item)):
+        return MatchDecision(False, "商品文字未确认iPhone机型，不能按搜索目标判价", model=expected_model,
+                             storage=storage_hint, code="model_unconfirmed", quote_basis="candidate")
+    if result.code == "unrecognized" and not any(has_model_evidence(model, item_text(item))
+            for model in {expected_model, *(quote["model"] for quote in quotes)} if model):
+        return replace(result, reason="商品文字未确认iPhone机型或容量，不能按搜索目标判价", code="model_unconfirmed", quote_basis="candidate")
     return replace(result, quote_basis="candidate")
 
 
@@ -304,6 +428,13 @@ def price_facts(item: dict, facts: Facts, quotes: list[dict], policies: list[dic
             result["defaults"].append(f"{FACT_LABELS[key]}未说明，按正常处理")
     def reject(reason, code):
         return {**result, "status": "rejected", "reason": reason, "rejection_code": code}
+    blocked_scope = scope_rejection(item, config, detail=True)
+    if blocked_scope:
+        code, reason = blocked_scope
+        return reject(reason, code)
+    identity = facts.findings.get("model")
+    if not identity or not identity.value or not has_model_evidence(identity.value, item_text(item)):
+        return reject("商品文字未确认iPhone机型，不能按搜索目标判价", "model_unconfirmed")
     if not allowed:
         return reject("允许的成色没有可用报价", "no_quote")
     for key in ("model", "storage"):
@@ -506,11 +637,26 @@ class SmartService:
         self.api_key = getattr(settings, "ai_api_key", "")
         self.lock = asyncio.Lock()
 
+    @contextmanager
+    def run_settings(self):
+        """Freeze a search's rules across async item workers and iPhone threads.
+
+        API requests keep their own context and can save the next run's settings.
+        Credentials stay in memory and never enter persisted assessment settings.
+        """
+        values = {key: self.database.state_get(key, {})
+                  for key in ("smart_config", "smart_policies", "smart_policy_templates")}
+        token = _run_settings.set(_RunSettings(self.database, values, self.api_key))
+        try:
+            yield
+        finally:
+            _run_settings.reset(token)
+
     def config(self) -> SmartConfig:
         return load_config(self.database)
 
     def public_config(self):
-        config = self.config()
+        config = SmartConfig.model_validate(self.database.state_get("smart_config", {}))
         with self.database.connect() as c:
             reviewed = c.execute("SELECT COUNT(DISTINCT item_id) FROM smart_assessments WHERE reviewed=1").fetchone()[0]
         return {**config.model_dump(), "key_configured": bool(self.api_key), "reviewed_samples": reviewed,
@@ -530,13 +676,16 @@ class SmartService:
         return self.public_config()
 
     async def request_facts(self, item: dict, config: SmartConfig) -> Facts:
-        if not config.base_url or not config.model or not self.api_key:
+        snapshot = _run_settings.get()
+        api_key = snapshot.api_key if snapshot is not None and snapshot.database is self.database else self.api_key
+        if not config.base_url or not config.model or not api_key:
             raise ValueError("模型连接未配置")
         text = str(item.get("description") or "")
         if not text.strip():
             raise ValueError("没有完整详情正文，不能进行详情判价")
         prompt = {"商品标题": item["title"], "详情正文": text, "商品参数": item.get("detail_parameters", []),
-                  "成色标准": config.grade_definitions, "成色关键词": config.grade_keywords, "页面挂牌价": item["price"], "输出JSON结构": Facts.model_json_schema()}
+                  "成色标准": config.grade_definitions, "成色关键词": config.grade_keywords,
+                  "扣费与问题关键词": config.condition_keywords, "页面挂牌价": item["price"], "输出JSON结构": Facts.model_json_schema()}
         payload = {"model": config.model, "messages": [
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": json.dumps(prompt, ensure_ascii=False)}],
@@ -545,7 +694,7 @@ class SmartService:
             try:
                 async with httpx.AsyncClient(timeout=45) as client:
                     response = await client.post(f"{config.base_url}/chat/completions", json=payload,
-                                                 headers={"Authorization": f"Bearer {self.api_key}"})
+                                                 headers={"Authorization": f"Bearer {api_key}"})
                     response.raise_for_status()
                     content = response.json()["choices"][0]["message"]["content"]
                 return Facts.model_validate_json(content).verify(evidence_text(item))
@@ -575,7 +724,7 @@ class SmartService:
                     return self.row(previous)
             from .local_rules import merge_review
             cache_key = digest([VERSION, item["title"], item.get("description"), item.get("detail_parameters"),
-                                item["price"], config.base_url, config.model, config.grade_definitions, config.grade_keywords])
+                                item["price"], config.base_url, config.model, config.grade_definitions, config.grade_keywords, config.condition_keywords])
             facts = None
             local_result = None
             source = "manual" if manual is not None else "local"

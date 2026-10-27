@@ -576,3 +576,35 @@ async def test_mid_run_switch_waits_until_next_search_for_other_devices(database
     for _ in range(2):
         await service._collect_sources("iPhone 15 Pro", "15 Pro", ["256"], load_rules(database))
     assert calls == [("ui", "one"), ("ui", "two"), ("ui", "one"), ("proxy", "two")]
+
+
+async def test_record_only_also_suppresses_fixed_grade_push_without_consuming_dedup(database):
+    service,notifier=setup(database,quote_grade='小花',region_city='厦门')
+    rules=load_rules(database)
+    database.state_set('smart_config',{'enabled':False,'shadow':True})
+    item={'item_id':'1090000000666','title':'iPhone 15 Pro 256G 国行','price':3500,
+          'display_region':'厦门','item_url':'https://www.goofish.com/item?id=1090000000666'}
+    result=await service.process_items([item],rules,'iPhone 15 Pro',True,'256',expected_model='15 Pro')
+    assert result['notified']==0 and result['decisions'][0]['matched']
+    assert not notifier.sent
+    with database.connect() as c:
+        assert c.execute('SELECT COUNT(*) FROM observed_items WHERE item_id=?',(item['item_id'],)).fetchone()[0]==1
+        assert c.execute('SELECT COUNT(*) FROM deals').fetchone()[0]==0
+    database.state_set('smart_config',{'enabled':False,'shadow':False})
+    result=await service.process_items([item],rules,'iPhone 15 Pro',True,'256',expected_model='15 Pro')
+    assert result['notified']==1 and len(notifier.sent)==1
+    result=await service.process_items([item],rules,'iPhone 15 Pro',True,'256',expected_model='15 Pro')
+    assert result['notified']==0 and len(notifier.sent)==1
+
+
+@pytest.mark.parametrize('description,blocked',[
+    ('屏幕有水印',True),('没有水印',False),('屏幕可能有水印',False),
+])
+async def test_problem_exclusions_remain_active_with_grading_switch_off(database,description,blocked):
+    service,notifier=setup(database,quote_grade='小花',region_city='厦门')
+    item={'item_id':'1090000000667','title':'iPhone 15 Pro 256G 国行','description':description,
+          'price':3500,'display_region':'厦门','item_url':'https://www.goofish.com/item?id=1090000000667'}
+    rules=load_rules(database)
+    result=await service.process_items([item],rules,'iPhone 15 Pro',True,'256',expected_model='15 Pro')
+    assert result['notified']==int(not blocked)
+    assert result['decisions'][0]['code']==('excluded' if blocked else 'matched')

@@ -163,16 +163,21 @@ class ProxyCapture:
                 self._reserved = +self._reserved
                 self.configure(self._clients)
 
-    def events(self, client_ip, since, kind="search", keyword=None, fingerprint=None, target=None, after_sequence=0):
+    def events(self, client_ip, since, kind="search", keyword=None, fingerprint=None, target=None, after_sequence=0,
+               sort_field=None, sort_value=None, verification_since=None):
         with self._condition:
             return [dict(event) for event in self._events
-                    if event.get("client_ip") == client_ip and event.get("request_started", 0) >= since
+                    if event.get("client_ip") == client_ip
+                    and event.get("request_started", 0) >= (verification_since if event["event"] == "verification"
+                         and verification_since is not None else since)
                     and event.get("sequence", 0) > after_sequence
                     and event.get("received_at", 0) >= time.time() - 180
                     and (event["event"] == "verification" or event["event"] == kind
                          and (keyword is None or normalized(event.get("keyword", "")) == normalized(keyword))
                          and (fingerprint is None or event.get("filter_fingerprint") == fingerprint)
-                         and (target is None or event.get("item_id") == target))]
+                         and (target is None or event.get("item_id") == target)
+                         and (sort_field is None or event.get("sort_field") == sort_field)
+                         and (sort_value is None or event.get("sort_value") == sort_value))]
 
     def wait(self, client_ip, since, timeout=15, **filters):
         deadline = time.monotonic() + timeout

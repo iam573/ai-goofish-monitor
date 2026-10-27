@@ -167,6 +167,12 @@ async def test_model_retries_invalid_json_checks_evidence_and_redacts_errors(dat
     monkeypatch.setattr(smart.httpx,'AsyncClient',lambda **kwargs:real(transport=httpx.MockTransport(handler),**kwargs))
     assert (await service.request_facts(ITEM,config)).grade=='靓机'
     assert len(attempts)==2
+    with service.run_settings():
+        service.api_key='next-test-secret'
+        await service.request_facts(ITEM,config)
+        assert attempts[-1].headers['Authorization']=='Bearer test-secret'
+    await service.request_facts(ITEM,config)
+    assert attempts[-1].headers['Authorization']=='Bearer next-test-secret'
     assert 'test-secret' not in json.dumps(service.public_config())
 
 

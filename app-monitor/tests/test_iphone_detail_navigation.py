@@ -101,7 +101,7 @@ def test_proxy_preserves_detail_error_and_returns_before_the_next_candidate(monk
     monkeypatch.setattr(collector, '_apply_model', lambda *a: None)
     monkeypatch.setattr(collector, '_apply_storage', lambda *a: None)
     monkeypatch.setattr(collector, '_sort_new', lambda *a: None)
-    monkeypatch.setattr(collector, '_pages', lambda *a: ([{'item_id': '1096147900172'}, {'item_id': '1096147900173'}], 1))
+    monkeypatch.setattr(collector, '_pages', lambda *a, **k: ([{'item_id': '1096147900172'}, {'item_id': '1096147900173'}], 1))
     details, returns = [], []
     def detail(*args):
         details.append(args[1]['item_id'])
@@ -137,3 +137,19 @@ def test_proxy_reads_matching_body_and_price_with_unnamed_navigation():
     assert detail_view(source, body) == {'price': 1850, 'body_matched': True}
     with pytest.raises(ValueError, match='正文或售价'):
         detail_view(source, '另一件商品正文', 1999)
+
+
+@pytest.mark.parametrize('name', ['', '返回', '返回按钮'])
+def test_real_layout_return_aliases_and_duplicate_more_rectangles(name):
+    source = DETAIL.replace('<XCUIElementTypeOther x="0"', f'<XCUIElementTypeOther name="{name}" x="0"', 1)
+    source = source.replace('</XCUIElementTypeApplication>', '''
+      <XCUIElementTypeOther name="更多" x="344" y="47" width="40" height="44" visible="true" />
+    </XCUIElementTypeApplication>''')
+    assert detail_back_rect(source) == {'x': 0, 'y': 47, 'width': 40, 'height': 44}
+
+
+def test_distinct_more_positions_are_still_ambiguous():
+    source = DETAIL.replace('</XCUIElementTypeApplication>', '''
+      <XCUIElementTypeOther name="更多" x="344" y="92" width="40" height="44" visible="true" />
+    </XCUIElementTypeApplication>''')
+    assert detail_back_rect(source) is None

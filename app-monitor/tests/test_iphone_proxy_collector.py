@@ -22,6 +22,7 @@ def test_proxy_pages_require_new_sort_and_keep_only_same_filter_context(monkeypa
     assert count == 2 and len(calls) == 2 and calls[1]["fingerprint"] == "correct"
     first["sort_field"] = "price"
     calls.clear()
+    collector.proxy=SimpleNamespace(wait=lambda *a,**k:[first])
     with pytest.raises(RuntimeError, match="新发排序"):
         collector._pages(SimpleNamespace(page_source="<Application/>"), "192.168.1.20", "iPhone 15 Pro", time.time(), 0)
 
@@ -40,8 +41,9 @@ def test_detail_opens_explicit_id_and_never_shares_or_uses_list_description():
     source = f'<XCUIElementTypeApplication><XCUIElementTypeOther name="分享按钮"/><XCUIElementTypeStaticText name="2799" y="157"/><XCUIElementTypeTextView name="{body}" visible="true"/></XCUIElementTypeApplication>'
     driver = SimpleNamespace(page_source=source, execute_script=lambda name, args: calls.append((name, args)))
     collector = IPhoneProxyCollector(SimpleNamespace(bundle_id="com.taobao.fleamarket"), proxy)
-    item = collector._detail(driver, {"item_id": key, "title": "列表摘要", "price": 2800}, "192.168.1.20", [])
+    item = collector._detail(driver, {"item_id": key, "title": "列表摘要", "price": 2800, "seller_name": "示例通讯"}, "192.168.1.20", [])
     assert item["description"] == body and item["price"] == 2799
+    assert item["seller_name"] == "示例通讯"  # Missing detail header must not erase the same-ID list nickname.
     assert calls == [("mobile: deepLink", {"url": f"fleamarket://item?id={key}", "bundleId": "com.taobao.fleamarket"})]
 
 
@@ -104,3 +106,16 @@ def test_photo_first_detail_scrolls_to_body_and_uses_relative_seller_price_area(
     collector = IPhoneProxyCollector(SimpleNamespace(bundle_id="app"), SimpleNamespace(wait=lambda *a, **k: [response]))
     item = collector._detail(driver, {"item_id": key, "title": "列表摘要", "price": 3600}, "192.168.1.20", [])
     assert item["price"] == 3688 and driver.calls.count("mobile: dragFromToForDuration") == 1
+
+
+def test_proxy_session_cleanup_failure_keeps_the_original_search_error(monkeypatch):
+    from contextlib import nullcontext
+    class Driver:
+        def quit(self):raise RuntimeError('A session is either terminated or not started')
+    proxy=SimpleNamespace(wait_ready=lambda:None,session=lambda ip:nullcontext())
+    collector=IPhoneProxyCollector(SimpleNamespace(),proxy)
+    monkeypatch.setattr(collector,'_connect',lambda *args:Driver())
+    def fail_search(*args):raise RuntimeError('当前页面需要登录')
+    monkeypatch.setattr(collector,'_search',fail_search)
+    result=collector._collect_proxy('test','','iPhone 15','厦门',[],['256'],0,lambda *a:True,None,None,'192.168.1.20')
+    assert result.passes[0]['error']=='当前页面需要登录'

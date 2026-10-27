@@ -5,7 +5,9 @@ import re
 import unicodedata
 from typing import Any
 
-from .matching import explicit_iphone_models, extract_storage, model_in_title, recognize_apple_product
+from .item_identity import has_model_evidence
+from .keyword_rules import condition_patterns
+from .matching import explicit_iphone_models, extract_storage, recognize_apple_product
 from .smart import BATTERY_PATTERN, Facts, Finding, Policy
 
 GRADE_KEYWORDS = {
@@ -15,17 +17,7 @@ GRADE_KEYWORDS = {
     "外爆": ["外屏碎", "外屏破", "外爆"],
     "内爆可测": ["内屏碎", "内屏破", "内爆", "漏液"],
 }
-FAULTS = {
-    "screen_watermark": [r"水印", r"烧屏", r"压伤"],
-    "screen_broken": [r"(?:内屏|外屏|屏幕|屏幕玻璃)(?:有|出现|已经)?(?:破|碎|裂)", r"碎屏", r"屏裂", r"外爆", r"内爆", r"漏液"],
-    "function_fault": [r"不开机", r"不能开机", r"无法开机", r"无法(?:插卡|通话|联网)", r"插不了卡", r"面容(?:损坏|失灵|不可用)", r"无面容", r"触摸(?:失灵|故障)", r"触控(?:失灵|故障)", r"功能(?:异常|故障)", r"坏机", r"安卓爆改", r"爆改机"],
-    "locked": [r"(?:id|激活|账户|账号)锁", r"(?:id|激活)机", r"卡贴(?:机)?", r"监管机", r"有锁", r"黑解", r"扩容机"],
-    "repaired": [r"拆修", r"拆机", r"维修", r"修过", r"换过?(?:屏|电池|壳|后盖|主板)", r"更换过?(?:屏幕|电池|后盖|主板)", r"翻新", r"进水", r"泡水", r"扩容", r"爆改"],
-    "screen_replaced": [r"换(?:过|了)?屏", r"更换(?:过|了)?屏幕", r"第三方屏", r"组装屏"],
-    "battery_replaced": [r"(?:更换|换)(?:过|了)?(?:原装|原厂|官方|品胜|德赛|第三方|非原装)?(?:的)?电池", r"第三方电池", r"电池维修"],
-    "water_damage": [r"进水", r"泡水", r"水泡"],
-    "back_glass_broken": [r"(?:后盖|后玻璃|背板)(?:有|已经)?(?:破|碎|裂)"]
-}
+FAULTS = {key: condition_patterns(key) for key in ('screen_watermark', 'screen_broken', 'function_fault', 'locked', 'repaired', 'screen_replaced', 'battery_replaced', 'water_damage', 'back_glass_broken')}
 NEGATION = re.compile(r"(?:无|没有|没|未|不曾|从未|不是|并非|不带|不含|不支持|不做|拒绝)(?:任何|明显|一点|轻微|大|小|过|的|一处|进行|发生|出现){0,3}$")
 UNCERTAIN = re.compile(r"可能|疑似|不确定|好像|貌似|不清楚|不保证|不排除|无法确认|不能保证|不能排除|看不出|看不出来")
 COLORS = ("薰衣草紫", "星宇橙", "宇宙橙", "沙漠色", "雾青色", "深蓝色", "白色", "黑色", "银色", "金色", "蓝色", "紫色", "粉色", "绿色", "橙色")
@@ -41,15 +33,15 @@ def _clause(text: str, start: int, end: int) -> tuple[str, str]:
     return left[-24:], right[:24]
 
 
-def mentions(text: str, patterns: list[str]) -> list[tuple[bool | None, str, int, int]]:
+def mentions(text: str, patterns: list[str], *, screen_watermark=False) -> list[tuple[bool | None, str, int, int]]:
     values = []
     for pattern in patterns:
         for match in re.finditer(pattern, text, re.I):
             left, right = _clause(text, match.start(), match.end())
             context = left + match.group() + right
-            if pattern in FAULTS["screen_watermark"] and re.search(r"摄像头|镜头|像头", context) and not re.search(r"屏幕|内屏|外屏|显示", context):
+            if (screen_watermark or pattern in FAULTS["screen_watermark"]) and re.search(r"摄像头|镜头|像头", context) and not re.search(r"屏幕|内屏|外屏|显示", context):
                 continue
-            if pattern in FAULTS["screen_watermark"] and re.search(r"图片|照片|拍摄|图上|商品图|加水印", context) and not re.search(r"屏幕|内屏|外屏|显示", context):
+            if (screen_watermark or pattern in FAULTS["screen_watermark"]) and re.search(r"图片|照片|拍摄|图上|商品图|加水印", context) and not re.search(r"屏幕|内屏|外屏|显示", context):
                 continue
             uncertain = bool(UNCERTAIN.search(context))
             denied = bool(NEGATION.search(left) or re.match(r"(?:都)?(?:没有|不存在|未出现|未发生)", right))
@@ -75,11 +67,11 @@ def _finding(values, label: str, unknowns: list[str]) -> Finding:
                    evidence=selected[0][1][:500] if selected else "")
 
 
-def blocked_title_condition(title: str, blocked: list[str]) -> tuple[str, str] | None:
+def blocked_title_condition(title: str, blocked: list[str], keywords=None) -> tuple[str, str] | None:
     """Skip only explicit, configured faults; negation/uncertainty still use detail review."""
     text = clean(title)
     for key in blocked:
-        finding = _finding(mentions(text, FAULTS[key]), key, [])
+        finding = _finding(mentions(text, condition_patterns(key, keywords), screen_watermark=key == "screen_watermark"), key, [])
         if finding.value == "yes":
             return key, finding.evidence
     return None
@@ -93,8 +85,8 @@ def extract_local(item: dict, config, quotes: list[dict], rules) -> Facts:
     findings = {}
     labels = {"screen_watermark":"屏幕水印", "screen_broken":"屏幕破损", "function_fault":"功能", "locked":"锁机",
               "repaired":"拆修", "screen_replaced":"换屏", "battery_replaced":"换电池", "water_damage":"进水", "back_glass_broken":"后盖破损"}
-    for key, patterns in FAULTS.items():
-        values = mentions(all_text, patterns)
+    for key in FAULTS:
+        values = mentions(all_text, condition_patterns(key, config.condition_keywords), screen_watermark=key == "screen_watermark")
         if key == "repaired":
             values += [(False, m.group(), m.start(), m.end()) for m in re.finditer(r"无拆无修|无拆无换|未拆未修|从未拆修", all_text)]
         if key == "function_fault":
@@ -122,20 +114,26 @@ def extract_local(item: dict, config, quotes: list[dict], rules) -> Facts:
     for key in ("model", "storage"):
         findings[key] = Finding()
     explicit = explicit_iphone_models(text)
+    explicit_source = text
+    if not explicit:
+        explicit = explicit_iphone_models(title)
+        explicit_source = title
     if len(explicit) == 1:
-        findings["model"] = Finding(value=explicit[0], evidence=text[:500])
+        findings["model"] = Finding(value=explicit[0], evidence=explicit_source[:500])
     products = [dict(q) for q in quotes]
     for content in (text, title):
         identity = recognize_apple_product(content, products)
-        if identity:
+        if identity and has_model_evidence(identity[0], content):
             if not findings["model"].value:
                 findings["model"] = Finding(value=identity[0], evidence=content[:500])
             findings["storage"] = Finding(value=identity[1], evidence=content[:500])
             break
     if not findings["model"].value:
-        candidates = list(dict.fromkeys(q["model"] for q in quotes if model_in_title(q["model"], text or title)))
-        if candidates:
-            findings["model"] = Finding(value=max(candidates,key=len), evidence=(text or title)[:500])
+        for content in (text, title):
+            candidates = list(dict.fromkeys(q["model"] for q in quotes if has_model_evidence(q["model"], content)))
+            if candidates:
+                findings["model"] = Finding(value=max(candidates,key=len), evidence=content[:500])
+                break
     if not findings["storage"].value:
         capacity = extract_storage(text) or extract_storage(title)
         if capacity:
@@ -151,12 +149,12 @@ def extract_local(item: dict, config, quotes: list[dict], rules) -> Facts:
     findings["full_price"] = Finding(value="no" if any(v[0] is True for v in false_price) else "yes",
                                     evidence=next((v[1] for v in false_price if v[0] is True),f"页面挂牌价：¥{float(item['price']):g}")[:500])
     from .quote_rules import extra_findings
-    extra_findings(all_text, findings, unknowns)
+    extra_findings(all_text, findings, unknowns, config.condition_keywords)
     findings["warranty"] = Finding()
     matches = []
     for grade, words in config.grade_keywords.items():
         for word in words:
-            for value, evidence, start, end in mentions(text, [re.escape(clean(word))]):
+            for value, evidence, start, end in mentions(all_text, [re.escape(clean(word))]):
                 if value is True:
                     matches.append((grade,evidence,start,end))
                 elif value is None:

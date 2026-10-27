@@ -515,7 +515,8 @@ def test_region_option_is_scrolled_with_native_table_element_not_page_coordinate
     assert clicked == ["滚动至 福建"]
 
 
-def test_candidate_rejection_continues_scrolling_when_returned_sort_bar_is_hidden(monkeypatch):
+@pytest.mark.parametrize('quit_lost',[False,True])
+def test_candidate_rejection_continues_scrolling_when_returned_sort_bar_is_hidden(monkeypatch,quit_lost):
     class Driver:
         page_source = scrolled_result_source()
         swipes = 0
@@ -525,7 +526,7 @@ def test_candidate_rejection_continues_scrolling_when_returned_sort_bar_is_hidde
             self.swipes += 1
 
         def quit(self):
-            pass
+            if quit_lost:raise RuntimeError("A session is either terminated or not started")
 
     driver = Driver()
     monkeypatch.setattr("appium.webdriver.Remote", lambda *args, **kwargs: driver)
@@ -671,3 +672,44 @@ def test_share_waits_for_detail_and_uses_its_actual_price(monkeypatch,delayed):
     if delayed:
         assert driver.reads>=3
     assert returns==[True]
+
+
+@pytest.mark.parametrize('delayed_seller',[False,True])
+def test_business_seller_is_checked_before_share_even_if_header_arrives_late(monkeypatch,delayed_seller):
+    card=PhoneCard('iPhone 15 Pro 256G',2500,'湖里区',20,400)
+    full=seller_source(seller='示例通讯').replace('</XCUIElementTypeApplication>',
+        '<XCUIElementTypeStaticText name="2500" y="157" visible="true" /></XCUIElementTypeApplication>')
+    class Element:
+        def click(self):pass
+    class Driver:
+        reads=0
+        @property
+        def page_source(self):
+            self.reads+=1
+            return full.replace('name="示例通讯"','name=""') if delayed_seller and self.reads==1 else full
+    collector=IPhoneCollector(Settings());returns=[];checked=[]
+    monkeypatch.setattr(collector,'_candidate_title',lambda *args:Element())
+    monkeypatch.setattr(collector,'_ensure_foreground',lambda *args:None)
+    monkeypatch.setattr(collector,'_return_to_results',lambda *args:returns.append(True))
+    monkeypatch.setattr('app_monitor.iphone_collector.time.sleep',lambda _:None)
+    def no_share(*args,**kwargs):raise AssertionError('Filtered seller must not open share')
+    monkeypatch.setattr(collector,'_copy_from_share',no_share)
+    def check(raw):
+        checked.append(raw['seller_name'])
+        return {'matched':False,'code':'seller_filtered','reason':'卖家昵称命中过滤词'} if raw['seller_name'] else {'matched':True,'code':'matched'}
+    saved={}
+    assert collector._share_item_id(Driver(),'test',card,[],saved,check_detail=check)==''
+    assert saved['detail_rejection']['code']=='seller_filtered'
+    assert checked==(['','示例通讯'] if delayed_seller else ['示例通讯'])
+    assert returns==[True]
+
+
+@pytest.mark.parametrize('error',[RuntimeError('A session is either terminated or not started\nStacktrace: NoSuchDriverError'),
+                                  RuntimeError('invalid session id'),RuntimeError('NoSuchDriverError: stopped')])
+def test_invalid_session_error_is_brief_and_cleanup_does_not_discard_results(error):
+    from app_monitor.iphone_collector import _brief_error,_quit_driver
+    assert _brief_error(error)=='手机自动化会话已失效，本次采集已停止；下一次搜索会重新连接'
+    class DeadDriver:
+        def quit(self):raise error
+    _quit_driver(DeadDriver())
+    _quit_driver(None)

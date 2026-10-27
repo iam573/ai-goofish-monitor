@@ -5,17 +5,30 @@ import asyncio
 import time
 import xml.etree.ElementTree as ET
 
-from .appium_server import ensure_appium_server
+from .appium_server import WDA_PORT, ensure_appium_server
 from .collector import CollectResult, emit_safely
 from .iphone_collector import (IPhoneCollector, _VerificationRequired, _raise_if_verification,
-                               _brief_error, _text, detail_back_rect, detail_content, detail_seller, is_search_results)
+                               _brief_error, _quit_driver, _text, detail_back_rect, detail_content, detail_seller, is_search_results)
 from .matching import normalize_search_text
+from .instance_lock import exclusive_device
 
 
 def checked(events):
     if any(event.get("event") == "verification" for event in events):
         raise _VerificationRequired("闲鱼要求验证或限制请求，请在手机处理后重试")
     return events
+
+
+def newest_search(events):
+    return max(events, key=lambda event: (event.get("request_started", 0), event.get("sequence", 0)))
+
+
+def is_new_sort(event):
+    return event.get("sort_field") == "create" and event.get("sort_value") == "desc"
+
+
+def sort_label(event):
+    return f"{event.get('sort_field') or '未提供'} / {event.get('sort_value') or '未提供'}"
 
 
 def detail_view(source, description, expected_price=None):
@@ -82,7 +95,7 @@ class IPhoneProxyCollector(IPhoneCollector):
                 "appium:shouldTerminateApp": False, "appium:usePrebuiltWDA": True,
                 "appium:derivedDataPath": str(self.settings.ios_wda_derived_data_path),
                 "appium:updatedWDABundleId": self.settings.ios_wda_bundle_id,
-                "appium:wdaLocalPort": 8101, "appium:newCommandTimeout": 300,
+                "appium:wdaLocalPort": WDA_PORT, "appium:newCommandTimeout": 300,
                 "appium:waitForIdleTimeout": 0.5,
                 "appium:settings": {"waitForIdleTimeout": 0.5, "animationCoolOffTimeout": 0.3}}
         if os_version:
@@ -99,24 +112,78 @@ class IPhoneProxyCollector(IPhoneCollector):
             "fromX": size["width"] * .48, "fromY": size["height"] * .84,
             "toX": size["width"] * .48, "toY": size["height"] * .3})
 
-    def _pages(self, driver, client_ip, keyword, since, scroll_pages):
-        events = checked(self.proxy.wait(client_ip, since, keyword=keyword, timeout=18))
+    def _confirm_storage_filter(self, driver):
+        self._storage_requested_at = time.time()
+        super()._confirm_storage_filter(driver)
+
+    def _sort_new(self, driver):
+        # Proxy responses provide readiness; no fixed sleep or new session.
+        button = self._find(driver, "新发", ("XCUIElementTypeStaticText",))
+        if button is None:
+            raise RuntimeError("找不到「新发」排序按钮")
+        button.click()
+
+    def _prepare_pages(self, driver, client_ip, keyword, storage, scroll_pages, actions):
+        self._storage_requested_at = None
+        clicked = self._apply_storage(driver, storage)
+        actions.append({"action": "容量筛选", "target": storage, "clicked": clicked, "success": True})
+        initial = None
+        since = self._storage_requested_at
+        verification_since = since
+        if since is not None:
+            initial = checked(self.proxy.wait(client_ip, since, keyword=keyword, timeout=2))
+        if initial and is_new_sort(newest_search(initial)):
+            actions.append({"action": "保持新发排序", "target": "create / desc", "success": True,
+                            "method": "容量提交的本次返回已确认新发，无需重复点击"})
+        else:
+            since = time.time()
+            self._sort_new(driver)
+            initial = None
+            actions.append({"action": "切换新发排序", "success": True})
+        return self._pages(driver, client_ip, keyword, since, scroll_pages, initial_events=initial, actions=actions,
+                           verification_since=verification_since)
+
+    def _pages(self, driver, client_ip, keyword, since, scroll_pages, *, initial_events=None, actions=None,
+               verification_since=None):
+        verification_since = since if verification_since is None else verification_since
+        actions = actions if actions is not None else []
+        events = checked(initial_events if initial_events is not None else
+                         self.proxy.wait(client_ip, since, keyword=keyword, verification_since=verification_since, timeout=18))
         if not events:
             _raise_if_verification(driver.page_source)
             raise RuntimeError("未收到本次搜索的代理数据；请检查手机 Wi-Fi 代理、证书与设备 IP")
-        # The new-sort tap must generate the observed request, not an older response.
-        first = events[-1]
-        if first.get("sort_field") != "create" or first.get("sort_value") != "desc":
-            raise RuntimeError("代理响应未确认新发排序，停止采集")
+        # Response arrival order does not identify the latest UI request.
+        first = newest_search(events)
+        if not is_new_sort(first):
+            actual = sort_label(first)
+            if first.get("sort_field") == "create" and first.get("sort_value") == "asc":
+                # Re-clicking an already selected New tab can reverse its direction.
+                since = time.time()
+                self._sort_new(driver)
+                actions.append({"action": "纠正新发排序", "target": actual, "success": True,
+                                "method": "已收到发布时间升序，本次仅补点一次并等待降序返回"})
+            else:
+                since = max(since, first.get("request_started", since))
+                actions.append({"action": "等待新发排序返回", "target": actual, "success": True})
+            events = checked(self.proxy.wait(client_ip, since, keyword=keyword, sort_field="create", sort_value="desc",
+                                            verification_since=verification_since, timeout=18))
+            if not events or not is_new_sort(newest_search(events)):
+                _raise_if_verification(driver.page_source)
+                observed = sort_label(newest_search(events)) if events else actual
+                raise RuntimeError(f"代理响应未确认新发排序（实际 {observed}），停止采集")
+            first = newest_search(events)
         fingerprint = first["filter_fingerprint"]
-        batches = [event for event in events if event.get("filter_fingerprint") == fingerprint]
+        batches = [event for event in events if is_new_sort(event) and event.get("filter_fingerprint") == fingerprint]
+        actions.append({"action": "确认新发排序", "target": "create / desc", "success": True,
+                        "method": "本次代理请求与返回确认"})
         last_sequence = max(event["sequence"] for event in batches)
         for _ in range(max(0, scroll_pages)):
             if batches[-1].get("has_more") is False:
                 break
             self._drag_list(driver)
             more = checked(self.proxy.wait(client_ip, since, keyword=keyword, fingerprint=fingerprint,
-                                           after_sequence=last_sequence, timeout=1.5))
+                                           sort_field="create", sort_value="desc",
+                                           after_sequence=last_sequence, verification_since=verification_since, timeout=1.5))
             if more:
                 batches.extend(more)
                 last_sequence = max(event["sequence"] for event in more)
@@ -169,11 +236,14 @@ class IPhoneProxyCollector(IPhoneCollector):
         if observed["body_matched"]:
             extra = detail_content(source)
             item["detail_parameters"] = list(dict.fromkeys(item.get("detail_parameters", []) + extra.get("detail_parameters", [])))
-            item.update(detail_seller(source))
+            seller = detail_seller(source)
+            if seller["seller_name"]:
+                item.update(seller)
         item.update(item_url=f"https://www.goofish.com/item?id={target}", acquisition_stage="valuation")
         actions.append({"action": "读取代理详情", "target": target, "success": True})
         return item
 
+    @exclusive_device
     def _collect_proxy(self, udid, os_version, keyword, region_hint, region_steps, storages, scroll_pages,
                        is_candidate, on_items, check_detail, client_ip):
         self.proxy.wait_ready()
@@ -195,11 +265,8 @@ class IPhoneProxyCollector(IPhoneCollector):
                     setup = []
                     meta = {"storage": storage, "region_applied": result.region_applied, "filter_applied": True}
                     try:
-                        self._apply_storage(driver, storage)
-                        since = time.time()
-                        self._sort_new(driver)
-                        emit_safely(on_items, stage=f"代理读取 {storage} 列表", storage=storage)
-                        cards, batches = self._pages(driver, client_ip, keyword, since, scroll_pages)
+                        emit_safely(on_items, stage=f"代理筛选 {storage} 并确认新发", storage=storage)
+                        cards, batches = self._prepare_pages(driver, client_ip, keyword, storage, scroll_pages, actions)
                         actions.append({"action": "批量读取代理列表", "target": f"{batches} 批 · {len(cards)} 件", "success": True})
                         for raw in cards:
                             if not is_candidate(raw, result.region_applied, storage):
@@ -257,7 +324,6 @@ class IPhoneProxyCollector(IPhoneCollector):
                 result.passes.append({"label": "新发", "storage": None, "channel": "proxy",
                                       "error": _brief_error(exc), "observed": 0, "actions": setup})
             finally:
-                if driver is not None:
-                    driver.quit()
+                _quit_driver(driver)
         result.filter_applied = bool(result.passes) and all(entry.get("filter_applied") for entry in result.passes)
         return result

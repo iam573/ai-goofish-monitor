@@ -195,9 +195,10 @@ def test_unquoted_explicit_model_never_inherits_search_target(title,actual):
     assert result.model==actual and result.storage=='128'
 
 
-def test_search_context_can_still_admit_a_genuinely_unspecified_model(quotes):
+def test_search_context_cannot_supply_an_unspecified_product_model(quotes):
     item=listing('99新',4500,'个人闲置手机 256G，电池健康96%')
-    assert candidate_decision(item,Rules(),quotes,SmartConfig(),True,'256','17').matched
+    result=candidate_decision(item,Rules(),quotes,SmartConfig(),True,'256','17')
+    assert not result.matched and result.code=='model_unconfirmed'
 
 
 def test_explicit_old_model_in_detail_is_not_replaced_with_listing_model(quotes):
@@ -217,7 +218,7 @@ def test_explicit_old_model_in_detail_is_not_replaced_with_listing_model(quotes)
 ])
 def test_explicit_configured_fault_is_filtered_before_opening_detail(title,blocked):
     quotes=[dict(id=1,model='16 Plus',storage='128',grade='靓机',price=3300)]
-    result=candidate_decision(listing('99新',3260,title),Rules(),quotes,SmartConfig(),True,'128','16 Plus')
+    result=candidate_decision(listing('99新',3260,title),Rules(),quotes,SmartConfig(exclude_overseas=False),True,'128','16 Plus')
     assert result.matched is not blocked
     if blocked:assert result.code=='excluded' and '不收问题' in result.reason
 

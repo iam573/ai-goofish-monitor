@@ -13,9 +13,10 @@ from typing import Any
 from .collector import CollectResult
 from .db import Database, utc_now
 from .config import settings as default_settings
-from .smart import SmartService, assess_local, candidate_decision, load_config, policies_for
+from .smart import SmartService, assess_local, candidate_decision, load_config, policies_for, scope_decision
 from .devices import MAC_DEVICE, discover_devices, selected_devices, device_channel, proxy_clients
-from .iphone_collector import IPhoneCollector
+from .iphone_collector import IPhoneCollector, _brief_error
+from .item_identity import has_model_evidence, item_text
 from .proxy_capture import ProxyCapture
 from .iphone_proxy_collector import IPhoneProxyCollector
 from .matching import MatchDecision, evaluate
@@ -211,148 +212,152 @@ class MonitorService:
         filter_applied: bool = False,
     ) -> dict[str, Any]:
         async with self._lock:
-            rules = load_rules(self.database)
-            keyword = search_keyword(model)
-            with self.database.connect() as connection:
-                run_id = connection.execute(
-                    """
-                    INSERT INTO search_runs(model, storage, keyword, region, trigger, started_at)
-                    VALUES (?, ?, ?, ?, ?, ?)
-                    """,
-                    (model, storage, keyword, rules.region_city or None, trigger, utc_now()),
-                ).lastrowid
-            logger.info(
-                "监控任务开始 run_id=%s trigger=%s model=%s storage=%s keyword=%s region=%s",
-                run_id, trigger, model, storage or "全部容量", keyword, rules.region_city or "未指定",
-            )
-            try:
-                results: list[dict[str, Any]] = []
-                processed: set[str] = set()
-                pass_stats: dict[tuple[str, str | None], dict[str, int]] = {}
-                live_passes: list[dict[str, Any]] = []
-                self.live = {"run_id": run_id, "model": model, "stage": "准备搜索", "observed": 0, "matched": 0}
+            with self.smart.run_settings():
+                return await self._run_model(model, storage, trigger, injected_items, region_applied, filter_applied)
 
-                async def handle(items: list[dict[str, Any]], meta: dict[str, Any]) -> None:
-                    """实时处理采集器交出的商品：写入运行记录、判价、命中就立即推送。"""
-                    if meta.get("stage"):
-                        self.live["stage"] = (
-                            f"{meta['device_name']} · {meta['stage']}"
-                            if meta.get("device_name") and meta.get("device") != MAC_DEVICE else meta["stage"]
+    async def _run_model(self, model, storage, trigger, injected_items, region_applied, filter_applied):
+        rules = load_rules(self.database)
+        keyword = search_keyword(model)
+        with self.database.connect() as connection:
+            run_id = connection.execute(
+                """
+                INSERT INTO search_runs(model, storage, keyword, region, trigger, started_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (model, storage, keyword, rules.region_city or None, trigger, utc_now()),
+            ).lastrowid
+        logger.info(
+            "监控任务开始 run_id=%s trigger=%s model=%s storage=%s keyword=%s region=%s",
+            run_id, trigger, model, storage or "全部容量", keyword, rules.region_city or "未指定",
+        )
+        try:
+            results: list[dict[str, Any]] = []
+            processed: set[str] = set()
+            pass_stats: dict[tuple[str, str | None], dict[str, int]] = {}
+            live_passes: list[dict[str, Any]] = []
+            self.live = {"run_id": run_id, "model": model, "stage": "准备搜索", "observed": 0, "matched": 0}
+
+            async def handle(items: list[dict[str, Any]], meta: dict[str, Any]) -> None:
+                """实时处理采集器交出的商品：写入运行记录、判价、命中就立即推送。"""
+                if meta.get("stage"):
+                    self.live["stage"] = (
+                        f"{meta['device_name']} · {meta['stage']}"
+                        if meta.get("device_name") and meta.get("device") != MAC_DEVICE else meta["stage"]
+                    )
+                if meta.get("pass_info") is not None:
+                    live_passes.append({**meta["pass_info"], "device": meta.get("device", MAC_DEVICE),
+                                        "device_name": meta.get("device_name")})
+                    self._save_live_passes(run_id, live_passes)
+                if meta.get("cards"):
+                    recorded = self._record_cards(run_id, meta["cards"], rules, meta, model)
+                    self.live["observed"] += recorded
+                fresh = [item for item in items if item.get("item_id") and item["item_id"] not in processed]
+                if not fresh:
+                    return
+                processed.update(item["item_id"] for item in fresh)
+                storage_value = meta.get("storage")
+                part = await self.process_items(
+                    fresh, rules, keyword, bool(meta.get("region_applied")),
+                    storage_value if meta.get("filter_applied") else None,
+                    run_id=run_id, expected_model=model,
+                )
+                stats = pass_stats.setdefault((meta.get("device", MAC_DEVICE), storage_value), {"matched": 0, "notified": 0})
+                stats["matched"] += part["matched"]
+                stats["notified"] += part["notified"]
+                self.live["observed"] += part["observed"]
+                self.live["matched"] += part["matched"]
+                results.append(part)
+
+            if injected_items is None:
+                target = next(
+                    (item for item in search_targets(self.database, rules) if item["model"] == model),
+                    None,
+                )
+                if target is None:
+                    raise ValueError(f"报价表中没有机型 {model}")
+                storages = [storage] if storage else [
+                    unit["storage"] for unit in target["units"] if unit["enabled"]
+                ]
+                if not storages:
+                    raise ValueError(f"{model} 没有启用的容量筛选项")
+                stream = ItemStream(handle)
+                try:
+                    collected = await self._collect_sources(keyword, model, storages, rules, stream)
+                finally:
+                    await stream.close()
+            else:
+                collected = CollectResult(
+                    items=injected_items,
+                    region_applied=region_applied,
+                    filter_applied=filter_applied,
+                    passes=[{"label": "调试", "observed": len(injected_items), "error": None}],
+                )
+            if injected_items is not None:
+                results.append(await self.process_items(
+                    collected.items, rules, keyword, collected.region_applied,
+                    storage if collected.filter_applied else None, run_id=run_id, expected_model=model,
+                ))
+            else:
+                # 采集器已经边搜边交出了商品；这里只补处理没交出过的（例如不支持实时回调的采集器）。
+                for pass_result in collected.passes:
+                    pass_storage = pass_result.get("storage")
+                    pass_device = pass_result.get("device", MAC_DEVICE)
+                    stats = pass_stats.setdefault((pass_device, pass_storage), {"matched": 0, "notified": 0})
+                    pass_items = [item for item in collected.items
+                                  if item.get("source_storage") == pass_storage
+                                  and item.get("source_device", MAC_DEVICE) == pass_device
+                                  and item["item_id"] not in processed]
+                    if not pass_result.get("error") and pass_items:
+                        processed.update(item["item_id"] for item in pass_items)
+                        part = await self.process_items(
+                            pass_items, rules, keyword, pass_result.get("region_applied", collected.region_applied),
+                            pass_storage if pass_result.get("filter_applied") else None,
+                            run_id=run_id, expected_model=model,
                         )
-                    if meta.get("pass_info") is not None:
-                        live_passes.append({**meta["pass_info"], "device": meta.get("device", MAC_DEVICE),
-                                            "device_name": meta.get("device_name")})
-                        self._save_live_passes(run_id, live_passes)
-                    if meta.get("cards"):
-                        recorded = self._record_cards(run_id, meta["cards"], rules, meta, model)
-                        self.live["observed"] += recorded
-                    fresh = [item for item in items if item.get("item_id") and item["item_id"] not in processed]
-                    if not fresh:
-                        return
-                    processed.update(item["item_id"] for item in fresh)
-                    storage_value = meta.get("storage")
-                    part = await self.process_items(
-                        fresh, rules, keyword, bool(meta.get("region_applied")),
-                        storage_value if meta.get("filter_applied") else None,
-                        run_id=run_id, expected_model=model,
-                    )
-                    stats = pass_stats.setdefault((meta.get("device", MAC_DEVICE), storage_value), {"matched": 0, "notified": 0})
-                    stats["matched"] += part["matched"]
-                    stats["notified"] += part["notified"]
-                    self.live["observed"] += part["observed"]
-                    self.live["matched"] += part["matched"]
-                    results.append(part)
-
-                if injected_items is None:
-                    target = next(
-                        (item for item in search_targets(self.database, rules) if item["model"] == model),
-                        None,
-                    )
-                    if target is None:
-                        raise ValueError(f"报价表中没有机型 {model}")
-                    storages = [storage] if storage else [
-                        unit["storage"] for unit in target["units"] if unit["enabled"]
-                    ]
-                    if not storages:
-                        raise ValueError(f"{model} 没有启用的容量筛选项")
-                    stream = ItemStream(handle)
-                    try:
-                        collected = await self._collect_sources(keyword, model, storages, rules, stream)
-                    finally:
-                        await stream.close()
-                else:
-                    collected = CollectResult(
-                        items=injected_items,
-                        region_applied=region_applied,
-                        filter_applied=filter_applied,
-                        passes=[{"label": "调试", "observed": len(injected_items), "error": None}],
-                    )
-                if injected_items is not None:
-                    results.append(await self.process_items(
-                        collected.items, rules, keyword, collected.region_applied,
-                        storage if collected.filter_applied else None, run_id=run_id, expected_model=model,
-                    ))
-                else:
-                    # 采集器已经边搜边交出了商品；这里只补处理没交出过的（例如不支持实时回调的采集器）。
-                    for pass_result in collected.passes:
-                        pass_storage = pass_result.get("storage")
-                        pass_device = pass_result.get("device", MAC_DEVICE)
-                        stats = pass_stats.setdefault((pass_device, pass_storage), {"matched": 0, "notified": 0})
-                        pass_items = [item for item in collected.items
-                                      if item.get("source_storage") == pass_storage
-                                      and item.get("source_device", MAC_DEVICE) == pass_device
-                                      and item["item_id"] not in processed]
-                        if not pass_result.get("error") and pass_items:
-                            processed.update(item["item_id"] for item in pass_items)
-                            part = await self.process_items(
-                                pass_items, rules, keyword, pass_result.get("region_applied", collected.region_applied),
-                                pass_storage if pass_result.get("filter_applied") else None,
-                                run_id=run_id, expected_model=model,
-                            )
-                            stats["matched"] += part["matched"]
-                            stats["notified"] += part["notified"]
-                            results.append(part)
-                        pass_result.update(matched=stats["matched"], notified=stats["notified"])
-                    if not any(pass_result.get("storage") is None for pass_result in collected.passes):
-                        ambiguous_items = [item for item in collected.items
-                                           if item.get("source_storage") is None and item["item_id"] not in processed]
-                        if ambiguous_items:
-                            results.append(await self.process_items(
-                                ambiguous_items, rules, keyword, collected.region_applied, None,
-                                run_id=run_id, expected_model=model,
-                            ))
-                result = {
-                    "observed": sum(part["observed"] for part in results),
-                    "matched": sum(part["matched"] for part in results),
-                    "notified": sum(part["notified"] for part in results),
-                    "decisions": [decision for part in results for decision in part["decisions"]],
-                }
-                result.update(
-                    region_applied=collected.region_applied,
-                    filter_applied=collected.filter_applied,
-                    passes=collected.passes,
-                    warnings=collected.warnings,
-                    # 兼容旧前端字段
-                    region_error=collected.region_error,
-                )
-                self._finish_run(run_id, True, result, "；".join(collected.warnings) or None)
-                logger.info(
-                    "监控任务结束 run_id=%s ok=true observed=%d matched=%d notified=%d region_applied=%s filter_applied=%s warnings=%s",
-                    run_id, result.get("observed", 0), result.get("matched", 0), result.get("notified", 0),
-                    collected.region_applied, collected.filter_applied, collected.warnings or "无",
-                )
-                return {"run_id": run_id, "model": model, "storage": storage, **result}
-            except Exception as exc:
-                partial = exc.partial if isinstance(exc, CollectionFailure) else None
-                self._finish_run(run_id, False, {
-                    "passes": partial.passes if partial else [],
-                    "region_applied": partial.region_applied if partial else False,
-                    "filter_applied": partial.filter_applied if partial else False,
-                }, str(exc))
-                logger.exception("监控任务失败 run_id=%s model=%s storage=%s error=%s", run_id, model, storage, exc)
-                raise
-            finally:
-                self.live = None
+                        stats["matched"] += part["matched"]
+                        stats["notified"] += part["notified"]
+                        results.append(part)
+                    pass_result.update(matched=stats["matched"], notified=stats["notified"])
+                if not any(pass_result.get("storage") is None for pass_result in collected.passes):
+                    ambiguous_items = [item for item in collected.items
+                                       if item.get("source_storage") is None and item["item_id"] not in processed]
+                    if ambiguous_items:
+                        results.append(await self.process_items(
+                            ambiguous_items, rules, keyword, collected.region_applied, None,
+                            run_id=run_id, expected_model=model,
+                        ))
+            result = {
+                "observed": sum(part["observed"] for part in results),
+                "matched": sum(part["matched"] for part in results),
+                "notified": sum(part["notified"] for part in results),
+                "decisions": [decision for part in results for decision in part["decisions"]],
+            }
+            result.update(
+                region_applied=collected.region_applied,
+                filter_applied=collected.filter_applied,
+                passes=collected.passes,
+                warnings=collected.warnings,
+                # 兼容旧前端字段
+                region_error=collected.region_error,
+            )
+            self._finish_run(run_id, True, result, "；".join(collected.warnings) or None)
+            logger.info(
+                "监控任务结束 run_id=%s ok=true observed=%d matched=%d notified=%d region_applied=%s filter_applied=%s warnings=%s",
+                run_id, result.get("observed", 0), result.get("matched", 0), result.get("notified", 0),
+                collected.region_applied, collected.filter_applied, collected.warnings or "无",
+            )
+            return {"run_id": run_id, "model": model, "storage": storage, **result}
+        except Exception as exc:
+            partial = exc.partial if isinstance(exc, CollectionFailure) else None
+            self._finish_run(run_id, False, {
+                "passes": partial.passes if partial else [],
+                "region_applied": partial.region_applied if partial else False,
+                "filter_applied": partial.filter_applied if partial else False,
+            }, str(exc))
+            logger.exception("监控任务失败 run_id=%s model=%s storage=%s error=%s", run_id, model, storage, exc)
+            raise
+        finally:
+            self.live = None
 
     async def _collect_sources(
         self, keyword: str, model: str, storages: list[str], rules: Rules, stream: ItemStream | None = None,
@@ -374,7 +379,8 @@ class MonitorService:
 
         def is_candidate(item: dict[str, Any], region_applied: bool, storage_hint: str) -> bool:
             decision = (candidate_decision(item, rules, quotes, smart, region_applied, storage_hint, model)
-                        if smart.enabled else evaluate(item, rules, quotes, region_applied, storage_hint, model))
+                        if smart.enabled else scope_decision(item, smart, model, storage_hint, basis="fixed")
+                        or evaluate(item, rules, quotes, region_applied, storage_hint, model))
             return decision.matched and decision.storage == storage_hint and storage_hint in storages
 
         def check_detail(item: dict[str, Any], region_applied: bool, storage_hint: str) -> dict | None:
@@ -382,8 +388,9 @@ class MonitorService:
                 # Current detail drives both early and final assessment.
                 config = load_config(self.database)
                 if not config.enabled:
-                    return asdict(evaluate(item, rules, eligible_quotes(self.database, rules),
-                                           region_applied, storage_hint, model))
+                    return asdict(scope_decision(item, config, model, storage_hint, basis="detail", detail=True)
+                                  or evaluate(item, rules, eligible_quotes(self.database, rules),
+                                              region_applied, storage_hint, model))
                 _, value = assess_local(
                     item, rules, latest_entries(self.database, rules.quote_category),
                     policies_for(self.database, model, rules.quote_category, storage_hint),
@@ -443,9 +450,10 @@ class MonitorService:
                 combined.filter_applied = combined.filter_applied or part.filter_applied
             except Exception as exc:
                 logger.exception("采集设备失败 device=%s model=%s", label, model)
-                failures.append(f"{label}：{exc}")
+                error = _brief_error(exc)
+                failures.append(f"{label}：{error}")
                 combined.passes.append({"label": "新发", "device": device_id, "device_name": label,
-                                        "storage": None, "observed": 0, "error": str(exc), "actions": []})
+                                        "storage": None, "observed": 0, "error": error, "actions": []})
         combined.region_error = "；".join(failures) or None
         if not successes:
             raise CollectionFailure(combined.region_error or "没有可用的采集设备", combined)
@@ -473,11 +481,15 @@ class MonitorService:
                 continue
             region = str(card.get("display_region") or "")
             item = {"title": title, "price": price, "display_region": region,
-                    "item_url": "", "publish_time": None, "tags": []}
+                    "item_url": "", "publish_time": None, "tags": [],
+                    "seller_name": card.get("seller_name") or "",
+                    "description": card.get("description") or "",
+                    "detail_parameters": card.get("detail_parameters") or []}
             smart = load_config(self.database)
             decision = (candidate_decision(item, rules, latest_entries(self.database, rules.quote_category), smart,
                                            bool(meta.get("region_applied")), storage_hint, model)
-                        if smart.enabled else evaluate(item, rules, quotes, bool(meta.get("region_applied")), storage_hint, model))
+                        if smart.enabled else scope_decision(item, smart, model, storage_hint, basis="fixed")
+                        or evaluate(item, rules, quotes, bool(meta.get("region_applied")), storage_hint, model))
             if card.get("detail_rejection"):
                 decision = MatchDecision(**card["detail_rejection"])
             elif card.get("detail_decision"):
@@ -554,20 +566,25 @@ class MonitorService:
         run_id: int | None = None,
         expected_model: str | None = None,
     ) -> dict[str, Any]:
-        if load_config(self.database).enabled:
+        config = load_config(self.database)
+        if config.enabled:
             return await self._process_smart_items(items, rules, keyword, region_applied, storage_hint, run_id, expected_model)
         quotes = eligible_quotes(self.database, rules)
         matched = notified = 0
         decisions = []
         for raw in items:
             item = self._normalize_item(raw, keyword)
-            decision = evaluate(item, rules, quotes, region_applied, storage_hint, expected_model)
+            decision = scope_decision(item, config, expected_model, storage_hint, basis="fixed", detail=True) or evaluate(
+                item, rules, quotes, region_applied, storage_hint, expected_model)
+            if decision.matched and not has_model_evidence(decision.model or "", item_text(item)):
+                decision = replace(decision, matched=False, code="model_unconfirmed",
+                                   reason="商品文字未确认iPhone机型，不能按搜索目标推送")
             self._save_item(item, decision)
             decisions.append(
                 {"item_id": item["item_id"], "title": item["title"], "price": item["price"],
                  "matched": decision.matched, "reason": decision.reason, "code": decision.code}
             )
-            deal_id = self._save_deal(item, decision, rules)
+            deal_id = None if config.shadow else self._save_deal(item, decision, rules)
             if run_id is not None:
                 storage_label = raw.get("source_storage")
                 pass_label = (
@@ -655,6 +672,15 @@ class MonitorService:
         value = record["result"]
         item = self._normalize_item(record["snapshot"], "")
         decision = self.smart_decision(record)
+        blocked = scope_decision(item, load_config(self.database), decision.model, decision.storage, basis="detail", detail=True)
+        if blocked is None and not has_model_evidence(decision.model or "", item_text(item)):
+            blocked = MatchDecision(False, "商品文字未确认iPhone机型，不能按搜索目标推送", model=decision.model,
+                                    storage=decision.storage, code="model_unconfirmed", quote_basis="detail")
+        if blocked is not None:
+            self._save_item(item, blocked)
+            with self.database.connect() as c:
+                c.execute("UPDATE smart_assessments SET notification_status='none' WHERE id=? AND notification_status NOT IN ('sent','duplicate')", (record["id"],))
+            return False, False
         self._save_item(item, decision)
         if value.get("shadow") or value["status"] not in {"pending", "matched"} or value["status"] == "pending" and not value.get("notify_pending", True):
             state = "shadow" if value.get("shadow") else "none"

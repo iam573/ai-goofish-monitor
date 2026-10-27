@@ -22,9 +22,10 @@ import httpx
 from .swift_runtime import run_swift
 from PIL import Image
 
-from .appium_server import ensure_appium_server
+from .appium_server import WDA_PORT, ensure_appium_server
 from .collector import CollectResult, DetailCheck, ItemCallback, emit_safely, guess_region
 from .config import ROOT, Settings
+from .instance_lock import exclusive_device
 from .matching import normalize_search_text
 
 logger = logging.getLogger(__name__)
@@ -550,11 +551,12 @@ def detail_back_rect(source: str) -> dict[str, int] | None:
     footer = {_text(node) for node in visible if height * .85 <= int(node.get("y") or 0) < height}
     if not {"留言按钮", "收藏"} <= footer:
         return None
-    more = [node for node in visible if _text(node) == "更多"
-            and int(node.get("x") or 0) > width * .8 and 30 <= int(node.get("y") or 0) < 120]
+    more = {tuple(int(node.get(key) or 0) for key in ("x", "y", "width", "height"))
+            for node in visible if _text(node) == "更多"
+            and int(node.get("x") or 0) > width * .8 and 30 <= int(node.get("y") or 0) < 120}
     if len(more) != 1:
         return None
-    top = int(more[0].get("y") or 0)
+    top = next(iter(more))[1]
     bars = [node for node in visible if node.tag == "XCUIElementTypeOther"
             and 35 <= int(node.get("x") or 0) < width * .25
             and int(node.get("width") or 0) >= width * .5
@@ -565,7 +567,7 @@ def detail_back_rect(source: str) -> dict[str, int] | None:
     candidates = set()
     for node in visible:
         x, y, w, h = (int(node.get(key) or 0) for key in ("x", "y", "width", "height"))
-        if (node.tag == "XCUIElementTypeOther" and not _text(node)
+        if (node.tag == "XCUIElementTypeOther" and _text(node) in {"", "返回", "返回按钮"}
                 and 0 <= x <= 12 and abs(y - top) <= 5 and 24 <= w <= 64 and 24 <= h <= 64
                 and x + w <= int(bars[0].get("x") or 0) and y + h <= height):
             candidates.add((x, y, w, h))
@@ -672,7 +674,23 @@ def result_region_chip(source: str) -> str | None:
 
 
 def _brief_error(exc: Exception) -> str:
-    return (str(exc).splitlines()[0] or type(exc).__name__)[:400]
+    message = str(exc)
+    if any(text in message.casefold() for text in (
+        "a session is either terminated or not started", "invalid session id", "nosuchdrivererror",
+    )) or type(exc).__name__ == "InvalidSessionIdException":
+        return "手机自动化会话已失效，本次采集已停止；下一次搜索会重新连接"
+    lines = message.splitlines()
+    return ((lines[0] if lines else "") or type(exc).__name__)[:400]
+
+
+def _quit_driver(driver: Any) -> None:
+    """Cleanup failure must not discard collected data or replace the original error."""
+    if driver is None:
+        return
+    try:
+        driver.quit()
+    except Exception as exc:
+        logger.warning("清理iPhone自动化会话失败：%s", _brief_error(exc))
 
 
 def _pasteboard(driver: Any, *, settings: Settings, content: str | None = None) -> str:
@@ -766,6 +784,7 @@ class IPhoneCollector:
             storages, scroll_pages, is_candidate, on_items, check_detail,
         )
 
+    @exclusive_device
     def _collect(
         self, udid: str, os_version: str, keyword: str, region_hint: str,
         region_steps: list[str], storages: list[str], scroll_pages: int,
@@ -787,7 +806,7 @@ class IPhoneCollector:
             "appium:usePrebuiltWDA": True,
             "appium:derivedDataPath": str(self.settings.ios_wda_derived_data_path),
             "appium:updatedWDABundleId": self.settings.ios_wda_bundle_id,
-            "appium:wdaLocalPort": 8101,
+            "appium:wdaLocalPort": WDA_PORT,
             "appium:newCommandTimeout": 300,
             "appium:waitForIdleTimeout": 0.5,
             "appium:settings": {"waitForIdleTimeout": 0.5, "animationCoolOffTimeout": 0.3},
@@ -961,8 +980,7 @@ class IPhoneCollector:
                 entry.get("filter_applied") for entry in result.passes)
             return result
         finally:
-            if driver is not None:
-                driver.quit()
+            _quit_driver(driver)
 
     @staticmethod
     def _find(driver: Any, name: str, types: tuple[str, ...] = ()) -> Any | None:
@@ -1612,12 +1630,15 @@ class IPhoneCollector:
             clicked.append(target)
             source = self._wait_for_source(driver, lambda xml: picker_open(xml) and checked_storages(xml) == {target},
                                            f"容量勾选校验失败：期望 {target}")
-        self._find(driver, "确定", ("XCUIElementTypeButton",)).click()
+        self._confirm_storage_filter(driver)
         clicked.append("确定")
         self._wait_for_source(driver, lambda xml: not picker_open(xml) and result_bar_label(xml, target),
                               f"点击确定后列表未显示「{target}」")
         logger.info("iPhone 容量已应用 storage=%s clicked=%s", target, clicked)
         return clicked
+
+    def _confirm_storage_filter(self, driver: Any) -> None:
+        self._find(driver, "确定", ("XCUIElementTypeButton",)).click()
 
     def _return_to_results(self, driver: Any, actions: list[dict[str, Any]]) -> None:
         self._ensure_foreground(driver, actions)
@@ -1739,9 +1760,11 @@ class IPhoneCollector:
             # Only later app switches compare against this captured detail.
             detail_card = PhoneCard(observed["description"], observed["price"], card.region, card.x, card.y)
             actions.append({"action": "读取详情正文与售价", "target": f"¥{observed['price']:g}", "success": True})
+            initial_seller = detail_seller(source)
+            seller_info.update(initial_seller)
             seller_info["acquisition_stage"] = "valuation"
             if check_detail:
-                decision = check_detail({"display_region": card.region, **observed})
+                decision = check_detail({"display_region": card.region, **observed, **initial_seller})
                 if decision:
                     seller_info["detail_decision"] = decision
                 if decision and not decision.get("matched") and decision.get("code") != "pending":
@@ -1775,6 +1798,15 @@ class IPhoneCollector:
             shop_label = {True: "是", False: "否", None: "未识别"}[seller["is_fish_shop"]]
             actions.append({"action": "读取卖家信息", "target": f"{seller['seller_name'] or '未识别'} · 鱼小铺：{shop_label}",
                             "method": seller_method, "success": bool(seller["seller_name"])})
+            if check_detail and seller["seller_name"] and seller["seller_name"] != initial_seller["seller_name"]:
+                decision = check_detail({"display_region": card.region, **observed, **seller})
+                if decision:
+                    seller_info["detail_decision"] = decision
+                if decision and not decision.get("matched") and decision.get("code") != "pending":
+                    seller_info["detail_rejection"] = decision
+                    actions.append({"action": "卖家收货范围检查", "target": decision["reason"],
+                                    "method": "卖家信息就绪后复核，跳过分享", "success": True})
+                    return ""
             # Most copies expose a fresh confirmation. Avoid switching apps
             # and preparing a clipboard marker unless that path is unavailable.
             copy_started = time.monotonic()

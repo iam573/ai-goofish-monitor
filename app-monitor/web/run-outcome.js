@@ -2,6 +2,7 @@
 export const codeLabels = {
   matched: "命中", pending: "待确认", price_high: "价格偏高", region: "地区不符",
   other_model: "机型不符", storage_mismatch: "容量不符", excluded: "命中排除规则",
+  variant_filtered: "版本已过滤", seller_filtered: "卖家已过滤", model_unconfirmed: "机型未确认",
   grade_not_accepted: "不接受成色", no_quote: "缺少报价", unpriced_condition: "旧策略未计价",
   not_whole: "非整机", not_full_price: "非整机售价", not_item_or_price: "商品或售价不符", unrecognized: "无法识别",
   too_cheap: "价格异常偏低", smart_rejected: "其他不符合", other: "其他不符合",

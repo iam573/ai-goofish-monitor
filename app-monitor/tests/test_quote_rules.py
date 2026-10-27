@@ -21,9 +21,10 @@ def assess(description, rows, price=2000, storage='256', rules=None):
     item=dict(title=f'iPhone 17 {storage}G',description=description,price=price)
     quotes=[dict(id=i+1,model='17',storage=storage,grade=grade,price=amount)
             for i,(grade,amount) in enumerate([('靓机',3000),('小花',2800),('大花',2400)])]
-    facts=extract_local(item,SmartConfig(),quotes,Rules())
+    config=SmartConfig(exclude_overseas=False)  # These tests cover quote deductions for allowed overseas phones.
+    facts=extract_local(item,config,quotes,Rules())
     facts.verify(item['title']+'\n'+description+f'\n页面挂牌价：¥{price:g}')
-    return price_facts(item,facts,quotes,rows,SmartConfig(),rules or Rules(),'17',storage), facts
+    return price_facts(item,facts,quotes,rows,config,rules or Rules(),'17',storage), facts
 
 
 @pytest.mark.parametrize('version,fee', [('国行',0),('港版',200),('港澳版',200),('香港版',200),
@@ -223,6 +224,7 @@ def test_legacy_rule_identity_and_manual_override_survive_compilation(database):
 
 
 async def test_delivery_gate_uses_deductions_and_never_sends_rejected_repair(database):
+    database.state_set("smart_config",SmartConfig(exclude_overseas=False).model_dump())
     from app_monitor.service import MonitorService
     class Notifier:
         def __init__(self):self.sent=[]
