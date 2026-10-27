@@ -17,7 +17,6 @@ from pathlib import Path
 from typing import Iterable
 
 import lief
-from PIL import Image, ImageDraw, ImageFont
 
 
 ORIGINAL_BUNDLE_ID = "com.taobao.fleamarket"
@@ -28,6 +27,7 @@ DEFAULT_DEVICE = os.environ.get("GOOFISH_DEVICE_UDID")
 DEFAULT_IPA = Path(os.environ.get("GOOFISH_IPA", "闲鱼iOS.ipa"))
 SHIM_NAME = "BundleIdentityShim.dylib"
 SCRIPT_DIR = Path(__file__).resolve().parent
+SUPERSCRIPT_DIGITS = str.maketrans("0123456789", "⁰¹²³⁴⁵⁶⁷⁸⁹")
 
 
 class CloneError(RuntimeError):
@@ -182,69 +182,8 @@ def create_profile(bundle_id: str, team_id: str, work_dir: Path) -> tuple[Path, 
     return profile_path, profile
 
 
-def update_icon_declarations(info: dict) -> None:
-    phone_icons = info.setdefault("CFBundleIcons", {})
-    phone_icons.pop("CFBundleAlternateIcons", None)
-    phone_icons["CFBundlePrimaryIcon"] = {"CFBundleIconFiles": ["GoofishCloneIcon60x60"]}
-
-    ipad_icons = info.setdefault("CFBundleIcons~ipad", {})
-    ipad_icons.pop("CFBundleAlternateIcons", None)
-    ipad_icons["CFBundlePrimaryIcon"] = {
-        "CFBundleIconFiles": ["GoofishCloneIcon60x60", "GoofishCloneIcon76x76"]
-    }
-    info["CFBundleIconFiles"] = ["GoofishCloneIcon60x60"]
-
-
-def load_badge_font(size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
-    candidates = (
-        Path("/System/Library/Fonts/SFNSRounded.ttf"),
-        Path("/System/Library/Fonts/SFNS.ttf"),
-        Path("/System/Library/Fonts/Supplemental/Arial Bold.ttf"),
-    )
-    for path in candidates:
-        if path.is_file():
-            return ImageFont.truetype(str(path), size=size)
-    return ImageFont.load_default()
-
-
-def add_number_badge(source: Path, destination: Path, number: int) -> None:
-    decoded = destination.with_name(f".{destination.name}.decoded.png")
-    try:
-        run(["xcrun", "pngcrush", "-revert-iphone-optimizations", "-q", source, decoded])
-        image = Image.open(decoded).convert("RGBA")
-        image.load()
-    finally:
-        decoded.unlink(missing_ok=True)
-    width, height = image.size
-    shortest = min(width, height)
-    label = str(number)
-    font_size = max(16, int(shortest * (0.31 if len(label) == 1 else 0.25)))
-    font = load_badge_font(font_size)
-    draw = ImageDraw.Draw(image)
-    text_box = draw.textbbox((0, 0), label, font=font, stroke_width=0)
-    text_width = text_box[2] - text_box[0]
-    text_height = text_box[3] - text_box[1]
-    padding_x = int(shortest * 0.085)
-    padding_y = int(shortest * 0.055)
-    badge_width = max(int(shortest * 0.37), text_width + 2 * padding_x)
-    badge_height = max(int(shortest * 0.37), text_height + 2 * padding_y)
-    edge = int(shortest * 0.045)
-    right = width - edge
-    top = edge
-    left = right - badge_width
-    bottom = top + badge_height
-    radius = badge_height // 2
-    draw.rounded_rectangle(
-        (left, top, right, bottom),
-        radius=radius,
-        fill=(255, 59, 48, 255),
-        outline=(255, 255, 255, 255),
-        width=max(2, int(shortest * 0.025)),
-    )
-    text_x = left + (badge_width - text_width) / 2
-    text_y = top + (badge_height - text_height) / 2 - text_box[1]
-    draw.text((text_x, text_y), label, font=font, fill=(255, 255, 255, 255))
-    image.save(destination, format="PNG", optimize=True)
+def clone_display_name(number: int) -> str:
+    return f"闲鱼{str(number).translate(SUPERSCRIPT_DIGITS)}"
 
 
 def customize_app(app_path: Path, bundle_id: str, number: int) -> Path:
@@ -258,17 +197,10 @@ def customize_app(app_path: Path, bundle_id: str, number: int) -> Path:
         raise CloneError(f"找不到主程序：{executable}")
 
     info["CFBundleIdentifier"] = bundle_id
-    info["CFBundleDisplayName"] = "闲鱼"
-    info["CFBundleName"] = "闲鱼"
-    update_icon_declarations(info)
+    display_name = clone_display_name(number)
+    info["CFBundleDisplayName"] = display_name
+    info["CFBundleName"] = display_name
     info_path.write_bytes(plistlib.dumps(info, fmt=plistlib.FMT_BINARY, sort_keys=False))
-
-    phone_icon = app_path / "AppIcon60x60@2x.png"
-    ipad_icon = app_path / "AppIcon76x76@2x~ipad.png"
-    if not phone_icon.is_file() or not ipad_icon.is_file():
-        raise CloneError("原 IPA 缺少预期的主图标 AppIcon60x60@2x.png 或 AppIcon76x76@2x~ipad.png。")
-    add_number_badge(phone_icon, app_path / "GoofishCloneIcon60x60@2x.png", number)
-    add_number_badge(ipad_icon, app_path / "GoofishCloneIcon76x76@2x~ipad.png", number)
 
     plugins = app_path / "PlugIns"
     if plugins.exists():
@@ -424,7 +356,7 @@ def build_clone(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="把闲鱼 IPA 生成为多个独立安装的个人签名副本，桌面名均为“闲鱼”，图标右上角显示编号。"
+        description="把闲鱼 IPA 生成为多个独立安装的个人签名副本，桌面名使用上标编号（闲鱼²、闲鱼³……）。"
     )
     parser.add_argument("numbers", nargs="+", type=int, help="副本编号，例如：2 3 4")
     parser.add_argument("--ipa", type=Path, default=DEFAULT_IPA, help=f"原始 IPA（默认：{DEFAULT_IPA}）")

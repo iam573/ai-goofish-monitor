@@ -15,8 +15,8 @@ if [[ ! -x "$venv_dir/bin/python" ]]; then
   python3 -m venv "$venv_dir"
 fi
 
-if ! "$venv_dir/bin/python" -c 'import lief, PIL' >/dev/null 2>&1; then
-  "$venv_dir/bin/python" -m pip install --disable-pip-version-check 'lief==1.0.0' 'Pillow>=10,<13'
+if ! "$venv_dir/bin/python" -c 'import lief' >/dev/null 2>&1; then
+  "$venv_dir/bin/python" -m pip install --disable-pip-version-check 'lief==1.0.0'
 fi
 
 exec "$venv_dir/bin/python" "$script_dir/clone_goofish.py" "$@"

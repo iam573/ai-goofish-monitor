@@ -2,8 +2,8 @@
 
 把原始闲鱼 IPA 生成为多个可并存安装的副本：
 
-- 桌面名称始终是“闲鱼”。
-- 图标右上角显示 `2`、`3`、`4`……。
+- 桌面名称依次是“闲鱼²”“闲鱼³”“闲鱼⁴”……，数字使用 Unicode 上标字符。
+- 使用原始闲鱼图标，不在图标图片上绘制角标。
 - 包名依次是 `com.efrenwu.goofish2`、`com.efrenwu.goofish3`、`com.efrenwu.goofish4`……。
 - 按 `.local.env` 中的证书匹配值和 Personal Team 签名，不会自动选择其他证书。
 - 保留已验证的网络兼容层，同时避免 UIKit/CoreUI 取到伪装包名导致底部图标残缺。
@@ -34,7 +34,7 @@
   2 3
 ```
 
-默认输出到原 IPA 旁边的 `clones/`。首次运行会在系统临时目录创建 Python 虚拟环境，并安装 LIEF 和 Pillow。
+默认输出到原 IPA 旁边的 `clones/`。首次运行会在系统临时目录创建 Python 虚拟环境，并安装 LIEF。
 
 本机专用的 IPA 路径、证书匹配值、Team ID 和设备 UDID 放在被 Git 忽略的 `.local.env` 中；复制到别的 Mac 时可参考 `.local.env.example` 修改。
 

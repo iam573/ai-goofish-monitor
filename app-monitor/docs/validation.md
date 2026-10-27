@@ -894,12 +894,12 @@ WindVane官方文档允许按WebView/来源配置JSBridge权限，并可对域�
 
 验证：完整 Python 测试 754 passed（新增跳过需人工处理设备及重试恢复、单台修复失败不影响另一台），18 项前端逻辑测试、JS 语法与 diff 空白检查通过。真机状态仅只读查询，未修改用户勾选；第二台需安装支持 iOS 27 的 Xcode 后才能参与采集。
 
-## iOS 闲鱼多开签名与编号图标（2026-10-27）
+## iOS 闲鱼多开签名与上标名称（2026-10-27）
 
 基于用户提供的闲鱼 7.28.60 IPA 验证个人开发签名多开。直接更改安装包名会导致首页网络请求失败；在主程序加载兼容动态库、仅向闲鱼自身代码返回原始 `com.taobao.fleamarket`，并让 UIKit/CoreUI/SwiftUI 继续读取真实副本包名后，网络请求与底部图标均可正常工作。副本移除三个 App Extensions，避免免费 Personal Team 为每个扩展额外申请 App ID 和描述文件；未复制 Cookie、Token、WUA 或 App 容器数据。
 
-Apple 开发者后台实测拒绝注册 `com.taobao.fleamarket2`，返回 bundle identifier 不可用，因此个人 Team 无法按该包名签名安装。可注册的副本改用 `com.efrenwu.goofish2`、`com.efrenwu.goofish3` 等唯一标识；App 内部兼容层仍返回官方包名。桌面名称固定为“闲鱼”，主图标改用新的文件名以避开系统图标缓存，并在右上角绘制对应编号；移除备用图标声明，避免运行时切换后丢失编号。
+Apple 开发者后台实测拒绝注册 `com.taobao.fleamarket2`，返回 bundle identifier 不可用，因此个人 Team 无法按该包名签名安装。可注册的副本改用 `com.efrenwu.goofish2`、`com.efrenwu.goofish3` 等唯一标识；App 内部兼容层仍返回官方包名。副本保留原始闲鱼图标，桌面名称使用 Unicode 上标编号区分，例如“闲鱼²”“闲鱼³”；多位编号逐位转换，例如编号 10 为“闲鱼¹⁰”。
 
 实验脚本位于 `experiments/ios-multi-clone/`，支持一次生成多个编号、自动通过 Xcode 申请/刷新个人开发描述文件、编译并注入兼容层、重签所有 Framework 和主 App、验签、打包，以及设备在线时可选安装。本机身份信息保存在 Git 忽略的 `.local.env`，仓库只保留无个人信息的示例文件。
 
-编号 2 的成品静态验证通过：Info.plist 的显示名为“闲鱼”、真实包名为 `com.efrenwu.goofish2`，签名 entitlement 与描述文件 App ID 一致，动态库加载命令存在，`codesign --verify --deep --strict` 和 ZIP 完整性检查均成功；主图标预览能看到右上角数字 2。验证时目标 iPhone 未连接，因此本轮没有安装或启动该副本，不能据静态检查声称真机图标缓存、网络请求和底部图标已再次回归。
+编号 2 的成品静态验证通过：Info.plist 的显示名为“闲鱼²”、真实包名为 `com.efrenwu.goofish2`，签名 entitlement 与描述文件 App ID 一致，动态库加载命令存在，`codesign --verify --deep --strict` 和 ZIP 完整性检查均成功；两个主图标文件的 SHA-256 与原始 IPA 一致，没有绘制角标。设备连接后安装成功，系统应用列表同时显示官方“闲鱼”和副本“闲鱼²”。首次远程启动被 iOS 拒绝，系统明确提示个人开发描述文件尚未由用户显式信任；需用户在设备设置中完成信任后才能继续运行时回归，因此本轮不能声称网络请求和底部图标已再次验证。
