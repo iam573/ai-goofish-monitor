@@ -810,7 +810,7 @@ dialog::backdrop { background: rgba(10, 20, 16, .45); backdrop-filter: blur(2px)
 
 /* Pricing sections and their shared switch */
 .valuation-controls { padding-top: 0; border-top: 0; }
-#valuation-exclusions { margin-top: 0; padding-bottom: 14px; border-bottom: 1px solid var(--line); }
+#valuation-exclusions { margin: 10px 0 0; }
 #valuation-exclusions > .field { margin-top: 12px; }
 .scope-filter-group h4 { margin: 0 0 8px; color: var(--ink); font-size: 12px; font-weight: 600; }
 .valuation-master { display: flex; flex-direction: row; justify-content: space-between; align-items: center; gap: 12px; position: relative; margin: 16px 0 8px; color: var(--ink); font-size: 13px; font-weight: 600; cursor: pointer; }
@@ -824,3 +824,5 @@ dialog::backdrop { background: rgba(10, 20, 16, .45); backdrop-filter: blur(2px)
 .valuation-auto-settings > details { margin: 10px 0; }
 .valuation-auto-settings:disabled { opacity: .5; }
 #valuation-push { margin-top: 0; }
+#seller-keyword-editor .kw { max-width: 100%; overflow-wrap: anywhere; }
+#seller-keyword-editor[aria-disabled="true"] { opacity: .55; cursor: default; }

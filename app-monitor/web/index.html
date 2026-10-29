@@ -155,34 +155,6 @@
 
                 <section class="settings-pane" data-pane="price" role="tabpanel">
                   <div id="valuation-controls" class="valuation-controls">
-                    <details id="valuation-exclusions"><summary>排除</summary>
-                  <div class="field">
-                    <span class="field-label">排除词 <span class="hint">标题含这些词不推送；回车或逗号添加</span></span>
-                    <div class="tag-editor" id="exclude-editor">
-                      <div class="tags" id="exclude-tags"></div>
-                      <input id="exclude-input" placeholder="添加排除词…" aria-label="添加排除词" />
-                    </div>
-                    <textarea name="exclude_keywords" hidden></textarea>
-                  </div>
-                      <div class="scope-filter-group">
-                        <h4>版本</h4>
-                        <label class="check"><input name="valuation_exclude_overseas" type="checkbox">排除选中的外版机器</label>
-                        <div id="valuation-variants" class="smart-checks"></div>
-                        <p class="hint">未写明版本的保留，不把配件版本当作整机版本。</p>
-                      </div>
-                      <div class="scope-filter-group">
-                        <h4>卖家</h4>
-                        <label class="check"><input name="valuation_exclude_trade_sellers" type="checkbox">按卖家昵称排除同行</label>
-                        <label>昵称命中词<textarea name="valuation_seller_exclude_keywords" rows="3" placeholder="通讯、通信、手机专卖、手机店…"></textarea></label>
-                        <label class="check"><input name="valuation_exclude_digital_shop_names" type="checkbox">同时排除以“数码”结尾或“数码…店”的商家昵称</label>
-                        <p class="hint">逗号或换行分隔，仅看卖家昵称。</p>
-                      </div>
-                      <div class="scope-filter-group">
-                        <h4>问题机</h4>
-                        <p class="hint">明确出现勾选的问题时排除。</p>
-                        <div id="valuation-blocked" class="smart-checks"></div>
-                      </div>
-                    </details>
                     <label class="valuation-master"><span>成色与扣费</span><input name="valuation_enabled" type="checkbox" role="switch" aria-label="成色与扣费总开关"><span class="valuation-switch-track" aria-hidden="true"></span></label>
                     <p id="valuation-summary" class="hint"></p>
                   <div class="field">
@@ -210,6 +182,38 @@
                       <span class="affix"><input name="min_price_ratio" type="number" min="0" max="0.99" step="0.05" /><em>× 报价</em></span>
                     </label>
                   </div>
+                    <details id="valuation-exclusions"><summary>排除</summary>
+                  <div class="field">
+                    <span class="field-label">排除词 <span class="hint">标题含这些词不推送；回车或逗号添加</span></span>
+                    <div class="tag-editor" id="exclude-editor">
+                      <div class="tags" id="exclude-tags"></div>
+                      <input id="exclude-input" placeholder="添加排除词…" aria-label="添加排除词" />
+                    </div>
+                    <textarea name="exclude_keywords" hidden></textarea>
+                  </div>
+                      <div class="scope-filter-group">
+                        <h4>版本</h4>
+                        <label class="check"><input name="valuation_exclude_overseas" type="checkbox">排除选中的外版机器</label>
+                        <div id="valuation-variants" class="smart-checks"></div>
+                        <p class="hint">未写明版本的保留，不把配件版本当作整机版本。</p>
+                      </div>
+                      <div class="scope-filter-group">
+                        <h4>卖家</h4>
+                        <label class="check"><input name="valuation_exclude_trade_sellers" type="checkbox">按卖家昵称排除同行</label>
+                        <div class="field">
+                          <span class="field-label">昵称命中词 <span class="hint">仅看卖家昵称；回车或逗号添加</span></span>
+                          <div class="tag-editor" id="seller-keyword-editor">
+                            <div class="tags" id="seller-keyword-tags"></div>
+                            <input id="seller-keyword-input" placeholder="添加昵称命中词…" aria-label="添加昵称命中词" autocomplete="off" />
+                          </div>
+                        </div>
+                      </div>
+                      <div class="scope-filter-group">
+                        <h4>问题机</h4>
+                        <p class="hint">明确出现勾选的问题时排除。</p>
+                        <div id="valuation-blocked" class="smart-checks"></div>
+                      </div>
+                    </details>
                     <fieldset id="valuation-auto-settings" class="valuation-auto-settings" aria-label="自动成色与扣费设置">
                     <details id="valuation-grade-rules" open><summary>成色 <span class="hint">所有机型共用</span></summary>
                       <p class="hint">命中词决定成色，勾选可收货的档位。回车或逗号添加，点 × 删除；具体瑕疵优先于“99新”。</p>

@@ -62,3 +62,47 @@ export function initKeywordEditor(root, {escapeHtml, onChange}) {
     },
   };
 }
+
+// Compact tag field using the same markup and styles as the exclusion words.
+export function initTagEditor(root, {escapeHtml, onChange}) {
+  const input = root.querySelector('input');
+  const tags = root.querySelector('.tags');
+  const e = word => escapeHtml(word).replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+  let words = [], disabled = false;
+  function render() {
+    tags.innerHTML = words.map(word => `<span class="kw">${e(word)}<button type="button" data-remove-tag="${e(word)}" aria-label="删除 ${e(word)}" ${disabled ? 'disabled' : ''}>×</button></span>`).join('');
+  }
+  function commit() {
+    if (disabled) return;
+    const added = splitWords(input.value);
+    input.value = '';
+    if (!added.length) return;
+    words = [...new Set([...words, ...added])];
+    render(); onChange();
+  }
+  input.addEventListener('keydown', event => {
+    if (disabled || event.isComposing) return;
+    if (['Enter', ',', '，', '、'].includes(event.key)) { event.preventDefault(); commit(); }
+    else if (event.key === 'Backspace' && !input.value) { words = words.slice(0, -1); render(); onChange(); }
+  });
+  input.addEventListener('input', event => {
+    if (!event.isComposing && /[,，、\n]/.test(input.value)) commit();
+    onChange();
+  });
+  input.addEventListener('compositionend', () => {
+    if (/[,，、\n]/.test(input.value)) commit();
+    onChange();
+  });
+  input.addEventListener('blur', commit);
+  root.addEventListener('click', event => {
+    if (disabled) return;
+    const button = event.target.closest('[data-remove-tag]');
+    if (button) { words = words.filter(word => word !== button.dataset.removeTag); render(); onChange(); }
+    else input.focus();
+  });
+  return {
+    load(value) { words = [...value]; input.value = ''; render(); },
+    read() { return [...new Set([...words, ...splitWords(input.value)])]; },
+    setDisabled(value) { disabled = value; input.disabled = value; root.setAttribute('aria-disabled', String(value)); render(); },
+  };
+}

@@ -14,7 +14,7 @@ from dataclasses import dataclass, field, replace
 from typing import Any, Literal
 
 import httpx
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from .db import Database, utc_now
 from .matching import MatchDecision, evaluate, explicit_iphone_models, extract_storage, model_in_title, normalize_search_text
@@ -26,7 +26,7 @@ from .scope_filters import DEFAULT_SELLER_KEYWORDS, VARIANT_LABELS, normalize_se
 
 logger = logging.getLogger(__name__)
 VERSION = "local-cell-facts-v4"
-PRICING_VERSION = "shared-keyword-rules-v6"
+PRICING_VERSION = "shared-keyword-rules-v7"
 BATTERY_PATTERN = re.compile(r"(?:(?:电池|电芯)(?:健康度|健康|效率|容量|寿命)?|健康度|电池寿命)\s*[为是约:：]?\s*(?:百分之)?\s*(100(?:\.0+)?|[1-9]?\d(?:\.\d+)?)\s*(?:%|％)?(?![\d.])", re.I)
 FACT_FIELDS = ("model", "storage", "whole_phone", "full_price", "battery_health", "screen_watermark",
                "screen_broken", "function_fault", "locked", "repaired", "screen_replaced", "battery_replaced", "water_damage", "back_glass_broken", "warranty", "color", "variant")
@@ -77,7 +77,6 @@ class SmartConfig(BaseModel):
     blocked_variants: list[str] = Field(default_factory=lambda: list(VARIANT_LABELS))
     exclude_trade_sellers: bool = True
     seller_exclude_keywords: list[str] = Field(default_factory=lambda: list(DEFAULT_SELLER_KEYWORDS), max_length=100)
-    exclude_digital_shop_names: bool = True
     grade_keywords: dict[str, list[str]] = Field(default_factory=lambda: default_keywords())
     condition_keywords: dict[str, list[str]] = Field(default_factory=default_condition_keywords)
     base_url: str = ""
@@ -87,6 +86,14 @@ class SmartConfig(BaseModel):
         default_factory=lambda: ["screen_watermark", "screen_broken", "function_fault", "locked"])
     grade_definitions: dict[str, str] = Field(default_factory=lambda: dict(DEFAULT_GRADES))
     grades_confirmed: bool = False
+
+    @model_validator(mode="before")
+    @classmethod
+    def remove_retired_seller_rule(cls, value):
+        # Existing saved configs and run snapshots can still contain this option.
+        if isinstance(value, dict):
+            return {key: item for key, item in value.items() if key != "exclude_digital_shop_names"}
+        return value
 
     @field_validator("blocked_variants")
     @classmethod

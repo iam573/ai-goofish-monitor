@@ -34,8 +34,8 @@ def explicit_variants(text: str) -> list[tuple[str, str]]:
             found.setdefault(variant, evidence)
     if len(found) > 1:
         found.pop("海外版", None)  # A specific market takes precedence over generic overseas wording.
-    if "国行" in found and len(found) > 1:
-        return []  # Conflicting versions remain subject to normal detail review.
+    # Acquisition exclusions apply to every explicitly offered phone version.
+    # A later domestic claim must not erase a blocked overseas version.
     return list(found.items())
 
 
@@ -53,9 +53,6 @@ def scope_rejection(item: dict, config, *, detail: bool = False) -> tuple[str, s
             normalized_keyword = normalize_seller_name(keyword)
             if normalized_keyword and normalized_keyword in normalized:
                 return "seller_filtered", f"卖家昵称命中过滤词「{keyword}」：{seller[:120]}"
-        if (config.exclude_digital_shop_names and not normalized.endswith(("...", "…"))
-                and re.search(r"数码(?:.{0,5}店)?$", normalized)):
-            return "seller_filtered", f"卖家昵称符合数码商家名称规则：{seller[:120]}"
     if config.exclude_overseas:
         content = str(item.get("title") or "")
         if detail:

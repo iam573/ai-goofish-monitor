@@ -125,6 +125,8 @@ class NotificationService:
         if region and not smart:
             lines.append(f"地区：{region}")
         seller = str(item.get("seller_name") or "").strip()
+        if smart and item["smart_assessment"].get("deductions") and (region or seller or "is_fish_shop" in item):
+            lines.append("")
         if seller or "is_fish_shop" in item:
             if markdown:
                 seller = re.sub(r"([\\`*_{}\[\]()#+.!|>~-])", r"\\\1", seller)
@@ -143,10 +145,10 @@ class NotificationService:
         low = sum(float(row["min"]) for row in rows)
         high = sum(float(row["max"]) for row in rows)
         if any(row.get("open_ended") for row in rows):
-            return f"至少扣 ¥{low:g}"
+            return f"至少 ¥{low:g}"
         if low != high:
-            return f"按最低扣费 ¥{low:g}参考" if upper_only else f"扣费 ¥{low:g}～{high:g}"
-        return f"已扣 ¥{low:g}"
+            return f"¥{low:g}（按区间最低值）" if upper_only else f"¥{low:g}～{high:g}"
+        return f"¥{low:g}"
 
     @staticmethod
     def _smart_lines(item, markdown=False):
@@ -161,22 +163,23 @@ class NotificationService:
             difference = float(item['price']) - low
             comparison = (f"需议价 ¥{difference:g}" if difference > 0 else
                           f"低于{'保守' if high is not None and low != high else ''}估值 ¥{-difference:g}" if difference < 0 else "与估值持平")
-            deduction = NotificationService._deduction_summary(value)
-            lines.append(f"回收估值：{price}（{deduction}） · {comparison}")
+            lines.extend((f"回收估值：{price}", comparison))
         elif high is not None:
             reference_grade = value.get("reference_grade") or grade
             reference = f"{escape(reference_grade)}参考" if reference_grade else "候选上限"
-            deduction = NotificationService._deduction_summary(value, upper_only=True)
-            lines.append(f"回收参考：≤ ¥{high:g}（{reference}，{deduction}，待确认）")
+            lines.append(f"回收参考：≤ ¥{high:g}（{reference}，待确认）")
         else:
             lines.append("回收估值：待确认")
         if value.get("deductions"):
-            deductions = []
+            lines.append("")
+            if value.get("base_price") is not None:
+                lines.append(f"基础回收价：¥{value['base_price']:g}")
+            lines.append("扣费明细：")
             for row in value["deductions"]:
                 amount = f"¥{row['min']:g}" if row['min'] == row['max'] else f"¥{row['min']:g}～{row['max']:g}"
-                deductions.append(f"{escape(row['name'])} −{amount}{'起' if row.get('open_ended') else ''}")
-            base = f"基础 ¥{value['base_price']:g} · " if value.get("base_price") is not None else ""
-            lines.append(f"扣费：{base}{'；'.join(deductions)}")
+                lines.append(f"· {escape(row['name'])}：−{amount}{'起' if row.get('open_ended') else ''}")
+        upper_only = not (low is not None and grade and value.get("status") != "pending")
+        lines.append(f"本次扣费：{NotificationService._deduction_summary(value, upper_only=upper_only)}")
         return lines
 
     @staticmethod

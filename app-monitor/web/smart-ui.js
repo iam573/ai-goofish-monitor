@@ -1,5 +1,5 @@
 import {deductionRows,mergeDeductionKeywords} from './deduction-keywords.js';
-import {initKeywordEditor} from './keyword-editor.js';
+import {initKeywordEditor,initTagEditor} from './keyword-editor.js';
 
 export function initSmart({api,escapeHtml,toast,state,gradeOrder,loadOverview,loadDeals,updateRuleHints,onDirty}) {
   const root=document.querySelector('#valuation-controls');
@@ -12,22 +12,22 @@ export function initSmart({api,escapeHtml,toast,state,gradeOrder,loadOverview,lo
   let config=null,record=null;
   const gradeEditor=initKeywordEditor(document.querySelector('#valuation-keywords'),{escapeHtml,onChange:onDirty});
   const deductionEditor=initKeywordEditor(document.querySelector('#valuation-deduction-keywords'),{escapeHtml,onChange:onDirty});
-  const booleanFields=['enabled','shadow','ai_enabled','notify_pending','exclude_overseas','exclude_trade_sellers','exclude_digital_shop_names'];
-  const scopeFields=['exclude_overseas','blocked_variants','exclude_trade_sellers','seller_exclude_keywords','exclude_digital_shop_names'];
+  const sellerEditor=initTagEditor(document.querySelector('#seller-keyword-editor'),{escapeHtml,onChange:onDirty});
+  const booleanFields=['enabled','shadow','ai_enabled','notify_pending','exclude_overseas','exclude_trade_sellers'];
+  const scopeFields=['exclude_overseas','blocked_variants','exclude_trade_sellers','seller_exclude_keywords'];
   function updateScopeControls(){
     const enabled=input('enabled').checked;
     document.querySelector('#fixed-grade-choice').hidden=enabled;
     document.querySelector('#valuation-auto-settings').disabled=!enabled;
     document.querySelector('#valuation-summary').textContent=enabled?'按商品描述判断成色和扣费，金额自动取对应机型报价。':'按固定参考成色报价判断，不自动判成色或扣费。';
     for(const el of document.querySelectorAll('#valuation-variants input'))el.disabled=!input('exclude_overseas').checked;
-    input('seller_exclude_keywords').disabled=!input('exclude_trade_sellers').checked;
-    input('exclude_digital_shop_names').disabled=!input('exclude_trade_sellers').checked;
+    sellerEditor.setDisabled(!input('exclude_trade_sellers').checked);
   }
   const read=()=>{
     if(!config)return null;
     const payload={};for(const key of booleanFields)payload[key]=input(key).checked;
     payload.blocked_variants=[...document.querySelectorAll('#valuation-variants input:checked')].map(el=>el.value);
-    payload.seller_exclude_keywords=input('seller_exclude_keywords').value.split(/[,，、\n]+/).map(v=>v.trim()).filter(Boolean);
+    payload.seller_exclude_keywords=sellerEditor.read();
     for(const key of ['base_url','model'])payload[key]=input(key).value.trim();
     payload.accepted_grades=[...root.querySelectorAll('[data-accepted-grade]:checked')].map(el=>el.value);
     payload.blocked_conditions=[...document.querySelectorAll('#valuation-blocked input:checked')].map(el=>el.value);
@@ -49,9 +49,9 @@ export function initSmart({api,escapeHtml,toast,state,gradeOrder,loadOverview,lo
     const variants={'美版':'美版','日版':'日版','韩版':'韩版','欧版':'欧版','港澳版':'港澳版','台版':'台版','加版':'加版','海外版':'其他外版'};
     config.blocked_variants??=Object.keys(variants);
     config.seller_exclude_keywords??=['通讯','通信','手机专卖','手机店','二手机','二手手机','手机回收','高价回收','上门回收','卖手机','实体数码','严选数码','数码店','数码科技'];
-    for(const key of ['exclude_overseas','exclude_trade_sellers','exclude_digital_shop_names'])config[key]??=true;
+    for(const key of ['exclude_overseas','exclude_trade_sellers'])config[key]??=true;
     document.querySelector('#valuation-variants').innerHTML=Object.entries(variants).map(([key,label])=>`<label class="check"><input type="checkbox" value="${key}" ${config.blocked_variants.includes(key)?'checked':''}>${label}</label>`).join('');
-    input('seller_exclude_keywords').value=config.seller_exclude_keywords.join('，');
+    sellerEditor.load(config.seller_exclude_keywords);
     updateScopeControls();
     if(state.rules)updateRuleHints();onDirty();
   }

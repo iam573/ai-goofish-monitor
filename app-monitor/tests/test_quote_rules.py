@@ -205,7 +205,7 @@ async def test_missing_fee_pending_item_is_delivered_with_usable_reference(datab
     assert value['value_high']==1750 and value['threshold_high']==1950
     assert result['decisions'][0]['code']=='pending'
     _,body=NotificationService._format_message(notifier.sent[0],'','',[])
-    assert '小花参考，无对应扣费，按0计算' in body
+    assert '小花参考，待确认' in body and '本次扣费：无对应扣费，按0计算' in body
     assert '无法计价' not in body and '待确认：' not in body
     await service.process_items([item],Rules(),'iPhone 14',True,'256',expected_model='14')
     assert len(notifier.sent)==1

@@ -238,7 +238,7 @@ def test_pending_push_keeps_product_status_and_value_without_review_reasons():
     markdown = NotificationService._format_webhook_content(item, '待确认原因不应重复输出', '', [])
     assert title == '【待确认】iPhone 15 Pro 256G'
     for body in (plain, markdown):
-        assert '成色待确认' in body and '回收参考：≤ ¥4500（小花参考，未扣费，待确认）' in body
+        assert '成色待确认' in body and '回收参考：≤ ¥4500（小花参考，待确认）' in body
         assert item['item_url'] in body
         assert '待确认：' not in body and '待确认原因不应重复输出' not in body
         assert all(reason not in body for reason in assessment['uncertainties'])
@@ -248,25 +248,89 @@ def test_pending_push_keeps_product_status_and_value_without_review_reasons():
 
 @pytest.mark.parametrize('deductions,summary', [
     ([], '未扣费'),
-    ([{'name':'弹电','min':300,'max':300}], '已扣 ¥300'),
-    ([{'name':'弹电','min':100,'max':300}], '按最低扣费 ¥100参考'),
-    ([{'name':'弹电','min':100,'max':300},{'name':'港澳版','min':200,'max':200}], '按最低扣费 ¥300参考'),
-    ([{'name':'轻微老化','min':100,'max':100,'open_ended':True}], '至少扣 ¥100'),
+    ([{'name':'弹电','min':300,'max':300}], '¥300'),
+    ([{'name':'弹电','min':100,'max':300}], '¥100（按区间最低值）'),
+    ([{'name':'弹电','min':100,'max':300},{'name':'港澳版','min':200,'max':200}], '¥300（按区间最低值）'),
+    ([{'name':'轻微老化','min':100,'max':100,'open_ended':True}], '至少 ¥100'),
 ])
-def test_reference_price_inline_explains_its_actual_deduction_basis(deductions,summary):
+def test_reference_price_and_deduction_basis_use_separate_lines(deductions,summary):
     assessment={'status':'pending','grade':None,'reference_grade':'小花','base_price':1300,
                 'value_low':None,'value_high':1000,'deductions':deductions}
     item={**REFERENCE_ITEM,'smart_assessment':assessment}
     for body in [NotificationService._format_message(item,'','',[])[1],
                  NotificationService._format_webhook_content(item,'','',[])]:
-        assert f'回收参考：≤ ¥1000（小花参考，{summary}，待确认）' in body
-        if deductions:assert '扣费：基础 ¥1300' in body
+        assert '回收参考：≤ ¥1000（小花参考，待确认）' in body
+        assert f'本次扣费：{summary}' in body
+        if deductions:assert '基础回收价：¥1300' in body and '扣费明细：' in body
         assert '待确认：' not in body
 
 
-def test_confirmed_value_also_marks_deductions_next_to_price():
+def test_confirmed_value_keeps_its_deduction_on_a_separate_line():
     item={**REFERENCE_ITEM,'smart_assessment':{'status':'matched','grade':'小花','base_price':4500,
           'value_low':4200,'value_high':4200,'deductions':[{'name':'弹电','min':300,'max':300}]}}
     _,plain=NotificationService._format_message(item,'','',[])
     markdown=NotificationService._format_webhook_content(item,'','',[])
-    assert '回收估值：¥4200（已扣 ¥300）' in plain and '回收估值：¥4200（已扣 ¥300）' in markdown
+    for body in (plain,markdown):
+        assert '回收估值：¥4200' in body and '本次扣费：¥300' in body
+        assert '需议价 ¥450' in body
+
+
+PENDING_WITH_RANGED_FEES = {
+    **REFERENCE_ITEM, 'price': 2200,
+    'smart_assessment': {
+        'status': 'pending', 'grade': '靓机', 'reference_grade': '靓机',
+        'base_price': 2550, 'value_low': None, 'value_high': 2150,
+        'deductions': [
+            {'name': '电池低于90%', 'min': 50, 'max': 50},
+            {'name': '靓机小花弹电/弹屏', 'min': 350, 'max': 700},
+        ],
+        'uncertainties': ['部件类型尚未确定'],
+    },
+}
+
+
+def test_ranged_fee_reference_and_each_deduction_render_as_individual_lines():
+    import copy
+    item=copy.deepcopy(PENDING_WITH_RANGED_FEES)
+    original=copy.deepcopy(item)
+    expected=(
+        '回收参考：≤ ¥2150（靓机参考，待确认）\n\n'
+        '基础回收价：¥2550\n'
+        '扣费明细：\n'
+        '· 电池低于90%：−¥50\n'
+        '· 靓机小花弹电/弹屏：−¥350～700\n'
+        '本次扣费：¥400（按区间最低值）\n\n'
+        '地区：厦门'
+    )
+    for body in (NotificationService._format_message(item,'','',[])[1],
+                 NotificationService._format_webhook_content(item,'','',[])):
+        assert expected in body.replace('  \n','\n')
+        assert '部件类型尚未确定' not in body
+        assert '按最低扣费 ¥400参考' not in body and '；靓机小花' not in body
+    assert item==original
+
+
+async def test_ranged_fee_line_breaks_survive_plain_and_markdown_transports(monkeypatch):
+    from urllib.parse import unquote
+    captured={}
+    def handler(request):
+        host=request.url.host
+        if host=='bark.example.test':captured['bark']=unquote(request.url.raw_path.decode())
+        elif host=='push.example.test':captured['webhook']=json.loads(request.content)['content']
+        else:pytest.fail('Unexpected destination')
+        return httpx.Response(200,json={'ok':True})
+    real=httpx.AsyncClient
+    monkeypatch.setattr(notifications.httpx,'AsyncClient',lambda **kwargs:real(transport=httpx.MockTransport(handler),**kwargs))
+    service=NotificationService(replace(settings,ntfy_topic_url='',
+        bark_url='https://bark.example.test/key',webhook_url='https://push.example.test/hook',
+        webhook_headers='',webhook_body='{"title":"{{title}}","content":"{{content}}"}',
+        webhook_method='POST',webhook_content_type='JSON',webhook_query_parameters=''))
+    result=await service.send(PENDING_WITH_RANGED_FEES,'')
+    assert all(channel['success'] for channel in result.values()),result
+    assert set(captured)=={'bark','webhook'}
+    for body in captured.values():
+        lines=[line.rstrip() for line in body.splitlines()]
+        assert '· 电池低于90%：−¥50' in lines
+        assert '· 靓机小花弹电/弹屏：−¥350～700' in lines
+        assert '本次扣费：¥400（按区间最低值）' in lines
+        assert not any('\\n' in line for line in lines)

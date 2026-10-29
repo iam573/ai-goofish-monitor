@@ -25,9 +25,29 @@ def test_clear_overseas_phone_is_filtered_from_title(text):
 
 @pytest.mark.parametrize('text', ['国行','未说明版本','不是美版，国行','非美版，国行','不确定是否美版','可能是日版',
                                  '国行，换了美版原装屏','国行，换过美版电池','国行，送美版手机壳',
-                                 '国行，不收美版','国行，支持日版配件','美版和国行都有，版本需确认'])
+                                 '国行，不收美版','国行，支持日版配件'])
 def test_unknown_denied_uncertain_or_component_versions_are_not_filtered(text):
     assert scope_rejection(item(title=f'iPhone 15 Pro 256G {text}'),SmartConfig()) is None
+
+
+@pytest.mark.parametrize('text', [
+    '美版和国行都有，版本需确认',
+    '美版有面容解锁，美版双卡双待全网通5g\n国行双卡双待插卡直接使用',
+    '国行双卡双待\n美国版无锁，插卡即用',
+    '港版、国行均有现货',
+])
+@pytest.mark.parametrize('detail', [False, True])
+def test_domestic_claim_does_not_cancel_explicit_blocked_versions(text,detail):
+    raw=item(description=text) if detail else item(title=f'iPhone 15 Pro 256G {text}')
+    code,reason=scope_rejection(raw,SmartConfig(),detail=detail)
+    assert code=='variant_filtered' and ('美版' in reason or '港澳版' in reason)
+
+
+def test_mixed_versions_still_respect_selected_exclusions():
+    raw=item(title='iPhone 15 Pro 256G 美版，国行双卡双待')
+    assert scope_rejection(raw,SmartConfig(blocked_variants=['港澳版'])) is None
+    assert scope_rejection(raw,SmartConfig(blocked_variants=['美版']))[0]=='variant_filtered'
+    assert scope_rejection(raw,SmartConfig(exclude_overseas=False)) is None
 
 
 def test_enabled_toggle_selected_versions_and_detail_parameters():
@@ -41,14 +61,14 @@ def test_enabled_toggle_selected_versions_and_detail_parameters():
 
 
 @pytest.mark.parametrize('seller', ['示例通讯','示例通信','示例手机专卖','示例手机店','二手机优选铺','手机回收置换',
-                                   '卖手机的示例','示例数码','示例数码1号店','示例数码厦门店','示例严选数码…'])
+                                   '卖手机的示例','示例严选数码…'])
 def test_business_nickname_patterns_are_filtered(seller):
     rejection=scope_rejection(item(seller_name=seller),SmartConfig())
     assert rejection[0]=='seller_filtered' and seller in rejection[1]
 
 
 @pytest.mark.parametrize('seller', ['', '普通个人', '玩数码的朋友', '电器数码爱好者', '爱玩数码的人', '数码追梦人',
-                                   '科技馆可乐', '示例科技', '喜欢手机的我', '二手车专卖', '数码…'])
+                                   '示例数码', '示例数码1号店', '示例数码厦门店', '科技馆可乐', '示例科技', '喜欢手机的我', '二手车专卖', '数码…'])
 def test_nickname_unknown_hobbyist_and_generic_technology_are_retained(seller):
     assert scope_rejection(item(seller_name=seller,is_fish_shop=True),SmartConfig()) is None
     assert scope_rejection(item(description='在示例通讯买的手机，个人自用'),SmartConfig(),detail=True) is None
@@ -57,7 +77,7 @@ def test_nickname_unknown_hobbyist_and_generic_technology_are_retained(seller):
 def test_nickname_keyword_editing_literal_matching_normalization_and_toggles():
     assert scope_rejection(item(seller_name='示\u200b例 通信'),SmartConfig())[0]=='seller_filtered'
     assert scope_rejection(item(seller_name='示例通讯'),SmartConfig(exclude_trade_sellers=False)) is None
-    assert scope_rejection(item(seller_name='示例数码'),SmartConfig(exclude_digital_shop_names=False)) is None
+    assert scope_rejection(item(seller_name='示例数码'),SmartConfig(seller_exclude_keywords=['示例数码']))[0]=='seller_filtered'
     config=SmartConfig(seller_exclude_keywords=['MY SHOP', 'a+b'])
     assert scope_rejection(item(seller_name='my\u200b shop'),config)[0]=='seller_filtered'
     assert scope_rejection(item(seller_name='a+b的店'),config)[0]=='seller_filtered'
@@ -82,7 +102,10 @@ def test_list_prefilter_and_detail_pricing_use_identical_scope_decisions():
 
 @pytest.mark.parametrize('smart_enabled',[False,True])
 @pytest.mark.parametrize('raw,code',[(item(seller_name='示例通讯'),'seller_filtered'),
-                                   (item(description='轻微划痕，美版无锁'),'variant_filtered')])
+                                   (item(description='轻微划痕，美版无锁'),'variant_filtered'),
+                                   (item(title='iPhone 15 Pro 256G 美版有面容解锁',
+                                         description='美版双卡双待全网通5g\n国行双卡双待插卡直接使用'),
+                                    'variant_filtered')])
 async def test_scope_filters_block_notifications_in_fixed_and_description_modes(database,smart_enabled,raw,code):
     database.state_set('smart_config',SmartConfig(enabled=smart_enabled).model_dump())
     add_quotes(database,[('15 Pro','256','小花',3000)])
@@ -107,10 +130,14 @@ def test_run_card_keeps_list_seller_for_the_saved_filter_reason(database):
     assert row['code']=='seller_filtered' and '示例通讯' in row['decision']
 
 
-async def test_changed_scope_blocks_delivery_of_previously_assessed_business_item(database):
+@pytest.mark.parametrize('raw,old_config',[
+    (item(seller_name='示例通讯'),SmartConfig(exclude_trade_sellers=False)),
+    (item(title='iPhone 15 Pro 256G 美版无锁',description='轻微划痕，国行双卡双待'),
+     SmartConfig(exclude_overseas=False)),
+])
+async def test_changed_scope_blocks_delivery_of_previously_assessed_item(database,raw,old_config):
     add_quotes(database,[('15 Pro','256','小花',3000)])
-    database.state_set('smart_config',SmartConfig(exclude_trade_sellers=False).model_dump())
-    raw=item(seller_name='示例通讯')
+    database.state_set('smart_config',old_config.model_dump())
     record=await MonitorService(database,None,None).smart.assess(raw,Rules(),'15 Pro','256',True)
     assert record['status'] in {'pending','matched'}
     database.state_set('smart_config',SmartConfig().model_dump())
@@ -130,7 +157,7 @@ async def test_scope_settings_api_roundtrip_and_validation(database,monkeypatch)
     initial=await api.smart_config()
     assert initial['exclude_overseas'] and initial['exclude_trade_sellers']
     fields=SmartConfig(exclude_overseas=False,blocked_variants=['美版','日版'],
-                       seller_exclude_keywords=['示例通讯','示例数码'],exclude_digital_shop_names=False).model_dump()
+                       seller_exclude_keywords=['示例通讯','示例数码']).model_dump()
     await api.save_smart_config(api.SmartConfigPayload(**fields))
     saved=await api.smart_config()
     assert all(saved[key]==value for key,value in fields.items())
@@ -139,3 +166,11 @@ async def test_scope_settings_api_roundtrip_and_validation(database,monkeypatch)
     assert client.put('/api/smart/config',json={**fields,'seller_exclude_keywords':['\u200b']}).status_code==422
     monkeypatch.setattr(api,'monitor_service',SimpleNamespace(busy=True,smart=service.smart))
     assert (await api.save_smart_config(api.SmartConfigPayload(**fields)))['blocked_variants']==['美版','日版']
+
+
+@pytest.mark.parametrize('enabled', [False, True])
+def test_retired_digital_shop_rule_is_ignored_in_saved_config(enabled):
+    config=SmartConfig.model_validate({'exclude_digital_shop_names':enabled,'seller_exclude_keywords':['通讯']})
+    assert 'exclude_digital_shop_names' not in config.model_dump()
+    assert scope_rejection(item(seller_name='示例数码厦门店'),config) is None
+    assert scope_rejection(item(seller_name='示例通讯'),config)[0]=='seller_filtered'
