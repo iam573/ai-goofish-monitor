@@ -46,6 +46,8 @@ class Settings:
     appium_server_url: str = os.environ.get("APPIUM_SERVER_URL", "http://127.0.0.1:4723").rstrip("/")
     ios_wda_bundle_id: str = os.environ.get("IOS_WDA_BUNDLE_ID", "").strip()
     ios_wda_derived_data_path: Path = _path_env("IOS_WDA_DERIVED_DATA_PATH", "/tmp/goofish-wda-probe")
+    ios_wda_auto_renew: bool = os.environ.get("IOS_WDA_AUTO_RENEW", "true").lower() in {"true", "1", "yes"}
+    ios_wda_team_id: str = os.environ.get("IOS_WDA_TEAM_ID", "").strip()
     proxy_runtime: Path = _path_env("APP_MONITOR_PROXY_RUNTIME", ".runtime/proxy")
     proxy_listen_host: str = os.environ.get("APP_MONITOR_PROXY_HOST", "0.0.0.0")
     proxy_port: int = int(os.environ.get("APP_MONITOR_PROXY_PORT", "8899"))

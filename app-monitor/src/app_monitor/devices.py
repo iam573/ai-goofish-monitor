@@ -6,7 +6,9 @@ import json
 import ipaddress
 import logging
 import subprocess
+import tempfile
 from dataclasses import dataclass
+from pathlib import Path
 
 from .db import Database, utc_now
 
@@ -28,6 +30,22 @@ class Device:
 
     def as_dict(self, selected: bool = False) -> dict:
         return {**self.__dict__, "selected": selected}
+
+
+def _probe_device(identifier: str) -> dict:
+    """Wake an existing paired connection without initiating a new pairing."""
+    try:
+        with tempfile.TemporaryDirectory(prefix="app-monitor-device-") as directory:
+            output = Path(directory) / "device.json"
+            subprocess.run(
+                ["xcrun", "devicectl", "device", "info", "details", "--device", identifier,
+                 "--timeout", "5", "--json-output", str(output)],
+                capture_output=True, text=True, timeout=7, check=True,
+            )
+            payload = json.loads(output.read_text())
+            return payload.get("result") or {}
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return {}
 
 
 def discover_devices() -> list[Device]:
@@ -54,6 +72,17 @@ def discover_devices() -> list[Device]:
         if hardware.get("deviceType") != "iPhone" or not physical or not udid:
             continue
         pairing = connection.get("pairingState")
+        if pairing == "paired" and raw.get("identifier") and (
+            (connection.get("tunnelState") != "connected"
+             and connection.get("state") != "connected")
+            or props.get("developerModeStatus") is None
+        ):
+            fresh = _probe_device(str(raw["identifier"]))
+            # Only accept details for the exact device requested.
+            if fresh.get("hardwareProperties", {}).get("udid") == udid:
+                connection = fresh.get("connectionProperties") or connection
+                props = {**props, **(fresh.get("deviceProperties") or {})}
+                pairing = connection.get("pairingState")
         connected = (connection.get("tunnelState") == "connected" or connection.get("state") == "connected")
         if pairing and pairing != "paired":
             connected = False
@@ -62,6 +91,11 @@ def discover_devices() -> list[Device]:
             status = "配对中，请在 Xcode 和手机上完成确认"
         elif pairing and pairing != "paired":
             status = "未配对，请在 Xcode 中连接并信任设备"
+        elif props.get("developerModeStatus") == "disabled":
+            connected = False
+            status = "开发者模式未开启，请在手机设置中开启并重启确认"
+        elif not connected and pairing == "paired":
+            status = "已配对，开发连接未建立，请解锁手机并检查 Xcode 连接"
         devices.append(Device(
             id=f"ios:{udid}", name=str(props.get("name") or hardware.get("marketingName") or "iPhone"),
             kind="ios", connected=connected,

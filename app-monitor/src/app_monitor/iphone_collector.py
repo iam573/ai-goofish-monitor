@@ -747,6 +747,12 @@ def _prepare_pasteboard(driver: Any, *, settings: Settings) -> str:
 class IPhoneCollector:
     def __init__(self, settings: Settings):
         self.settings = settings
+        self.wda_maintenance = None
+
+    def _open_session(self, udid, factory):
+        if self.wda_maintenance is not None:
+            return self.wda_maintenance.connect(udid, factory)
+        return factory()
 
     @staticmethod
     def _wait_for_source(
@@ -823,10 +829,11 @@ class IPhoneCollector:
         driver = None
         try:
             try:
-                driver = webdriver.Remote(
+                emit_safely(on_items, stage="检查手机连接，必要时自动恢复")
+                driver = self._open_session(udid, lambda: webdriver.Remote(
                     self.settings.appium_server_url,
                     options=XCUITestOptions().load_capabilities(capabilities),
-                )
+                ))
             except Exception as exc:
                 raise RuntimeError(f"iPhone Appium 连接失败（检查服务、WDA 和 Inspector 会话）：{exc}") from exc
             try:

@@ -126,6 +126,7 @@ button.block { width: 100%; }
 .step strong { font-size: 15px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .step-sub { color: var(--muted); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .step.warn .step-sub { color: var(--warn); }
+.step [data-retry-search] { align-self: flex-start; margin-top: 6px; }
 
 /* ---------- 页面 ---------- */
 .panel { display: none; }

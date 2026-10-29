@@ -100,7 +100,8 @@ class IPhoneProxyCollector(IPhoneCollector):
                 "appium:settings": {"waitForIdleTimeout": 0.5, "animationCoolOffTimeout": 0.3}}
         if os_version:
             caps["appium:platformVersion"] = os_version
-        return webdriver.Remote(self.settings.appium_server_url, options=XCUITestOptions().load_capabilities(caps))
+        return self._open_session(udid, lambda: webdriver.Remote(
+            self.settings.appium_server_url, options=XCUITestOptions().load_capabilities(caps)))
 
     def _drag_list(self, driver):
         source = driver.page_source
@@ -250,6 +251,7 @@ class IPhoneProxyCollector(IPhoneCollector):
         result, driver, setup = CollectResult(items=[]), None, []
         with self.proxy.session(client_ip):
             try:
+                emit_safely(on_items, stage="检查手机连接，必要时自动恢复")
                 driver = self._connect(udid, os_version)
                 emit_safely(on_items, stage="代理模式 · 搜索", storage=None)
                 inherited = self._search(driver, keyword, region_hint, setup)

@@ -35,6 +35,33 @@ async def _noop():
     return None
 
 
+async def test_retry_search_api_returns_result_and_clear_errors(monkeypatch):
+    import pytest
+    from fastapi import HTTPException
+
+    async def retry_ok():
+        return {"model": "16", "run_id": 7}
+
+    monkeypatch.setattr(api.monitor_service, "retry_failed", retry_ok)
+    assert await api.retry_search() == {"model": "16", "run_id": 7}
+
+    async def blocked():
+        raise ValueError("正在搜索，请稍后再试")
+
+    monkeypatch.setattr(api.monitor_service, "retry_failed", blocked)
+    with pytest.raises(HTTPException) as error:
+        await api.retry_search()
+    assert error.value.status_code == 409
+
+    async def failed():
+        raise RuntimeError("手机连接失败")
+
+    monkeypatch.setattr(api.monitor_service, "retry_failed", failed)
+    with pytest.raises(HTTPException) as error:
+        await api.retry_search()
+    assert error.value.status_code == 502 and error.value.detail == "手机连接失败"
+
+
 async def test_device_channel_api_exposes_both_modes_and_only_the_public_ca(database, monkeypatch, tmp_path):
     from types import SimpleNamespace
     import app_monitor.devices as module

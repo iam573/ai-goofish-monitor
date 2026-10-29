@@ -1,7 +1,69 @@
 import json
+import subprocess
+from pathlib import Path
 from types import SimpleNamespace
 
 from app_monitor.devices import discover_devices
+
+
+def test_paired_device_discovery_wakes_connection_and_checks_developer_mode(monkeypatch):
+    import copy
+
+    raw = {
+        "identifier": "core-device-id",
+        "hardwareProperties": {"udid": "phone", "deviceType": "iPhone", "reality": "physical"},
+        "deviceProperties": {"name": "iPhone"},
+        "connectionProperties": {"pairingState": "paired", "tunnelState": "disconnected"},
+    }
+    fresh = copy.deepcopy(raw)
+    fresh["connectionProperties"]["tunnelState"] = "connected"
+    fresh["deviceProperties"]["developerModeStatus"] = "enabled"
+    probes = []
+
+    def run(args, **kwargs):
+        if args[2:4] == ["list", "devices"]:
+            return SimpleNamespace(stdout=json.dumps({"result": {"devices": [raw]}}))
+        probes.append(args)
+        assert args[args.index("--device") + 1] == "core-device-id"
+        assert kwargs["timeout"] == 7
+        Path(args[-1]).write_text(json.dumps({"result": fresh}))
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr("app_monitor.devices.subprocess.run", run)
+    assert discover_devices()[0].connected
+    assert len(probes) == 1
+
+    fresh["deviceProperties"]["developerModeStatus"] = "disabled"
+    found = discover_devices()[0]
+    assert not found.connected
+    assert found.connection_status.startswith("开发者模式未开启")
+
+    fresh["hardwareProperties"]["udid"] = "another-phone"
+    found = discover_devices()[0]
+    assert not found.connected
+    assert found.connection_status.startswith("已配对，开发连接未建立")
+
+    def timeout(args, **kwargs):
+        if args[2:4] == ["list", "devices"]:
+            return run(args, **kwargs)
+        raise subprocess.TimeoutExpired(args, 7)
+
+    monkeypatch.setattr("app_monitor.devices.subprocess.run", timeout)
+    assert not discover_devices()[0].connected
+
+
+def test_connected_phone_with_disabled_developer_mode_is_not_ready(monkeypatch):
+    raw = {
+        "identifier": "core-device-id",
+        "hardwareProperties": {"udid": "phone", "deviceType": "iPhone", "reality": "physical"},
+        "deviceProperties": {"developerModeStatus": "disabled"},
+        "connectionProperties": {"pairingState": "paired", "tunnelState": "connected"},
+    }
+    monkeypatch.setattr("app_monitor.devices.subprocess.run", lambda *a, **k:
+                        SimpleNamespace(stdout=json.dumps({"result": {"devices": [raw]}})))
+    found = discover_devices()[0]
+    assert not found.connected
+    assert "开发者模式未开启" in found.connection_status
 
 
 def test_discovery_only_marks_connected_physical_iphones_online(monkeypatch):

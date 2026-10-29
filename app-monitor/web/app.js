@@ -78,6 +78,8 @@ function quoteSyncDate(batch) {
   return (batch?.fetched_at || batch?.quote_date || "").slice(0, 10);
 }
 
+let retryingSearch = false;
+
 async function loadOverview() {
   const value = await api("/api/overview");
   state.overview = value;
@@ -111,6 +113,7 @@ async function loadOverview() {
     main: value.busy ? (value.live ? `正在搜索 iPhone ${value.live.model}` : "正在搜索…") : schedule.active ? (schedule.next_label ? `下一个：iPhone ${schedule.next_label}` : "本轮已搜完") : "未在搜索",
     sub: value.live ? `${value.live.stage} · 已看 ${value.live.observed} 件 · 命中 ${value.live.matched}` : schedule.active ? `${rules.search_start}–${rules.search_end} · ${schedule.units} 个搜索单元 · 今日 ${value.runs_today} 次` : schedule.reason,
     tone: value.busy || schedule.active ? "ok" : (rules.enabled ? "warn" : "off"),
+    retry: schedule.can_retry && !value.busy,
   };
   const dealStep = {
     label: "④ 命中推送",
@@ -123,7 +126,7 @@ async function loadOverview() {
   badge.textContent = value.deals_today;
   badge.title = `今日命中 ${value.deals_today} 件`;
   document.querySelector("#pipeline").innerHTML = [quoteStep, ruleStep, searchStep, dealStep].map(step =>
-    `<div class="step ${step.tone}"><span class="step-label">${step.label}</span><strong>${escapeHtml(step.main)}</strong><span class="step-sub">${escapeHtml(step.sub)}</span></div>`
+    `<div class="step ${step.tone}"><span class="step-label">${step.label}</span><strong>${escapeHtml(step.main)}</strong><span class="step-sub">${escapeHtml(step.sub)}</span>${step.retry ? `<button type="button" class="secondary compact" data-retry-search ${retryingSearch ? "disabled" : ""}>${retryingSearch ? "正在重试…" : "立即重试"}</button>` : ""}</div>`
   ).join("");
 }
 
@@ -1252,6 +1255,21 @@ function showPanel(panelId, { load = true } = {}) {
 }
 
 document.querySelectorAll(".tab").forEach(button => button.addEventListener("click", () => showPanel(button.dataset.panel)));
+document.querySelector("#pipeline").addEventListener("click", async event => {
+  const button = event.target.closest("[data-retry-search]");
+  if (!button || retryingSearch) return;
+  retryingSearch = true;
+  button.disabled = true;
+  button.textContent = "正在重试…";
+  try {
+    await api("/api/search/retry", { method: "POST" });
+    toast("重试搜索已完成");
+  } catch (error) { toast(error.message, true); }
+  finally {
+    retryingSearch = false;
+    await Promise.all([loadOverview(), loadTargets()]).catch(error => toast(error.message, true));
+  }
+});
 window.addEventListener("hashchange", () => showPanel(`${location.hash.slice(1)}-panel`));
 
 document.querySelectorAll("[data-refresh]").forEach(button => button.addEventListener("click", () =>

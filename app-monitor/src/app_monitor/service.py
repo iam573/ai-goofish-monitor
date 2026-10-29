@@ -21,6 +21,7 @@ from .proxy_capture import ProxyCapture
 from .iphone_proxy_collector import IPhoneProxyCollector
 from .matching import MatchDecision, evaluate
 from .notifications import NotificationService, notification_result_text
+from .wda_maintenance import WdaMaintenance
 from .quotes import quote_reference, latest_entries
 from .rules import (
     Rules,
@@ -103,6 +104,9 @@ class MonitorService:
         self.iphone_collector = IPhoneCollector(self.settings)
         self.proxy = ProxyCapture(self.settings)
         self.iphone_proxy_collector = IPhoneProxyCollector(self.settings, self.proxy)
+        self.wda_maintenance = WdaMaintenance(self.settings, database)
+        self.iphone_collector.wda_maintenance = self.wda_maintenance
+        self.iphone_proxy_collector.wda_maintenance = self.wda_maintenance
         self.smart = SmartService(database, self.settings)
         self.notifications = notifications
         self._lock = asyncio.Lock()
@@ -123,6 +127,7 @@ class MonitorService:
         state: dict[str, Any] = {
             "active": False, "reason": "", "next_model": None, "next_storage": None,
             "next_label": None, "targets": len({unit["model"] for unit in units}), "units": len(units),
+            "can_retry": False,
         }
         if not rules.enabled:
             state["reason"] = "监控已暂停"
@@ -134,6 +139,7 @@ class MonitorService:
             state["reason"] = f"不在搜索时段 {rules.search_start}–{rules.search_end}"
         elif self._failure_paused(now):
             state["reason"] = f"连续 {FAILURE_PAUSE_AFTER} 次搜索失败，暂停 10 分钟"
+            state["can_retry"] = True
         else:
             state["active"] = True
             state["reason"] = "搜索中"
@@ -172,14 +178,31 @@ class MonitorService:
         return min(due, key=lambda value: value[0])[1] if due else None
 
     def _failure_paused(self, now: datetime) -> bool:
+        reset_after = self.database.state_get("failure_pause_reset_after", 0)
         with self.database.connect() as connection:
             rows = connection.execute(
-                "SELECT ok, started_at FROM search_runs WHERE ok IS NOT NULL ORDER BY id DESC LIMIT ?",
-                (FAILURE_PAUSE_AFTER,),
+                "SELECT ok, started_at FROM search_runs WHERE ok IS NOT NULL AND id > ? ORDER BY id DESC LIMIT ?",
+                (reset_after, FAILURE_PAUSE_AFTER),
             ).fetchall()
         if len(rows) < FAILURE_PAUSE_AFTER or any(row["ok"] for row in rows):
             return False
         return now - datetime.fromisoformat(rows[0]["started_at"]) < FAILURE_PAUSE
+
+    async def retry_failed(self) -> dict[str, Any]:
+        """Reset the current failure streak and immediately retry an enabled model."""
+        if self.busy:
+            raise ValueError("正在搜索，请稍后再试")
+        async with self._lock:
+            state = self.schedule_state()
+            if not state["can_retry"]:
+                raise ValueError(f"当前无法重试：{state['reason']}")
+            units = search_units(self.database, load_rules(self.database))
+            with self.database.connect() as connection:
+                latest = connection.execute("SELECT id, model FROM search_runs ORDER BY id DESC LIMIT 1").fetchone()
+            unit = next((unit for unit in units if unit["model"] == latest["model"]), units[0])
+            self.database.state_set("failure_pause_reset_after", latest["id"])
+            with self.smart.run_settings():
+                return await self._run_model(unit["model"], None, "manual", None, False, False)
 
     def last_runs(self) -> dict[str, dict[str, Any]]:
         """每款机型最近一次搜索，容量结果保存在该次运行的 passes 中。"""
@@ -424,6 +447,10 @@ class MonitorService:
                     raise RuntimeError("仅支持 iPhone；Mac 采集已禁用")
                 if device is None or not device.connected:
                     status = device.connection_status if device else "未连接"
+                    if device and "开发者模式未开启" in status:
+                        self.wda_maintenance.attention(device.udid, "Developer Mode disabled")
+                    elif device and ("未配对" in status or "配对中" in status):
+                        self.wda_maintenance.attention(device.udid, "untrusted device")
                     raise RuntimeError(f"iPhone {status or '未连接'}；已保留勾选，重连后可继续使用")
                 channel = channels[device_id]
                 adapter, options = self.iphone_collector, {}

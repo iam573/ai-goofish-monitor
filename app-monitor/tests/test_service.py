@@ -369,6 +369,77 @@ async def test_run_due_runs_one_unit(database):
         assert connection.execute("SELECT COUNT(*) FROM search_runs").fetchone()[0] == 1
 
 
+async def test_retry_failed_search_runs_immediately_and_restarts_failure_streak(database):
+    collector = FakeCollector(error="连接失败")
+    service, _ = setup(database, collector=collector, disabled_models=["15 Pro"])
+    for _ in range(3):
+        with pytest.raises(RuntimeError):
+            await service.run_model("16")
+    assert service.schedule_state()["can_retry"]
+    assert service.schedule_state()["next_model"] is None  # Normal interval has not elapsed.
+    # A failed retry counts as the first new failure, preserving all history.
+    with pytest.raises(RuntimeError):
+        await service.retry_failed()
+    assert not service.schedule_state()["can_retry"]
+    assert len(collector.calls) == 4
+    replacement = MonitorService(database, None, None)
+    assert not replacement.schedule_state()["can_retry"]
+    for _ in range(2):
+        with pytest.raises(RuntimeError):
+            await service.run_model("16")
+    assert service.schedule_state()["can_retry"]
+    collector.error = None
+    result = await service.retry_failed()
+    assert result["model"] == "16"
+    assert not service.schedule_state()["can_retry"]
+    with database.connect() as connection:
+        assert connection.execute("SELECT COUNT(*) FROM search_runs").fetchone()[0] == 7
+        assert connection.execute("SELECT trigger FROM search_runs ORDER BY id DESC LIMIT 1").fetchone()[0] == "manual"
+    with pytest.raises(ValueError):
+        await service.retry_failed()
+
+
+@pytest.mark.parametrize("blocked", ["busy", "disabled", "outside_window", "no_devices", "no_units"])
+async def test_retry_does_not_override_other_search_constraints(database, blocked):
+    service, _ = setup(database, collector=FakeCollector(error="连接失败"))
+    for _ in range(3):
+        with pytest.raises(RuntimeError):
+            await service.run_model("16")
+    rules = load_rules(database)
+    if blocked == "busy":
+        await service._lock.acquire()
+    elif blocked == "disabled":
+        rules.enabled = False
+    elif blocked == "outside_window":
+        # Choose a one-minute window starting two hours from now.
+        start = datetime.now().astimezone() + timedelta(hours=2)
+        rules.search_start = start.strftime("%H:%M")
+        rules.search_end = (start + timedelta(minutes=1)).strftime("%H:%M")
+    elif blocked == "no_devices":
+        database.state_set("collector_devices", [])
+    else:
+        rules.disabled_models = ["15 Pro", "16"]
+    save_rules(database, rules)
+    try:
+        with pytest.raises(ValueError):
+            await service.retry_failed()
+        assert database.state_get("failure_pause_reset_after", 0) == 0
+    finally:
+        if blocked == "busy":
+            service._lock.release()
+
+
+async def test_developer_mode_intervention_stays_local_without_push(database, monkeypatch):
+    service, notifier = setup(database)
+    monkeypatch.setattr("app_monitor.service.discover_devices", lambda: [
+        Device("ios:test-phone", "测试手机", "ios", False, "test-phone", "27.0", "开发者模式未开启")])
+    for _ in range(2):
+        with pytest.raises(RuntimeError, match="开发者模式"):
+            await service.run_model("16")
+    assert notifier.sent == []
+    assert "开发者模式" in database.state_get(service.wda_maintenance._key("test-phone"))["action"]
+
+
 async def test_push_includes_full_quote_reference(database):
     service, notifier = setup(database)
     await service.process_items(

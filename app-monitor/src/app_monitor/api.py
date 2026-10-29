@@ -151,7 +151,7 @@ async def device_screenshot(device_id: str) -> Response:
     if device is None:
         raise HTTPException(404, "未找到这台iPhone，请刷新设备列表")
     if not device.connected:
-        raise HTTPException(409, "iPhone未连接，请连接手机后刷新设备列表")
+        raise HTTPException(409, f"iPhone{device.connection_status or '未连接'}，请处理后刷新设备列表")
     try:
         data = await asyncio.to_thread(capture_screenshot, device.udid)
     except ScreenshotBusy as exc:
@@ -365,6 +365,16 @@ async def update_target_series(series: int, payload: TargetPayload) -> dict[str,
     rules = set_targets_enabled(database, load_rules(database), payload.enabled, series=series)
     save_rules(database, rules)
     return {"series": series, "enabled": payload.enabled}
+
+
+@app.post("/api/search/retry")
+async def retry_search() -> dict[str, Any]:
+    try:
+        return await monitor_service.retry_failed()
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(502, str(exc)) from exc
 
 
 @app.post("/api/targets/{model}/run")
