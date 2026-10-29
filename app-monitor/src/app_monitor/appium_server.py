@@ -12,6 +12,7 @@ from urllib.parse import urlparse
 from urllib.request import urlopen
 
 from .config import ROOT, Settings
+from .stop_control import checkpoint
 
 WDA_PORT = 8101
 
@@ -28,6 +29,7 @@ def _ready(url: str) -> bool:
 
 
 def ensure_appium_server(settings: Settings) -> None:
+    checkpoint()
     global _owned_process
     url = settings.appium_server_url
     if _ready(url):
@@ -53,6 +55,7 @@ def ensure_appium_server(settings: Settings) -> None:
             log_file.close()
         logger.info("已启动 Appium pid=%s log=%s", _owned_process.pid, log_path)
     for _ in range(40):
+        checkpoint()
         if _ready(url):
             return
         if _owned_process.poll() is not None:

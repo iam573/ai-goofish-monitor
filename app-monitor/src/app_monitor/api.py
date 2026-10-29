@@ -4,6 +4,7 @@ import asyncio
 import json
 from contextlib import asynccontextmanager
 from datetime import datetime
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, Literal
 
@@ -21,6 +22,7 @@ from .item_identity import has_model_evidence, item_text
 from .device_screenshot import ScreenshotBusy, capture_screenshot
 from .devices import discover_devices, selected_devices, set_selected_devices, device_channel, set_device_channel, proxy_clients, proxy_enabled
 from .notifications import NotificationService
+from .stop_control import STOP_REASON
 from .quotes import (
     APPLE_PHONE_CATEGORIES,
     GRADE_COLUMNS,
@@ -255,6 +257,7 @@ async def overview() -> dict[str, Any]:
         "quote_last_check": database.state_get("quote_last_check"),
         "schedule": monitor_service.schedule_state(),
         "busy": monitor_service.busy,
+        "stopping": monitor_service.stopping,
         "live": monitor_service.live,
         "last_run": monitor_service._run_dict(last_run) if last_run else None,
         "collector_mode": "iphone",
@@ -307,7 +310,28 @@ async def put_rules(payload: RulesPayload) -> dict[str, Any]:
         rules = save_rules(database, Rules.from_dict(payload.model_dump()))
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
+    if not rules.enabled:
+        monitor_service.request_stop()
     return _rules_view(rules)
+
+
+def _monitor_state(rules: Rules) -> dict[str, Any]:
+    return {"rules": _rules_view(rules), "busy": monitor_service.busy,
+            "stopping": monitor_service.stopping}
+
+
+@app.post("/api/monitor/start")
+async def start_monitor() -> dict[str, Any]:
+    if monitor_service.stopping:
+        raise HTTPException(409, "当前搜索正在终止，请等待退出后再开始监控")
+    return _monitor_state(save_rules(database, replace(load_rules(database), enabled=True)))
+
+
+@app.post("/api/monitor/stop")
+async def stop_monitor() -> dict[str, Any]:
+    rules = save_rules(database, replace(load_rules(database), enabled=False))
+    monitor_service.request_stop()
+    return _monitor_state(rules)
 
 
 @app.get("/api/rules/region-path")
@@ -560,7 +584,8 @@ async def runs(
     if status == "hit":
         clauses.append("EXISTS (SELECT 1 FROM run_items i WHERE i.run_id=r.id AND i.matched=1)")
     elif status == "failed":
-        clauses.append("r.ok=0")
+        clauses.append("r.ok=0 AND COALESCE(r.error, '') != ?")
+        params.append(STOP_REASON)
     elif status == "warn":
         clauses.append("r.ok=1 AND r.error IS NOT NULL")
     if model:
@@ -593,18 +618,19 @@ async def run_groups(
             SELECT model, MAX(id) AS latest_id,
                 COUNT(*) AS run_count, SUM(MAX(item_count, observed)) AS item_count,
                 SUM(hit_count) AS hit_count, SUM(new_count) AS new_count,
-                SUM(ok IS NULL) AS running_count, SUM(ok=0) AS failed_count,
+                SUM(ok IS NULL) AS running_count, SUM(ok=0 AND COALESCE(error, '') != ?) AS failed_count,
                 SUM(ok=1 AND error IS NOT NULL) AS warn_count
             FROM runs GROUP BY model
             )
             SELECT grouped.*, latest.started_at,
                 CASE WHEN latest.ok IS NULL THEN 'running'
+                     WHEN latest.error=? THEN 'stopped'
                      WHEN latest.ok=0 THEN 'failed'
                      WHEN latest.error IS NOT NULL THEN 'warn'
                      ELSE 'completed' END AS latest_status
             FROM grouped JOIN search_runs latest ON latest.id=grouped.latest_id
             ORDER BY grouped.latest_id DESC
-        """).fetchall()
+        """, (STOP_REASON, STOP_REASON)).fetchall()
     groups = rows_as_dicts(rows)
     if status == "hit":
         return [group for group in groups if group["hit_count"]]

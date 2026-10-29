@@ -9,6 +9,27 @@ from app_monitor.notifications import NotificationService
 import pytest
 
 
+async def test_stop_does_not_send_to_remaining_notification_channels(monkeypatch):
+    from threading import Event
+    from app_monitor.stop_control import stop_scope
+    event, requests = Event(), []
+
+    def handler(request):
+        requests.append(request)
+        event.set()
+        return httpx.Response(200)
+
+    real_client = httpx.AsyncClient
+    monkeypatch.setattr(notifications.httpx, "AsyncClient", lambda *a, **kw:
+                        real_client(*a, transport=httpx.MockTransport(handler), **kw))
+    service = NotificationService(replace(settings, ntfy_topic_url="https://ntfy.test/topic",
+                                          bark_url="https://bark.test/key", webhook_url="https://webhook.test/push"))
+    with stop_scope(event):
+        result = await service.send({"title": "test", "price": 10}, "test")
+    assert result == {"ntfy": {"success": True, "status_code": 200}}
+    assert len(requests) == 1
+
+
 @pytest.mark.parametrize("shop, suffix", [(True, "（鱼小铺）"), (False, ""), (None, "")])
 def test_seller_and_shop_are_shown_in_plain_and_markdown_notifications(shop, suffix):
     item = {"title": "iPhone 17 自用", "price": 4500, "seller_name": "小鱼[店铺]", "is_fish_shop": shop}

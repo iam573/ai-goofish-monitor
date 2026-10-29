@@ -79,11 +79,13 @@ function quoteSyncDate(batch) {
 }
 
 let retryingSearch = false;
+const monitorControl = { pending: null, busy: false, stopping: false, enabled: null };
 
 async function loadOverview() {
   const value = await api("/api/overview");
   state.overview = value;
   const rules = value.rules;
+  if (!monitorControl.pending) setPower(rules.enabled, value.busy, value.stopping);
   const health = document.querySelector("#health");
   health.textContent = "服务正常 · iPhone 采集";
   state.smart = value.smart;
@@ -110,10 +112,10 @@ async function loadOverview() {
   const schedule = value.schedule;
   const searchStep = {
     label: "③ 闲鱼搜索",
-    main: value.busy ? (value.live ? `正在搜索 iPhone ${value.live.model}` : "正在搜索…") : schedule.active ? (schedule.next_label ? `下一个：iPhone ${schedule.next_label}` : "本轮已搜完") : "未在搜索",
+    main: value.stopping ? "正在终止监控…" : value.busy ? (value.live ? `正在搜索 iPhone ${value.live.model}` : "正在搜索…") : !rules.enabled ? "监控已停止" : schedule.can_retry ? "搜索暂时暂停" : schedule.active ? (schedule.next_label ? `下一个：iPhone ${schedule.next_label}` : "本轮已搜完") : "未在搜索",
     sub: value.live ? `${value.live.stage} · 已看 ${value.live.observed} 件 · 命中 ${value.live.matched}` : schedule.active ? `${rules.search_start}–${rules.search_end} · ${schedule.units} 个搜索单元 · 今日 ${value.runs_today} 次` : schedule.reason,
     tone: value.busy || schedule.active ? "ok" : (rules.enabled ? "warn" : "off"),
-    retry: schedule.can_retry && !value.busy,
+    retry: schedule.can_retry && !value.busy && !value.stopping,
   };
   const dealStep = {
     label: "④ 命中推送",
@@ -126,7 +128,7 @@ async function loadOverview() {
   badge.textContent = value.deals_today;
   badge.title = `今日命中 ${value.deals_today} 件`;
   document.querySelector("#pipeline").innerHTML = [quoteStep, ruleStep, searchStep, dealStep].map(step =>
-    `<div class="step ${step.tone}"><span class="step-label">${step.label}</span><strong>${escapeHtml(step.main)}</strong><span class="step-sub">${escapeHtml(step.sub)}</span>${step.retry ? `<button type="button" class="secondary compact" data-retry-search ${retryingSearch ? "disabled" : ""}>${retryingSearch ? "正在重试…" : "立即重试"}</button>` : ""}</div>`
+    `<div class="step ${step.tone}"><div class="step-head"><span class="step-label">${step.label}</span>${step.retry ? `<button type="button" class="step-retry" data-retry-search aria-label="立即重试搜索" aria-busy="${retryingSearch}" ${retryingSearch ? "disabled" : ""}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 7v5h-5M20 12a8 8 0 1 0-2 5.3"/></svg><span data-retry-label>${retryingSearch ? "重试中" : "立即重试"}</span></button>` : ""}</div><strong>${escapeHtml(step.main)}</strong><span class="step-sub" title="${escapeHtml(step.sub)}">${escapeHtml(step.sub)}</span></div>`
   ).join("");
 }
 
@@ -320,10 +322,17 @@ function rulesPayload(overrides = {}) {
   return payload;
 }
 
-function setPower(enabled) {
-  document.querySelector("#rules-enabled").checked = enabled;
-  document.querySelector("#power-label").textContent = enabled ? "监控中" : "已暂停";
-  document.querySelector("#power-switch").classList.toggle("on", enabled);
+function setPower(enabled, busy = monitorControl.busy, stopping = monitorControl.stopping) {
+  Object.assign(monitorControl, { enabled, busy, stopping: Boolean(stopping) });
+  const pending = monitorControl.pending;
+  const start = document.querySelector("#monitor-start");
+  const stop = document.querySelector("#monitor-stop");
+  start.disabled = Boolean(pending || enabled == null || enabled || stopping || busy);
+  stop.disabled = Boolean(pending || enabled == null || stopping || (!enabled && !busy));
+  start.querySelector("span").textContent = pending === "start" ? "正在开启…" : "开始监控";
+  stop.querySelector("span").textContent = pending === "stop" || stopping ? "正在终止…" : "终止监控";
+  start.setAttribute("aria-busy", String(pending === "start"));
+  stop.setAttribute("aria-busy", String(pending === "stop" || stopping));
 }
 
 async function saveRules(event) {
@@ -488,6 +497,7 @@ function renderRuleSentence(values, { models, capacities, interval, round }) {
 
 function runSummary(run) {
   if (!run) return `<span class="muted">尚未搜索</span>`;
+  if (run.stopped) return `<span class="muted">已终止 · ${ago(run.started_at)}</span>`;
   if (run.ok === 0) return `<span class="bad" title="${escapeHtml(run.error)}">失败 · ${ago(run.started_at)}</span>`;
   if (run.ok == null) return `<span>搜索中…</span>`;
   const where = run.storage ? `${displayStorage(run.storage)} · ` : "";
@@ -498,8 +508,8 @@ function runSummary(run) {
 
 function unitChip(target, unit) {
   const run = unit.last_run;
-  const status = !unit.enabled ? "off" : !run ? "never" : run.ok === 0 ? "fail" : run.matched ? "hit" : run.error ? "warn" : "ok";
-  const detail = !run ? "尚未搜索" : run.ok === 0 ? `失败：${run.error}` :
+  const status = !unit.enabled ? "off" : !run ? "never" : run.stopped ? "off" : run.ok === 0 ? "fail" : run.matched ? "hit" : run.error ? "warn" : "ok";
+  const detail = !run ? "尚未搜索" : run.stopped ? "本次搜索已由你终止" : run.ok === 0 ? `失败：${run.error}` :
     `${ago(run.started_at)}：共 ${run.observed} 件，命中 ${run.matched} 件` +
     (run.passes?.length ? `（${run.passes.map(p => `${p.label} ${p.error ? "失败" : p.observed}`).join("，")}）` : "") +
     (run.error ? `\n${run.error}` : "");
@@ -526,7 +536,7 @@ function seriesSummary(members) {
   const models = members.filter(item => item.units.some(unit => unit.enabled)).length;
   const enabledUnits = units.filter(unit => unit.enabled).length;
   const deals = members.reduce((sum, item) => sum + (item.deals || 0), 0);
-  const failed = members.filter(item => item.last_run?.ok === 0).length;
+  const failed = members.filter(item => item.last_run?.ok === 0 && !item.last_run.stopped).length;
   const pct = units.length ? Math.round(enabledUnits / units.length * 100) : 0;
   return `<span class="meter" title="${enabledUnits}/${units.length} 个容量在监控"><i style="width:${pct}%"></i></span>
     <span>${models}/${members.length} 款 · ${enabledUnits}/${units.length} 容量</span>` +
@@ -669,6 +679,7 @@ function unitName(run) {
 }
 
 function runTone(run) {
+  if (run.stopped) return "stopped";
   if (run.ok == null) return "running";
   if (run.ok === 0) return "fail";
   if (run.hit_count) return "hit";
@@ -693,6 +704,7 @@ function renderRunList() {
       completed: { tone: "ok", pill: "", label: "最近完成" },
       failed: { tone: "fail", pill: "bad", label: "最近失败" },
       warn: { tone: "warn", pill: "warn", label: "最近有警告" },
+      stopped: { tone: "stopped", pill: "", label: "已终止" },
     }[group.latest_status];
     const tone = recent?.tone || "ok";
     return `<button type="button" class="run-row ${tone} ${group.model === runView.model ? "active" : ""}" data-model="${escapeHtml(group.model)}" aria-pressed="${group.model === runView.model}">
@@ -864,11 +876,12 @@ async function loadRunDetail(id, { quiet = false } = {}) {
     steps.push(stepChip(!pass.error, `${passName(pass)} ${pass.error ? "失败" : `${pass.cards ?? pass.observed ?? 0} 件`}`, detail));
   }
   const logText = passDetail(run);
-  const statusLabel = tone === "running" ? "搜索中" : tone === "fail" ? "搜索失败" : tone === "warn" ? "完成 · 有警告" : "已完成";
+  const statusLabel = tone === "stopped" ? "已终止" : tone === "running" ? "搜索中" : tone === "fail" ? "搜索失败" : tone === "warn" ? "完成 · 有警告" : "已完成";
   let body;
   if (items.length) body = items.map(item => runItem(item, fresh.has(item.item_id))).join("");
   else if (run.items.length) body = `<div class="empty run-filter-empty"><b>没有符合筛选条件的商品</b><span>当前查看${scope}${runView.result ? ` · ${{matched: "命中", pending: "待确认", rejected: "不符合", incomplete: "未完成"}[runView.result] || ""}` : ""}，可以切换容量或清除筛选。</span><button type="button" class="secondary compact" data-run-clear>清除筛选</button></div>`;
   else if (tone === "running") body = `<div class="empty live-empty"><span class="live-dot"></span>正在搜索，读到的商品会实时出现在这里…</div>`;
+  else if (run.stopped) body = `<div class="empty">本次搜索已由你终止。</div>`;
   else if (run.ok === 0) body = `<div class="empty">本次搜索未取得商品，展开失败原因查看详情。</div>`;
   else if (run.observed) body = `<div class="empty">此历史记录未保存逐件明细，当时共看到 ${run.observed} 件。</div>`;
   else body = `<div class="empty">本次搜索暂无商品记录，可展开操作日志检查采集情况。</div>`;
@@ -876,7 +889,7 @@ async function loadRunDetail(id, { quiet = false } = {}) {
     ...(new Date(value).getFullYear() !== new Date().getFullYear() ? { year: "numeric" } : {}),
     month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false,
   });
-  const statusName = item => item.ok == null ? "搜索中" : item.ok === 0 ? "失败" : item.error ? "有警告" : "已完成";
+  const statusName = item => item.stopped ? "已终止" : item.ok == null ? "搜索中" : item.ok === 0 ? "失败" : item.error ? "有警告" : "已完成";
   document.querySelector("#run-detail").innerHTML = `
     <header class="run-model-head">
       <div class="run-model-name"><h2>iPhone ${escapeHtml(run.model)}</h2><span class="run-state ${tone}"><i aria-hidden="true"></i>${statusLabel}</span></div>
@@ -903,7 +916,7 @@ async function loadRunDetail(id, { quiet = false } = {}) {
       </div>
     </header>
     ${tone === "running" ? `<p class="live-line"><span class="live-dot"></span>${escapeHtml(run.live?.stage || "正在搜索…")}</p>` : ""}
-    ${run.error ? `<details class="notice run-issue ${run.ok === 0 ? "bad" : "warn"}" ${issueOpen ? "open" : ""}><summary>${run.ok === 0 ? "本次搜索失败" : "部分搜索步骤未完成"} · 展开原因</summary><p>${run.error.split("；").map(escapeHtml).join("<br />")}</p></details>` : ""}
+    ${run.error && !run.stopped ? `<details class="notice run-issue ${run.ok === 0 ? "bad" : "warn"}" ${issueOpen ? "open" : ""}><summary>${run.ok === 0 ? "本次搜索失败" : "部分搜索步骤未完成"} · 展开原因</summary><p>${run.error.split("；").map(escapeHtml).join("<br />")}</p></details>` : ""}
     <section class="run-results" aria-label="本次搜索商品结果">
       <div class="run-capacity"><span class="run-filter-label">容量</span><div class="chips" role="group" aria-label="筛选本次商品容量">${storageFilters}</div></div>
       <div class="run-result-stats" role="group" aria-label="筛选商品判定结果">${resultFilters}</div>
@@ -1260,10 +1273,11 @@ document.querySelector("#pipeline").addEventListener("click", async event => {
   if (!button || retryingSearch) return;
   retryingSearch = true;
   button.disabled = true;
-  button.textContent = "正在重试…";
+  button.setAttribute("aria-busy", "true");
+  button.querySelector("[data-retry-label]").textContent = "重试中";
   try {
     await api("/api/search/retry", { method: "POST" });
-    toast("重试搜索已完成");
+    toast(monitorControl.stopping || !monitorControl.enabled ? "搜索已终止" : "重试搜索已完成");
   } catch (error) { toast(error.message, true); }
   finally {
     retryingSearch = false;
@@ -1304,17 +1318,26 @@ document.querySelector("#exclude-editor").addEventListener("click", event => {
   excludeInput.focus();
 });
 
-// 总开关：立即生效，不影响其他未保存的修改
-document.querySelector("#rules-enabled").addEventListener("change", async event => {
-  const enabled = event.target.checked;
-  setPower(enabled);
+// Control endpoints change only enabled; unsaved form edits remain untouched.
+async function controlMonitor(action) {
+  if (monitorControl.pending) return;
+  monitorControl.pending = action;
+  setPower(monitorControl.enabled);
   try {
-    state.rules = await api("/api/rules", { method: "PUT", body: JSON.stringify(rulesPayload({ enabled })) });
-    toast(enabled ? "监控已开启" : "监控已暂停，不再自动搜索");
+    const result = await api(`/api/monitor/${action}`, { method: "POST" });
+    state.rules = result.rules;
+    setPower(result.rules.enabled, result.busy, result.stopping);
+    toast(action === "start" ? "监控已开启" : result.stopping ? "正在终止当前搜索" : "监控已停止");
     updateRuleHints();
+  } catch (error) { toast(error.message, true); }
+  finally {
+    monitorControl.pending = null;
+    setPower(monitorControl.enabled);
     loadOverview().catch(() => {});
-  } catch (error) { toast(error.message, true); setPower(!enabled); }
-});
+  }
+}
+document.querySelector("#monitor-start").addEventListener("click", () => controlMonitor("start"));
+document.querySelector("#monitor-stop").addEventListener("click", () => controlMonitor("stop"));
 
 initDeviceScreen({getDevice: id => state.devices.find(device => device.id === id), closeMenu: () => setDeviceMenu(false)});
 

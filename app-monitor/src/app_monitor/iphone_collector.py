@@ -26,6 +26,7 @@ from .appium_server import WDA_PORT, ensure_appium_server
 from .collector import CollectResult, DetailCheck, ItemCallback, emit_safely, guess_region
 from .config import ROOT, Settings
 from .instance_lock import exclusive_device
+from .stop_control import checkpoint, guard_driver
 from .matching import normalize_search_text
 
 logger = logging.getLogger(__name__)
@@ -700,6 +701,7 @@ def _pasteboard(driver: Any, *, settings: Settings, content: str | None = None) 
     verify the actual foreground app. Always restore Goofish and the prior wait.
     Clipboard contents must never be included in errors or logs.
     """
+    checkpoint()
     runner = settings.ios_wda_bundle_id.removesuffix(".xctrunner") + ".xctrunner"
     if not settings.ios_wda_bundle_id:
         raise RuntimeError("手机剪贴板不可用：未配置 WDA bundle ID")
@@ -750,9 +752,13 @@ class IPhoneCollector:
         self.wda_maintenance = None
 
     def _open_session(self, udid, factory):
+        def guarded_factory():
+            checkpoint()
+            return guard_driver(factory())
+
         if self.wda_maintenance is not None:
-            return self.wda_maintenance.connect(udid, factory)
-        return factory()
+            return self.wda_maintenance.connect(udid, guarded_factory)
+        return guarded_factory()
 
     @staticmethod
     def _wait_for_source(

@@ -16,6 +16,7 @@ from pathlib import Path
 
 from .config import ROOT
 from .instance_lock import _exclusive
+from .stop_control import checkpoint
 
 APP = Path("Build/Products/Debug-iphoneos/WebDriverAgentRunner-Runner.app")
 RENEW_BEFORE = 12 * 3600
@@ -118,6 +119,7 @@ class WdaMaintenance:
                 and profile.get("identifier") == f"{profile.get('team')}.{bundle}")
 
     def ensure(self, udid: str, *, force: bool = False) -> bool:
+        checkpoint()
         if not self.settings.ios_wda_auto_renew:
             return True
         derived = self.settings.ios_wda_derived_data_path
@@ -170,6 +172,7 @@ class WdaMaintenance:
                 raise WdaNeedsAttention(action) from None
 
     def _build(self, udid: str, team: str) -> None:
+        checkpoint()
         if signing_keychain_unlocked() is False:
             raise RuntimeError("signing keychain locked")
         derived = self.settings.ios_wda_derived_data_path
@@ -198,14 +201,28 @@ class WdaMaintenance:
                        "-derivedDataPath", str(candidate), "-allowProvisioningUpdates",
                        "-allowProvisioningDeviceRegistration", "build-for-testing",
                        f"DEVELOPMENT_TEAM={team}", "CODE_SIGN_STYLE=Automatic", "CODE_SIGN_IDENTITY=Apple Development"]
+            checkpoint()
             process = subprocess.Popen(command, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                        text=True, start_new_session=True)
             try:
-                output, _ = process.communicate(timeout=600)
-            except subprocess.TimeoutExpired:
-                os.killpg(process.pid, signal.SIGKILL)
+                deadline = time.monotonic() + 600
+                while True:
+                    checkpoint()
+                    try:
+                        output, _ = process.communicate(timeout=.2)
+                        break
+                    except subprocess.TimeoutExpired:
+                        if time.monotonic() >= deadline:
+                            raise RuntimeError("WDA 构建超时，请检查 Xcode 和网络") from None
+            except BaseException:
+                if process.poll() is None:
+                    try:
+                        os.killpg(process.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
                 process.communicate()
-                raise RuntimeError("WDA 构建超时，请检查 Xcode 和网络") from None
+                raise
+            checkpoint()
             if process.returncode:
                 # Raw output is used locally for classification only.
                 errors = [line for line in output.splitlines() if re.search(
@@ -220,6 +237,7 @@ class WdaMaintenance:
             subprocess.run(["codesign", "--verify", "--deep", "--strict", str(candidate / APP)],
                            capture_output=True, timeout=30, check=True)
             products = derived / "Build/Products"
+            checkpoint()
             products.parent.mkdir(parents=True, exist_ok=True)
             backup = staging / "previous-products"
             if products.exists():
@@ -232,6 +250,7 @@ class WdaMaintenance:
                 raise
 
     def connect(self, udid: str, factory):
+        checkpoint()
         can_clear = self.ensure(udid) is not False
         try:
             driver = factory()

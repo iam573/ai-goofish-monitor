@@ -194,3 +194,37 @@ def test_build_validates_staging_before_replacing_existing_products(maintenance,
             maintenance._build("phone", "TEAM")
         assert (old / "old").read_text() == "preserve me"
     assert (project / "project.pbxproj").read_text() == original
+
+
+def test_stop_kills_build_process_group_and_preserves_old_products(maintenance, tmp_path, monkeypatch):
+    import subprocess
+    from threading import Event
+    import app_monitor.wda_maintenance as module
+    from app_monitor.stop_control import MonitorStopped, stop_scope
+
+    project = tmp_path / ".appium/node_modules/appium-xcuitest-driver/node_modules/appium-webdriveragent/WebDriverAgent.xcodeproj"
+    project.mkdir(parents=True)
+    (project / "project.pbxproj").write_text("PRODUCT_BUNDLE_IDENTIFIER = com.facebook.WebDriverAgentRunner;")
+    old = maintenance.settings.ios_wda_derived_data_path / APP
+    old.mkdir(parents=True)
+    (old / "old").write_text("keep")
+    event, killed = Event(), []
+
+    class Process:
+        pid = 12345
+        def poll(self):
+            return None
+        def communicate(self, timeout=None):
+            if timeout is not None:
+                event.set()
+                raise subprocess.TimeoutExpired("xcodebuild", timeout)
+            return "", None
+
+    monkeypatch.setattr(module, "ROOT", tmp_path)
+    monkeypatch.setattr(module, "signing_keychain_unlocked", lambda: True)
+    monkeypatch.setattr(module.subprocess, "Popen", lambda *a, **kw: Process())
+    monkeypatch.setattr(module.os, "killpg", lambda pid, sig: killed.append(pid))
+    with stop_scope(event):
+        with pytest.raises(MonitorStopped):
+            maintenance._build("phone", "TEAM")
+    assert killed == [12345] and (old / "old").read_text() == "keep"

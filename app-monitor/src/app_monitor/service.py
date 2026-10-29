@@ -8,6 +8,7 @@ import json
 import logging
 from dataclasses import asdict, replace
 from datetime import datetime, timedelta
+from threading import Event
 from typing import Any
 
 from .collector import CollectResult
@@ -22,6 +23,7 @@ from .iphone_proxy_collector import IPhoneProxyCollector
 from .matching import MatchDecision, evaluate
 from .notifications import NotificationService, notification_result_text
 from .wda_maintenance import WdaMaintenance
+from .stop_control import MonitorStopped, STOP_REASON, checkpoint, stop_scope
 from .quotes import quote_reference, latest_entries
 from .rules import (
     Rules,
@@ -62,6 +64,8 @@ class ItemStream:
             items, meta = entry
             try:
                 await self.handler(items, meta)
+            except MonitorStopped:
+                return
             except Exception:
                 logger.exception("实时处理商品失败 count=%d", len(items))
 
@@ -112,10 +116,21 @@ class MonitorService:
         self._lock = asyncio.Lock()
         # 正在进行的搜索：run_id、当前步骤、已看到 / 命中件数，供后台实时显示
         self.live: dict[str, Any] | None = None
+        self._stop_event: Event | None = None
 
     @property
     def busy(self) -> bool:
         return self._lock.locked()
+
+    @property
+    def stopping(self) -> bool:
+        return self._stop_event is not None and self._stop_event.is_set()
+
+    def request_stop(self) -> None:
+        if self._stop_event is not None:
+            self._stop_event.set()
+            if self.live is not None:
+                self.live["stage"] = "正在终止，等待当前指令退出"
 
     # ------------------------------------------------------------------ 调度
 
@@ -181,8 +196,8 @@ class MonitorService:
         reset_after = self.database.state_get("failure_pause_reset_after", 0)
         with self.database.connect() as connection:
             rows = connection.execute(
-                "SELECT ok, started_at FROM search_runs WHERE ok IS NOT NULL AND id > ? ORDER BY id DESC LIMIT ?",
-                (reset_after, FAILURE_PAUSE_AFTER),
+                "SELECT ok, started_at FROM search_runs WHERE ok IS NOT NULL AND id > ? AND COALESCE(error, '') != ? ORDER BY id DESC LIMIT ?",
+                (reset_after, STOP_REASON, FAILURE_PAUSE_AFTER),
             ).fetchall()
         if len(rows) < FAILURE_PAUSE_AFTER or any(row["ok"] for row in rows):
             return False
@@ -221,6 +236,7 @@ class MonitorService:
     def _run_dict(row: Any) -> dict[str, Any]:
         value = dict(row)
         value["passes"] = json.loads(value.get("passes") or "[]")
+        value["stopped"] = value.get("error") == STOP_REASON
         return value
 
     # ------------------------------------------------------------------ 执行
@@ -239,6 +255,18 @@ class MonitorService:
                 return await self._run_model(model, storage, trigger, injected_items, region_applied, filter_applied)
 
     async def _run_model(self, model, storage, trigger, injected_items, region_applied, filter_applied):
+        event = Event()
+        self._stop_event = event
+        try:
+            with stop_scope(event):
+                return await self._execute_model(model, storage, trigger, injected_items, region_applied, filter_applied)
+        except asyncio.CancelledError:
+            event.set()
+            raise
+        finally:
+            self._stop_event = None
+
+    async def _execute_model(self, model, storage, trigger, injected_items, region_applied, filter_applied):
         rules = load_rules(self.database)
         keyword = search_keyword(model)
         with self.database.connect() as connection:
@@ -262,6 +290,7 @@ class MonitorService:
 
             async def handle(items: list[dict[str, Any]], meta: dict[str, Any]) -> None:
                 """实时处理采集器交出的商品：写入运行记录、判价、命中就立即推送。"""
+                checkpoint()
                 if meta.get("stage"):
                     self.live["stage"] = (
                         f"{meta['device_name']} · {meta['stage']}"
@@ -292,6 +321,7 @@ class MonitorService:
                 results.append(part)
 
             if injected_items is None:
+                checkpoint()
                 target = next(
                     (item for item in search_targets(self.database, rules) if item["model"] == model),
                     None,
@@ -315,6 +345,7 @@ class MonitorService:
                     filter_applied=filter_applied,
                     passes=[{"label": "调试", "observed": len(injected_items), "error": None}],
                 )
+            checkpoint()
             if injected_items is not None:
                 results.append(await self.process_items(
                     collected.items, rules, keyword, collected.region_applied,
@@ -369,6 +400,13 @@ class MonitorService:
                 run_id, result.get("observed", 0), result.get("matched", 0), result.get("notified", 0),
                 collected.region_applied, collected.filter_applied, collected.warnings or "无",
             )
+            return {"run_id": run_id, "model": model, "storage": storage, **result}
+        except MonitorStopped:
+            result = {"observed": (self.live or {}).get("observed", 0),
+                      "matched": (self.live or {}).get("matched", 0),
+                      "notified": sum(part["notified"] for part in results), "passes": live_passes,
+                      "stopped": True}
+            self._finish_run(run_id, False, result, STOP_REASON)
             return {"run_id": run_id, "model": model, "storage": storage, **result}
         except Exception as exc:
             partial = exc.partial if isinstance(exc, CollectionFailure) else None
@@ -440,6 +478,7 @@ class MonitorService:
                 return None
 
         for device_id in selected:
+            checkpoint()
             device = available.get(device_id)
             label = device.name if device else device_id
             try:
@@ -600,6 +639,7 @@ class MonitorService:
         matched = notified = 0
         decisions = []
         for raw in items:
+            checkpoint()
             item = self._normalize_item(raw, keyword)
             decision = scope_decision(item, config, expected_model, storage_hint, basis="fixed", detail=True) or evaluate(
                 item, rules, quotes, region_applied, storage_hint, expected_model)
@@ -622,6 +662,7 @@ class MonitorService:
             if not deal_id:
                 continue
             matched += 1
+            checkpoint()
             result = await self.notifications.send(
                 {
                     **item,
@@ -653,6 +694,7 @@ class MonitorService:
         matched = notified = 0
         decisions = []
         for raw in items:
+            checkpoint()
             created = False
             record = None
             item = self._normalize_item(raw, keyword)
@@ -696,6 +738,7 @@ class MonitorService:
 
     async def publish_smart(self, record, rules):
         """Delivery dedup is separate from assessments, including one pending → matched upgrade."""
+        checkpoint()
         value = record["result"]
         item = self._normalize_item(record["snapshot"], "")
         decision = self.smart_decision(record)

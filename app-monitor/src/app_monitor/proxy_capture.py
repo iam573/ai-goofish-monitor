@@ -16,6 +16,7 @@ import time
 import unicodedata
 
 from .config import ROOT
+from .stop_control import checkpoint
 
 
 def normalized(value):
@@ -125,10 +126,15 @@ class ProxyCapture:
             self._condition.notify_all()
 
     def wait_ready(self, timeout=30):
+        checkpoint()
         self.start()
         with self._condition:
-            ready = self._condition.wait_for(lambda: self._ready or bool(self._error), timeout)
-            if not ready or not self._ready:
+            deadline = time.monotonic() + timeout
+            while not self._ready and not self._error and time.monotonic() < deadline:
+                checkpoint()
+                self._condition.wait(min(.2, max(0, deadline - time.monotonic())))
+            checkpoint()
+            if not self._ready:
                 raise RuntimeError(self._error or "代理服务仍在准备依赖，请稍后重试")
 
     @contextmanager
@@ -183,6 +189,7 @@ class ProxyCapture:
         deadline = time.monotonic() + timeout
         with self._condition:
             while True:
+                checkpoint()
                 events = self.events(client_ip, since, **filters)
                 if events:
                     return events
@@ -191,7 +198,7 @@ class ProxyCapture:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     return []
-                self._condition.wait(remaining)
+                self._condition.wait(min(.2, remaining))
 
     def status(self, client_ip=""):
         with self._condition:

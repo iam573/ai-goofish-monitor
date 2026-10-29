@@ -9,6 +9,7 @@ import httpx
 
 from .config import Settings
 from .matching import display_storage
+from .stop_control import stop_requested
 
 
 class NotificationService:
@@ -41,6 +42,8 @@ class NotificationService:
         )
         async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
             results: dict[str, dict[str, Any]] = {}
+            if stop_requested():
+                return results
             if self.settings.ntfy_topic_url:
                 results["ntfy"] = await self._call(
                     "ntfy",
@@ -55,6 +58,8 @@ class NotificationService:
                         },
                     ),
                 )
+            if stop_requested():
+                return results
             if self.settings.bark_url:
                 base = self.settings.bark_url.rstrip("/")
                 results["bark"] = await self._call(
@@ -64,6 +69,8 @@ class NotificationService:
                         params={**({"url": mobile_url} if mobile_url else {}), **({"icon": image_urls[0]} if image_urls else {})},
                     ),
                 )
+            if stop_requested():
+                return results
             if self.settings.webhook_url:
                 try:
                     response = await self._send_webhook(

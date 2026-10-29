@@ -74,7 +74,7 @@
           <header class="page-head rules-head">
             <div>
               <h1>监控规则</h1>
-              <p>勾选机型、设备和启停开关即时生效；右侧规则修改后点「保存」，从下一次搜索开始生效。</p>
+              <p>机型与设备选择即时生效；终止监控会停止当前搜索，右侧规则修改后点「保存」。</p>
             </div>
             <div class="page-actions rules-head-actions">
               <div class="device-picker" id="device-picker">
@@ -95,11 +95,14 @@
                   <p class="hint picker-foot">iPhone 优先从首页第 2 个城市 Tab 搜索，确认是目标城市后跳过区域筛选；之后逐个勾选容量并点「确定」，只读「新发」。</p>
                 </div>
               </div>
-              <label class="power" id="power-switch" title="总开关：关闭后不再自动搜索">
-                <input type="checkbox" id="rules-enabled" role="switch" />
-                <span class="power-track"><span class="power-thumb"></span></span>
-                <span class="power-label" id="power-label">监控中</span>
-              </label>
+              <div class="monitor-controls" role="group" aria-label="监控控制">
+                <button type="button" id="monitor-start" class="monitor-action start" disabled>
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m8 5 11 7-11 7z"/></svg><span>开始监控</span>
+                </button>
+                <button type="button" id="monitor-stop" class="monitor-action stop" disabled>
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="1.5"/></svg><span>终止监控</span>
+                </button>
+              </div>
             </div>
           </header>
 

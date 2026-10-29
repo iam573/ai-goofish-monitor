@@ -440,6 +440,91 @@ async def test_developer_mode_intervention_stays_local_without_push(database, mo
     assert "开发者模式" in database.state_get(service.wda_maintenance._key("test-phone"))["action"]
 
 
+async def test_stop_interrupts_phone_commands_and_preserves_cleanup(database, monkeypatch):
+    import asyncio
+    from threading import Event
+    from fastapi import HTTPException
+    from app_monitor import api
+    from app_monitor.stop_control import guard_driver, STOP_REASON
+
+    service, notifier = setup(database)
+    monkeypatch.setattr(api, "database", database)
+    monkeypatch.setattr(api, "monitor_service", service)
+    ready, release = Event(), Event()
+    commands = []
+
+    class Driver:
+        def execute(self, command, params=None):
+            commands.append(command)
+            return {}
+
+        def quit(self):
+            return self.execute("quit")
+
+    class Phone:
+        async def collect(self, *args, **kwargs):
+            def worker():
+                driver = guard_driver(Driver())
+                try:
+                    driver.execute("read")
+                    ready.set()
+                    assert release.wait(3)
+                    driver.execute("click")
+                finally:
+                    driver.quit()
+            return await asyncio.to_thread(worker)
+
+    service.iphone_collector = Phone()
+    task = asyncio.create_task(service.run_model("16"))
+    try:
+        assert await asyncio.to_thread(ready.wait, 3)
+        response = await api.stop_monitor()
+        assert response["stopping"] and not response["rules"]["enabled"]
+        assert service.busy
+        with pytest.raises(HTTPException) as error:
+            await api.start_monitor()
+        assert error.value.status_code == 409
+    finally:
+        release.set()
+    result = await asyncio.wait_for(task, 3)
+    assert result["stopped"] and commands == ["read", "quit"]
+    assert not service.busy and not service.stopping
+    assert notifier.sent == []
+    with database.connect() as c:
+        row = c.execute("SELECT * FROM search_runs WHERE id=?", (result["run_id"],)).fetchone()
+    assert row["finished_at"] and row["error"] == STOP_REASON
+    assert not service._failure_paused(datetime.now().astimezone())
+    assert await service.run_due() is None
+    assert (await api.start_monitor())["rules"]["enabled"]
+
+
+async def test_stop_discards_late_streamed_and_collected_products(database, monkeypatch):
+    import asyncio
+    service, notifier = setup(database)
+    ready, release = asyncio.Event(), asyncio.Event()
+
+    class Phone:
+        async def collect(self, *args, on_items=None, **kwargs):
+            ready.set()
+            await release.wait()
+            item = {"item_id": "1090000000111", "title": "iPhone 16 128G 国行", "price": 2500}
+            on_items([item], storage="128", filter_applied=True)
+            return CollectResult(items=[item], passes=[{"storage": "128", "observed": 1, "error": None}])
+
+    service.iphone_collector = Phone()
+    task = asyncio.create_task(service.run_model("16"))
+    await asyncio.wait_for(ready.wait(), 3)
+    service.request_stop()
+    release.set()
+    result = await asyncio.wait_for(task, 3)
+    assert result["stopped"] and notifier.sent == []
+    with database.connect() as c:
+        assert c.execute("SELECT COUNT(*) FROM deals").fetchone()[0] == 0
+    # A subsequent run has a fresh stop context.
+    again = await service.run_model("16", injected_items=[])
+    assert not again.get("stopped")
+
+
 async def test_push_includes_full_quote_reference(database):
     service, notifier = setup(database)
     await service.process_items(

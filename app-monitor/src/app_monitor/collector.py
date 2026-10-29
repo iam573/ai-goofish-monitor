@@ -13,6 +13,7 @@ from typing import Any, Callable
 
 from .config import ROOT, Settings
 from .regions import CITY_DISTRICTS, CITY_PROVINCE, PROVINCES, normalize_city
+from .stop_control import checkpoint
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +26,7 @@ DetailCheck = Callable[[dict[str, Any], bool, str], dict[str, Any] | None]
 
 
 def emit_safely(callback: ItemCallback | None, items: list[dict[str, Any]] | None = None, **meta: Any) -> None:
+    checkpoint()
     if callback is None:
         return
     try:

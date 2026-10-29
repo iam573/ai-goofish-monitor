@@ -35,6 +35,34 @@ async def _noop():
     return None
 
 
+async def test_monitor_controls_change_only_enabled_and_stopped_runs_are_not_failures(database, monkeypatch):
+    from app_monitor.service import MonitorService
+    from app_monitor.rules import Rules, save_rules
+    from app_monitor.db import utc_now
+    from app_monitor.stop_control import STOP_REASON
+
+    service = MonitorService(database, None, None)
+    monkeypatch.setattr(api, "database", database)
+    monkeypatch.setattr(api, "monitor_service", service)
+    saved = save_rules(database, Rules(region_city="厦门", max_over_quote=123, disabled_models=["16"]))
+    stopped = await api.stop_monitor()
+    assert not stopped["rules"]["enabled"] and not stopped["stopping"]
+    started = await api.start_monitor()
+    assert started["rules"]["enabled"]
+    assert started["rules"]["region_city"] == saved.region_city
+    assert started["rules"]["max_over_quote"] == 123
+    assert started["rules"]["disabled_models"] == ["16"]
+    with database.connect() as c:
+        for error in ["连接失败", "连接失败", STOP_REASON]:
+            c.execute("INSERT INTO search_runs(model,keyword,started_at,finished_at,ok,error) VALUES('16','iPhone 16',?,?,0,?)",
+                      (utc_now(), utc_now(), error))
+    groups = await api.run_groups(status=None)
+    assert groups[0]["latest_status"] == "stopped" and groups[0]["failed_count"] == 2
+    runs = await api.runs(limit=10, status="failed", model=None)
+    assert len(runs) == 2
+    assert (await api.runs(limit=10, status=None, model=None))[0]["stopped"]
+
+
 async def test_retry_search_api_returns_result_and_clear_errors(monkeypatch):
     import pytest
     from fastapi import HTTPException
