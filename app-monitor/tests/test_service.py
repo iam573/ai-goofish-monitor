@@ -457,6 +457,31 @@ async def test_failing_device_pauses_alone(database, monkeypatch):
     assert len(tasks) == 1 and tuple(latest) == ("ios:two", 1)
 
 
+async def test_device_needing_manual_fix_is_skipped_until_retry(database, monkeypatch):
+    import asyncio
+    service, _ = setup(database)
+    two_phones(database, monkeypatch)
+    calls = []
+
+    class Phone:
+        async def collect(self, udid, *args, **kwargs):
+            calls.append(udid)
+            return CollectResult(items=[], passes=[{"label": "新发", "error": None}])
+
+    service.iphone_collector = Phone()
+    service.wda_maintenance.attention("one", "driver-to-platform version mismatch")
+    service.wda_maintenance.attention("two", "Developer Mode disabled")  # Resolves through the connection state.
+    state = service.schedule_state()
+    assert state["attention_devices"] == ["ios:one"] and state["ready_devices"] == ["ios:two"]
+    assert state["active"] and state["can_retry"]
+    await asyncio.gather(*await service.run_due())
+    assert calls == ["two"]
+
+    result = await service.retry_failed()
+    assert calls == ["two", "one"] and not result.get("stopped")
+    assert service.schedule_state()["attention_devices"] == []
+
+
 def test_parallel_sessions_forward_distinct_local_wda_ports(monkeypatch):
     from app_monitor import appium_server
     monkeypatch.setattr(appium_server, "_local_ports", {})

@@ -161,10 +161,12 @@ class MonitorService:
         units = search_units(self.database, rules)
         selected = selected_devices(self.database)
         paused = [device for device in selected if self._device_paused(device, now)]
+        blocked = {device: attention for device in selected
+                   if (attention := self.wda_maintenance.blocking_attention(device.removeprefix("ios:")))}
         state: dict[str, Any] = {
             "active": False, "reason": "", "next_model": None, "next_storage": None,
             "next_label": None, "targets": len({unit["model"] for unit in units}), "units": len(units),
-            "can_retry": False, "ready_devices": [], "paused_devices": [],
+            "can_retry": False, "ready_devices": [], "paused_devices": [], "attention_devices": [],
         }
         if not rules.enabled:
             state["reason"] = "监控已暂停"
@@ -175,13 +177,15 @@ class MonitorService:
         elif not in_search_window(rules, now):
             state["reason"] = f"不在搜索时段 {rules.search_start}–{rules.search_end}"
         else:
-            state.update(paused_devices=paused, can_retry=bool(paused),
-                         ready_devices=[device for device in selected if device not in paused])
+            state.update(paused_devices=paused, attention_devices=list(blocked), can_retry=bool(paused or blocked),
+                         ready_devices=[device for device in selected if device not in paused and device not in blocked])
             if state["ready_devices"]:
                 state["active"] = True
                 state["reason"] = "搜索中"
-            else:
+            elif paused:
                 state["reason"] = f"连续 {FAILURE_PAUSE_AFTER} 次搜索失败，暂停 10 分钟"
+            else:
+                state["reason"] = next(iter(blocked.values()))["action"]
         due = self._due_units(units, rules, now)
         if due:
             state.update(
@@ -249,13 +253,14 @@ class MonitorService:
         return now - datetime.fromisoformat(rows[0]["started_at"]) < FAILURE_PAUSE
 
     async def retry_failed(self) -> dict[str, Any]:
-        """Reset failure streaks and immediately retry on a paused device."""
+        """Reset failure streaks and attention blocks, then immediately retry on an affected device."""
         if self._lock.locked():
             raise ValueError("正在执行其他操作，请稍后再试")
         state = self.schedule_state()
         if not state["can_retry"]:
             raise ValueError(f"当前无法重试：{state['reason']}")
-        device_id = next((device for device in state["paused_devices"] if device not in self._device_runs), None)
+        device_id = next((device for device in [*state["paused_devices"], *state["attention_devices"]]
+                          if device not in self._device_runs), None)
         if device_id is None:
             raise ValueError("暂停的设备正在搜索，请稍后再试")
         units = [unit for unit in search_units(self.database, load_rules(self.database))
@@ -265,8 +270,11 @@ class MonitorService:
         with self.database.connect() as connection:
             latest = connection.execute("SELECT id, model FROM search_runs WHERE device=? ORDER BY id DESC LIMIT 1",
                                         (device_id,)).fetchone()
-        unit = next((unit for unit in units if unit["model"] == latest["model"]), units[0])
-        self.database.state_set("failure_pause_reset_after", latest["id"])
+        unit = next((unit for unit in units if latest and unit["model"] == latest["model"]), units[0])
+        if latest:
+            self.database.state_set("failure_pause_reset_after", latest["id"])
+        if device_id in state["attention_devices"]:
+            self.wda_maintenance.recovered(device_id.removeprefix("ios:"))
         return await self.run_model(unit["model"], None, "manual", device_id=device_id)
 
     def last_runs(self) -> dict[str, dict[str, Any]]:
@@ -314,7 +322,8 @@ class MonitorService:
             raise MonitorBusy("所有采集设备都在搜索，请稍后再试")
         if len(idle) > 1:
             found = {device.id: device for device in await asyncio.to_thread(discover_devices)}
-            idle.sort(key=lambda device: not (found.get(device) and found[device].connected))
+            idle.sort(key=lambda device: (bool(self.wda_maintenance.blocking_attention(device.removeprefix("ios:"))),
+                                          not (found.get(device) and found[device].connected)))
         return idle[0] if idle else None
 
     def _claim(self, model: str, device_id: str | None) -> None:

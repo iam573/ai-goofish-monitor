@@ -21,6 +21,8 @@ from .stop_control import checkpoint
 APP = Path("Build/Products/Debug-iphoneos/WebDriverAgentRunner-Runner.app")
 RENEW_BEFORE = 12 * 3600
 REPAIR_INTERVAL = 10 * 60
+# Problems that only an operator can fix; keychain unlocks are retried automatically.
+MANUAL_CODES = {"xcode_platform", "xcode_login", "signing", "wda_repair"}
 
 
 class WdaNeedsAttention(RuntimeError):
@@ -106,6 +108,10 @@ class WdaMaintenance:
     def recovered(self, udid: str) -> None:
         self.database.state_set(self._key(udid), {})
 
+    def blocking_attention(self, udid: str) -> dict | None:
+        value = self.database.state_get(self._key(udid), {})
+        return value if isinstance(value, dict) and value.get("pending") and value.get("code") in MANUAL_CODES else None
+
     def _read_profile(self, app: Path) -> dict:
         try:
             return profile_info(app)
@@ -132,7 +138,8 @@ class WdaMaintenance:
             profile = self._read_profile(derived / APP)
             if not force and self._valid(profile, udid, RENEW_BEFORE):
                 return True
-            key = "wda_build_" + digest
+            # Repair outcomes are per device so one phone's failure never blocks another.
+            key = "wda_build_" + digest + "_" + hashlib.sha256(udid.encode()).hexdigest()[:16]
             state = self.database.state_get(key, {})
             if time.time() - state.get("attempt", 0) < REPAIR_INTERVAL:
                 if not force and self._valid(profile, udid):

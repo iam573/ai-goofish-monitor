@@ -63,6 +63,26 @@ def test_failed_renewal_is_bounded_and_retains_static_attention(maintenance, mon
     assert "secret" not in str(state)
 
 
+def test_one_phone_failed_repair_does_not_block_another(maintenance, monkeypatch):
+    monkeypatch.setattr(maintenance, "_read_profile", lambda path: profile(expires=0, devices=["phone", "other"]))
+    calls = []
+
+    def fail(udid, team):
+        calls.append(udid)
+        raise RuntimeError("platform not supported")
+
+    monkeypatch.setattr(maintenance, "_build", fail)
+    with pytest.raises(WdaNeedsAttention):
+        maintenance.ensure("phone")
+    with pytest.raises(WdaNeedsAttention):
+        maintenance.ensure("other")
+    # The second phone gets its own repair attempt instead of inheriting the first phone's outcome.
+    assert calls == ["phone", "other"]
+    assert maintenance.blocking_attention("phone")["code"] == "xcode_platform"
+    maintenance.attention("other", "keychain locked")
+    assert maintenance.blocking_attention("other") is None
+
+
 def test_early_renewal_failure_keeps_still_valid_package_usable(maintenance, monkeypatch):
     monkeypatch.setattr(maintenance, "_read_profile", lambda path: profile(expires=time.time() + 3600))
     monkeypatch.setattr(maintenance, "_build", lambda *a: (_ for _ in ()).throw(RuntimeError("No accounts")))

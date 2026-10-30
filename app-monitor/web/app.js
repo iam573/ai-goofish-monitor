@@ -114,7 +114,9 @@ async function loadOverview() {
   const deviceName = id => state.devices.find(device => device.id === id)?.name || "iPhone";
   const paused = (schedule.paused_devices || []).map(deviceName);
   const liveText = lives.map(live => `${lives.length > 1 ? `${live.model}：` : ""}${live.stage} · 已看 ${live.observed} 件 · 命中 ${live.matched}`).join("；");
-  const pausedText = paused.length && schedule.active ? ` · ${paused.join("、")} 连续失败暂停中` : "";
+  const attention = (schedule.attention_devices || []).map(deviceName);
+  const pausedText = schedule.active ? [paused.length ? ` · ${paused.join("、")} 连续失败暂停中` : "",
+    attention.length ? ` · ${attention.join("、")} 需人工处理，已跳过` : ""].join("") : "";
   const searchStep = {
     label: "③ 闲鱼搜索",
     main: value.stopping ? "正在终止监控…" : lives.length > 1 ? `${lives.length} 台 iPhone 正在并行搜索` : value.busy ? (lives.length ? `正在搜索 iPhone ${lives[0].model}` : "正在搜索…") : !rules.enabled ? "监控已停止" : schedule.can_retry && !schedule.active ? "搜索暂时暂停" : schedule.active ? (schedule.next_label ? `下一个：iPhone ${schedule.next_label}` : "本轮已搜完") : "未在搜索",
