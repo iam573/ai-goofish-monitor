@@ -197,8 +197,9 @@ class Database:
             _add_columns(
                 connection,
                 "search_runs",
-                {"storage": "TEXT", "filter_applied": "INTEGER NOT NULL DEFAULT 0", "passes": "TEXT"},
+                {"storage": "TEXT", "filter_applied": "INTEGER NOT NULL DEFAULT 0", "passes": "TEXT", "device": "TEXT"},
             )
+            connection.execute("CREATE INDEX IF NOT EXISTS idx_search_runs_device ON search_runs(device, id DESC)")
             # 修正旧记录里误把短列表编号写成商品 ID 的详情页链接。
             connection.execute(
                 """

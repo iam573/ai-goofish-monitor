@@ -39,7 +39,7 @@ from .rules import (
     search_targets,
     set_targets_enabled,
 )
-from .service import MonitorService, unit_key
+from .service import MonitorBusy, MonitorService, unit_key
 
 
 database = Database(settings.database)
@@ -403,9 +403,7 @@ async def retry_search() -> dict[str, Any]:
 
 @app.post("/api/targets/{model}/run")
 async def run_target(model: str, storage: str | None = None) -> dict[str, Any]:
-    """立即搜索一个单元；按容量拆分时需要指定 storage。"""
-    if monitor_service.busy:
-        raise HTTPException(409, "正在搜索其他机型，请稍后再试")
+    """立即用一台空闲设备搜索一个单元；按容量拆分时需要指定 storage。"""
     target = next(
         (item for item in search_targets(database, load_rules(database)) if item["model"] == model), None
     )
@@ -415,6 +413,8 @@ async def run_target(model: str, storage: str | None = None) -> dict[str, Any]:
         raise HTTPException(404, f"报价表中没有 {model} {storage}")
     try:
         return await monitor_service.run_model(model, storage, trigger="manual")
+    except MonitorBusy as exc:
+        raise HTTPException(409, str(exc)) from exc
     except Exception as exc:
         raise HTTPException(502, str(exc)) from exc
 
@@ -444,14 +444,17 @@ async def ingest_observations(
     filter_applied: bool = False,
 ) -> dict[str, Any]:
     """不经过 App，直接提交商品走一遍判价和推送，用于调试规则。"""
-    return await monitor_service.run_model(
-        model,
-        storage,
-        trigger="inject",
-        injected_items=[item.model_dump(exclude_none=True) for item in payload],
-        region_applied=region_applied,
-        filter_applied=filter_applied,
-    )
+    try:
+        return await monitor_service.run_model(
+            model,
+            storage,
+            trigger="inject",
+            injected_items=[item.model_dump(exclude_none=True) for item in payload],
+            region_applied=region_applied,
+            filter_applied=filter_applied,
+        )
+    except MonitorBusy as exc:
+        raise HTTPException(409, str(exc)) from exc
 
 
 # ---------------------------------------------------------------------- 报价
@@ -601,8 +604,8 @@ async def runs(
 
 def _with_live(run: dict[str, Any]) -> dict[str, Any]:
     """正在进行的搜索附上当前步骤（如「读取 256G 第 2/3 屏」）。"""
-    live = monitor_service.live
-    if live and live.get("run_id") == run.get("id") and run.get("ok") is None:
+    live = monitor_service.live_for(run.get("id"))
+    if live and run.get("ok") is None:
         run["live"] = {key: live[key] for key in ("stage", "observed", "matched")}
     return run
 

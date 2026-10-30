@@ -22,7 +22,7 @@ import httpx
 from .swift_runtime import run_swift
 from PIL import Image
 
-from .appium_server import WDA_PORT, ensure_appium_server
+from .appium_server import ensure_appium_server, wda_port_capabilities
 from .collector import CollectResult, DetailCheck, ItemCallback, emit_safely, guess_region
 from .config import ROOT, Settings
 from .instance_lock import exclusive_device
@@ -818,7 +818,7 @@ class IPhoneCollector:
             "appium:usePrebuiltWDA": True,
             "appium:derivedDataPath": str(self.settings.ios_wda_derived_data_path),
             "appium:updatedWDABundleId": self.settings.ios_wda_bundle_id,
-            "appium:wdaLocalPort": WDA_PORT,
+            **wda_port_capabilities(udid),
             "appium:newCommandTimeout": 300,
             "appium:waitForIdleTimeout": 0.5,
             "appium:settings": {"waitForIdleTimeout": 0.5, "animationCoolOffTimeout": 0.3},

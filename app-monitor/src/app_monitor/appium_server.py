@@ -6,6 +6,7 @@ import atexit
 import logging
 import os
 import subprocess
+import threading
 import time
 from pathlib import Path
 from urllib.parse import urlparse
@@ -18,6 +19,20 @@ WDA_PORT = 8101
 
 logger = logging.getLogger(__name__)
 _owned_process: subprocess.Popen | None = None
+_server_lock = threading.Lock()
+_local_ports: dict[str, int] = {}
+_ports_lock = threading.Lock()
+
+
+def wda_local_port(udid: str) -> int:
+    """Concurrent sessions need distinct forwarded Mac ports: Appium frees a busy port by
+    dropping whichever device holds it. The phone-side WDA port stays WDA_PORT."""
+    with _ports_lock:
+        return _local_ports.setdefault(udid, WDA_PORT + len(_local_ports))
+
+
+def wda_port_capabilities(udid: str) -> dict[str, int]:
+    return {"appium:wdaLocalPort": wda_local_port(udid), "appium:wdaRemotePort": WDA_PORT}
 
 
 def _ready(url: str) -> bool:
@@ -30,6 +45,13 @@ def _ready(url: str) -> bool:
 
 def ensure_appium_server(settings: Settings) -> None:
     checkpoint()
+    if _ready(settings.appium_server_url):
+        return
+    with _server_lock:
+        _start_server(settings)
+
+
+def _start_server(settings: Settings) -> None:
     global _owned_process
     url = settings.appium_server_url
     if _ready(url):

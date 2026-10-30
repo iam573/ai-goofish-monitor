@@ -210,7 +210,6 @@ input[type=checkbox] { width: 16px; height: 16px; margin: 0; padding: 0; accent-
 .device-info small { color: var(--muted); font-size: 11px; }
 .device-row.offline .device-info b { color: var(--muted); }
 .online-text { color: var(--brand); }
-.device-order { display: grid; place-items: center; width: 20px; height: 20px; border-radius: 50%; background: var(--brand); color: var(--brand-ink); font: 700 11px/1 var(--font); font-style: normal; }
 .device-card { border-radius: 9px; overflow: hidden; }
 .device-select { display: grid; place-items: center; margin: 0; cursor: pointer; }
 .device-channel { width: 104px; flex: none; padding: 6px 7px; font-size: 12px; border-radius: 7px; }
@@ -814,8 +813,6 @@ dialog::backdrop { background: rgba(10, 20, 16, .45); backdrop-filter: blur(2px)
   .device-select { grid-column: 1; grid-row: 1; }
   .device-glyph { grid-column: 2; grid-row: 1; }
   .device-info { grid-column: 3 / -1; grid-row: 1; }
-  .device-row:has(.device-order) .device-info { grid-column: 3; }
-  .device-order { grid-column: 4; grid-row: 1; }
   .device-channel { grid-column: 3; grid-row: 2; width: 100%; }
   .device-screen-button { grid-column: 4; grid-row: 2; }
 }

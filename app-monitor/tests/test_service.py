@@ -362,11 +362,108 @@ async def test_disabled_rules_and_repeated_failures_pause_searching(database):
 
 
 async def test_run_due_runs_one_unit(database):
+    import asyncio
     service, _ = setup(database)
-    result = await service.run_due(datetime.now().astimezone())
+    tasks = await service.run_due(datetime.now().astimezone())
+    assert len(tasks) == 1
+    [result] = await asyncio.gather(*tasks)
     assert result and result["storage"] is None
     with database.connect() as connection:
-        assert connection.execute("SELECT COUNT(*) FROM search_runs").fetchone()[0] == 1
+        assert connection.execute("SELECT COUNT(*), MAX(device) FROM search_runs").fetchone()[:] == (1, "ios:test-phone")
+
+
+def two_phones(database, monkeypatch, connected=(True, True)):
+    database.state_set("collector_devices", ["ios:one", "ios:two"])
+    monkeypatch.setattr("app_monitor.service.discover_devices", lambda: [
+        Device("ios:one", "One", "ios", connected[0], "one"), Device("ios:two", "Two", "ios", connected[1], "two")])
+
+
+async def test_idle_devices_search_different_models_in_parallel(database, monkeypatch):
+    import asyncio
+    service, _ = setup(database)
+    two_phones(database, monkeypatch)
+    started, release = [], asyncio.Event()
+
+    class Phone:
+        async def collect(self, udid, version, keyword, *args, **kwargs):
+            started.append((udid, keyword))
+            await release.wait()
+            return CollectResult(items=[], passes=[{"label": "新发", "error": None}])
+
+    service.iphone_collector = Phone()
+    tasks = await service.run_due()
+    assert len(tasks) == 2
+    for _ in range(20):
+        if len(started) == 2:
+            break
+        await asyncio.sleep(0.01)
+    # Both phones are collecting at once, each on its own model.
+    assert sorted(udid for udid, _ in started) == ["one", "two"]
+    assert sorted(keyword for _, keyword in started) == ["iPhone 15 Pro", "iPhone 16"]
+    assert service.busy and len(service.live) == 2
+    assert await service.run_due() == []
+    with pytest.raises(ValueError, match="所有采集设备都在搜索"):
+        await service.run_model("15 Pro")
+    release.set()
+    results = await asyncio.gather(*tasks)
+    assert all(result and not result.get("stopped") for result in results)
+    assert not service.busy and service.live == []
+    with database.connect() as connection:
+        rows = connection.execute("SELECT model, device FROM search_runs ORDER BY device").fetchall()
+    assert {tuple(row) for row in rows} == {("15 Pro", "ios:" + udid) if keyword == "iPhone 15 Pro"
+                                            else ("16", "ios:" + udid) for udid, keyword in started}
+
+
+async def test_disconnected_device_does_not_claim_due_models(database, monkeypatch):
+    import asyncio
+    service, _ = setup(database)
+    two_phones(database, monkeypatch, connected=(False, True))
+    calls = []
+
+    class Phone:
+        async def collect(self, udid, *args, **kwargs):
+            calls.append(udid)
+            return CollectResult(items=[], passes=[{"label": "新发", "error": None}])
+
+    service.iphone_collector = Phone()
+    await asyncio.gather(*await service.run_due())
+    assert calls == ["two"]
+    # The other model stays due for the connected phone instead of being consumed by a failure.
+    assert service.schedule_state()["next_model"] is not None
+
+
+async def test_failing_device_pauses_alone(database, monkeypatch):
+    import asyncio
+    service, _ = setup(database)
+    two_phones(database, monkeypatch)
+
+    class Phone:
+        async def collect(self, udid, *args, **kwargs):
+            if udid == "one":
+                raise RuntimeError("WDA 不可用")
+            return CollectResult(items=[], passes=[{"label": "新发", "error": None}])
+
+    service.iphone_collector = Phone()
+    for _ in range(3):
+        with pytest.raises(RuntimeError):
+            await service.run_model("16", device_id="ios:one")
+    state = service.schedule_state()
+    assert state["active"] and state["paused_devices"] == ["ios:one"] and state["ready_devices"] == ["ios:two"]
+    assert state["can_retry"]
+    tasks = await service.run_due()
+    await asyncio.gather(*tasks)
+    with database.connect() as connection:
+        latest = connection.execute("SELECT device, ok FROM search_runs ORDER BY id DESC LIMIT 1").fetchone()
+    assert len(tasks) == 1 and tuple(latest) == ("ios:two", 1)
+
+
+def test_parallel_sessions_forward_distinct_local_wda_ports(monkeypatch):
+    from app_monitor import appium_server
+    monkeypatch.setattr(appium_server, "_local_ports", {})
+    first, second = appium_server.wda_port_capabilities("a"), appium_server.wda_port_capabilities("b")
+    assert first["appium:wdaLocalPort"] != second["appium:wdaLocalPort"]
+    assert first["appium:wdaRemotePort"] == second["appium:wdaRemotePort"] == appium_server.WDA_PORT
+    assert appium_server.wda_port_capabilities("a") == first
 
 
 async def test_retry_failed_search_runs_immediately_and_restarts_failure_streak(database):
@@ -493,8 +590,8 @@ async def test_stop_interrupts_phone_commands_and_preserves_cleanup(database, mo
     with database.connect() as c:
         row = c.execute("SELECT * FROM search_runs WHERE id=?", (result["run_id"],)).fetchone()
     assert row["finished_at"] and row["error"] == STOP_REASON
-    assert not service._failure_paused(datetime.now().astimezone())
-    assert await service.run_due() is None
+    assert not service._device_paused("ios:test-phone", datetime.now().astimezone())
+    assert await service.run_due() == []
     assert (await api.start_monitor())["rules"]["enabled"]
 
 
@@ -550,7 +647,7 @@ async def test_items_are_judged_and_pushed_while_collection_is_still_running(dat
             seen_during_collection["pushed"] = [item_id for item_id, _ in notifier.sent]
             with database.connect() as connection:
                 seen_during_collection["run_items"] = connection.execute("SELECT COUNT(*) FROM run_items").fetchone()[0]
-            seen_during_collection["live"] = dict(service.live)
+            [seen_during_collection["live"]] = service.live
             on_items([], pass_info={"label": "新发", "storage": "256", "filter_applied": True,
                                     "observed": 1, "error": None}, storage="256")
             await asyncio.sleep(0.05)
@@ -571,7 +668,7 @@ async def test_items_are_judged_and_pushed_while_collection_is_still_running(dat
     assert seen_during_collection["passes"][0]["storage"] == "256"
     assert len(notifier.sent) == 1  # 采集结束后不会重复处理同一商品
     assert result["matched"] == 1 and result["passes"][0]["matched"] == 1
-    assert service.live is None
+    assert service.live == []
 
 
 async def test_item_stream_accepts_items_from_iphone_thread():

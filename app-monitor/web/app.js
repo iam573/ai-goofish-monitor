@@ -110,12 +110,17 @@ async function loadOverview() {
     tone: "ok",
   };
   const schedule = value.schedule;
+  const lives = value.live || [];
+  const deviceName = id => state.devices.find(device => device.id === id)?.name || "iPhone";
+  const paused = (schedule.paused_devices || []).map(deviceName);
+  const liveText = lives.map(live => `${lives.length > 1 ? `${live.model}：` : ""}${live.stage} · 已看 ${live.observed} 件 · 命中 ${live.matched}`).join("；");
+  const pausedText = paused.length && schedule.active ? ` · ${paused.join("、")} 连续失败暂停中` : "";
   const searchStep = {
     label: "③ 闲鱼搜索",
-    main: value.stopping ? "正在终止监控…" : value.busy ? (value.live ? `正在搜索 iPhone ${value.live.model}` : "正在搜索…") : !rules.enabled ? "监控已停止" : schedule.can_retry ? "搜索暂时暂停" : schedule.active ? (schedule.next_label ? `下一个：iPhone ${schedule.next_label}` : "本轮已搜完") : "未在搜索",
-    sub: value.live ? `${value.live.stage} · 已看 ${value.live.observed} 件 · 命中 ${value.live.matched}` : schedule.active ? `${rules.search_start}–${rules.search_end} · ${schedule.units} 个搜索单元 · 今日 ${value.runs_today} 次` : schedule.reason,
+    main: value.stopping ? "正在终止监控…" : lives.length > 1 ? `${lives.length} 台 iPhone 正在并行搜索` : value.busy ? (lives.length ? `正在搜索 iPhone ${lives[0].model}` : "正在搜索…") : !rules.enabled ? "监控已停止" : schedule.can_retry && !schedule.active ? "搜索暂时暂停" : schedule.active ? (schedule.next_label ? `下一个：iPhone ${schedule.next_label}` : "本轮已搜完") : "未在搜索",
+    sub: (liveText || (schedule.active ? `${rules.search_start}–${rules.search_end} · ${schedule.units} 个搜索单元 · 今日 ${value.runs_today} 次` : schedule.reason)) + pausedText,
     tone: value.busy || schedule.active ? "ok" : (rules.enabled ? "warn" : "off"),
-    retry: schedule.can_retry && !value.busy && !value.stopping,
+    retry: schedule.can_retry && !value.stopping,
   };
   const dealStep = {
     label: "④ 命中推送",
@@ -222,9 +227,7 @@ function deviceSummary() {
 }
 
 function renderDevices() {
-  const selected = selectedDevices();
   document.querySelector("#device-options").innerHTML = state.devices.map(device => {
-    const order = selected.indexOf(device);
     const meta = escapeHtml(device.os_version ? `iOS ${device.os_version}` : "iPhone");
     const proxy = device.collection_channel === "proxy";
     const status = device.proxy_status || {};
@@ -235,7 +238,6 @@ function renderDevices() {
       <span class="device-glyph">${deviceIcons.ios}</span>
       <span class="device-info"><b>${escapeHtml(device.name)}</b>
         <small>${meta} · <span class="${device.connected ? "online-text" : "warn-text"}">${escapeHtml(device.connection_status || (device.connected ? "已连接" : "未连接"))}</span></small></span>
-      ${selected.length > 1 && order >= 0 ? `<em class="device-order" title="采集顺序">${order + 1}</em>` : ""}
       <select class="device-channel" data-device-channel aria-label="${escapeHtml(device.name)} 采集方式">
         <option value="ui" ${!proxy ? "selected" : ""}>原有采集</option>
         <option value="proxy" ${proxy ? "selected" : ""}>代理采集</option>
@@ -255,6 +257,7 @@ function renderDevices() {
     </div>` : device.proxy_client_ip ? `<p class="device-channel-note">使用原有采集时，请在手机关闭 Wi-Fi 代理。</p>` : ""}</div>`;
   }).join("") || `<p class="hint">没有检测到 iPhone；Mac 采集已禁用。</p>`;
   document.querySelector("#device-summary").textContent = deviceSummary();
+  const selected = selectedDevices();
   const dot = document.querySelector("#device-dot");
   const ready = selected.every(device => device.connected && (device.collection_channel !== "proxy" || device.proxy_status?.client_connected));
   dot.className = `dot ${!selected.length ? "bad" : ready ? "ok" : "warn"}`;
@@ -462,9 +465,10 @@ async function updateRuleHints() {
     (scrolls ? `，每个容量向下翻 ${scrolls} 屏读完第一页。` : `，只读当前一屏。`);
   const { models, capacities, total, allCapacities } = targetCounts();
   const interval = values.model_interval_minutes || 90;
-  const round = models ? Math.ceil((models * (4 + (city ? 3 : 0)) + capacities * (6 + 4 * scrolls + 8)) / 60) : 0;
+  const parallel = Math.max(1, devices.length);
+  const round = models ? Math.ceil((models * (4 + (city ? 3 : 0)) + capacities * (6 + 4 * scrolls + 8)) / 60 / parallel) : 0;
   document.querySelector("#cadence-hint").innerHTML = models
-    ? `<div><span>每轮约</span><strong>${round}<small> 分钟</small></strong></div>
+    ? `<div><span>每轮约${parallel > 1 ? `（${parallel} 台并行）` : ""}</span><strong>${round}<small> 分钟</small></strong></div>
        <div><span>同一机型</span><strong>${Math.max(round, interval)}<small> 分钟一次</small></strong></div>
        ${round > interval ? `<p class="warn-text">间隔小于一轮耗时，实际按一轮的耗时循环。</p>` : ""}`
     : `<p class="hint">还没有启用的机型。</p>`;

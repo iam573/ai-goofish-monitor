@@ -2,10 +2,11 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 import time
 import xml.etree.ElementTree as ET
 
-from .appium_server import WDA_PORT, ensure_appium_server
+from .appium_server import ensure_appium_server, wda_port_capabilities
 from .collector import CollectResult, emit_safely
 from .iphone_collector import (IPhoneCollector, _VerificationRequired, _raise_if_verification,
                                _brief_error, _quit_driver, _text, detail_back_rect, detail_content, detail_seller, is_search_results)
@@ -77,6 +78,16 @@ class IPhoneProxyCollector(IPhoneCollector):
     def __init__(self, settings, proxy):
         super().__init__(settings)
         self.proxy = proxy
+        self._local = threading.local()
+
+    @property
+    def _storage_requested_at(self):
+        # Each device collects in its own worker thread on this shared instance.
+        return getattr(self._local, "storage_requested_at", None)
+
+    @_storage_requested_at.setter
+    def _storage_requested_at(self, value):
+        self._local.storage_requested_at = value
 
     async def collect(self, udid, os_version, keyword, region_hint, region_steps, storages, scroll_pages,
                       is_candidate, on_items=None, check_detail=None, *, client_ip):
@@ -95,7 +106,7 @@ class IPhoneProxyCollector(IPhoneCollector):
                 "appium:shouldTerminateApp": False, "appium:usePrebuiltWDA": True,
                 "appium:derivedDataPath": str(self.settings.ios_wda_derived_data_path),
                 "appium:updatedWDABundleId": self.settings.ios_wda_bundle_id,
-                "appium:wdaLocalPort": WDA_PORT, "appium:newCommandTimeout": 300,
+                **wda_port_capabilities(udid), "appium:newCommandTimeout": 300,
                 "appium:waitForIdleTimeout": 0.5,
                 "appium:settings": {"waitForIdleTimeout": 0.5, "animationCoolOffTimeout": 0.3}}
         if os_version:

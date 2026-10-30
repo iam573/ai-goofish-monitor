@@ -1,4 +1,4 @@
-"""监控主流程：按全局规则轮流搜索各机型，判价、去重、推送。"""
+"""监控主流程：按全局规则把到期机型分给空闲 iPhone 并行搜索，判价、去重、推送。"""
 
 from __future__ import annotations
 
@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import json
 import logging
+from contextvars import ContextVar
 from dataclasses import asdict, replace
 from datetime import datetime, timedelta
 from threading import Event
@@ -90,9 +91,15 @@ def unit_label(model: str, storage: str | None) -> str:
     return f"{model} {storage if storage.endswith('T') else storage + 'G'}"
 
 
-# 连续失败达到该次数后暂停一段时间（通常是 App 未运行、未登录或没有辅助功能权限）。
+# 同一台设备连续失败达到该次数后暂停一段时间（通常是 App 未运行、未登录或 WDA 不可用）。
 FAILURE_PAUSE_AFTER = 3
 FAILURE_PAUSE = timedelta(minutes=10)
+
+_current_live: ContextVar[dict[str, Any] | None] = ContextVar("monitor_live_run", default=None)
+
+
+class MonitorBusy(ValueError):
+    """设备或机型已被其他搜索占用。"""
 
 
 class MonitorService:
@@ -113,24 +120,37 @@ class MonitorService:
         self.iphone_proxy_collector.wda_maintenance = self.wda_maintenance
         self.smart = SmartService(database, self.settings)
         self.notifications = notifications
+        # 持有时不再开始新的搜索，用于需要独占的维护操作（如重新分析）。
         self._lock = asyncio.Lock()
-        # 正在进行的搜索：run_id、当前步骤、已看到 / 命中件数，供后台实时显示
-        self.live: dict[str, Any] | None = None
-        self._stop_event: Event | None = None
+        # 每台设备、每款机型同一时间只跑一个搜索；不同设备各搜各的机型。
+        self._device_runs: dict[str, str] = {}
+        self._model_runs: set[str] = set()
+        # 正在进行的搜索：run_id → 设备、当前步骤、已看到 / 命中件数，供后台实时显示
+        self._live: dict[int, dict[str, Any]] = {}
+        self._stop_events: set[Event] = set()
+        self._tasks: set[asyncio.Task] = set()
 
     @property
     def busy(self) -> bool:
-        return self._lock.locked()
+        return self._lock.locked() or bool(self._model_runs)
 
     @property
     def stopping(self) -> bool:
-        return self._stop_event is not None and self._stop_event.is_set()
+        return any(event.is_set() for event in self._stop_events)
+
+    @property
+    def live(self) -> list[dict[str, Any]]:
+        return [dict(self._live[run_id]) for run_id in sorted(self._live)]
+
+    def live_for(self, run_id: int | None) -> dict[str, Any] | None:
+        value = self._live.get(run_id) if run_id is not None else None
+        return dict(value) if value else None
 
     def request_stop(self) -> None:
-        if self._stop_event is not None:
-            self._stop_event.set()
-            if self.live is not None:
-                self.live["stage"] = "正在终止，等待当前指令退出"
+        for event in self._stop_events:
+            event.set()
+        for value in self._live.values():
+            value["stage"] = "正在终止，等待当前指令退出"
 
     # ------------------------------------------------------------------ 调度
 
@@ -139,85 +159,115 @@ class MonitorService:
         now = now or datetime.now().astimezone()
         rules = load_rules(self.database)
         units = search_units(self.database, rules)
+        selected = selected_devices(self.database)
+        paused = [device for device in selected if self._device_paused(device, now)]
         state: dict[str, Any] = {
             "active": False, "reason": "", "next_model": None, "next_storage": None,
             "next_label": None, "targets": len({unit["model"] for unit in units}), "units": len(units),
-            "can_retry": False,
+            "can_retry": False, "ready_devices": [], "paused_devices": [],
         }
         if not rules.enabled:
             state["reason"] = "监控已暂停"
-        elif not selected_devices(self.database):
+        elif not selected:
             state["reason"] = "请选择已连接的 iPhone；Mac 采集已禁用"
         elif not units:
             state["reason"] = "没有可搜索的机型，请先同步报价"
         elif not in_search_window(rules, now):
             state["reason"] = f"不在搜索时段 {rules.search_start}–{rules.search_end}"
-        elif self._failure_paused(now):
-            state["reason"] = f"连续 {FAILURE_PAUSE_AFTER} 次搜索失败，暂停 10 分钟"
-            state["can_retry"] = True
         else:
-            state["active"] = True
-            state["reason"] = "搜索中"
-        due = self._next_due(units, rules, now)
+            state.update(paused_devices=paused, can_retry=bool(paused),
+                         ready_devices=[device for device in selected if device not in paused])
+            if state["ready_devices"]:
+                state["active"] = True
+                state["reason"] = "搜索中"
+            else:
+                state["reason"] = f"连续 {FAILURE_PAUSE_AFTER} 次搜索失败，暂停 10 分钟"
+        due = self._due_units(units, rules, now)
         if due:
             state.update(
-                next_model=due["model"], next_storage=due["storage"],
-                next_label=unit_label(due["model"], due["storage"]),
+                next_model=due[0]["model"], next_storage=due[0]["storage"],
+                next_label=unit_label(due[0]["model"], due[0]["storage"]),
             )
         if state["active"] and not due:
             state["reason"] = "本轮已搜完，等待下一轮"
         return state
 
-    async def run_due(self, now: datetime | None = None) -> dict[str, Any] | None:
-        """调度器每 15 秒调用一次：空闲时搜索一个到期的单元，搜完立即可以开始下一个。"""
-        if self.busy:
-            return None
+    async def run_due(self, now: datetime | None = None) -> list[asyncio.Task]:
+        """调度器每 15 秒调用一次：给每台空闲且已连接的设备各派一个到期机型，各自在后台搜索。"""
         now = now or datetime.now().astimezone()
         state = self.schedule_state(now)
-        if not state["active"] or not state["next_model"]:
-            return None
+        idle = [device for device in state["ready_devices"] if device not in self._device_runs]
+        if self._lock.locked() or not state["active"] or not state["next_model"] or not idle:
+            return []
+        found = {device.id: device for device in await asyncio.to_thread(discover_devices)}
+        # 未连接的设备不领机型，否则失败的搜索会把机型推迟到下一轮。
+        idle = [device for device in idle
+                if device not in self._device_runs and found.get(device) and found[device].connected]
+        rules = load_rules(self.database)
+        units = self._due_units(search_units(self.database, rules), rules, now)
+        tasks = []
+        for device_id, unit in zip(idle, units):
+            if self._lock.locked():
+                break
+            self._claim(unit["model"], device_id)
+            task = asyncio.create_task(self._run_claimed_quietly(unit["model"], unit["storage"], device_id))
+            self._tasks.add(task)
+            task.add_done_callback(self._tasks.discard)
+            tasks.append(task)
+        return tasks
+
+    async def _run_claimed_quietly(self, model: str, storage: str | None, device_id: str) -> dict[str, Any] | None:
         try:
-            return await self.run_model(state["next_model"], state["next_storage"], trigger="schedule")
+            return await self._run_claimed(model, storage, "schedule", None, False, False, device_id)
         except Exception:
             return None  # 错误已写入 search_runs
 
-    def _next_due(self, units: list[dict[str, Any]], rules: Rules, now: datetime) -> dict[str, Any] | None:
+    def _due_units(self, units: list[dict[str, Any]], rules: Rules, now: datetime) -> list[dict[str, Any]]:
+        """到期且没有正在搜索的单元，最久没搜的排在前面。"""
         last = self.last_runs()
         interval = timedelta(minutes=max(1, rules.model_interval_minutes))
         due = []
         for unit in units:
+            if unit["model"] in self._model_runs:
+                continue
             started = last.get(unit_key(unit["model"], None), {}).get("started_at")
             started_at = datetime.fromisoformat(started) if started else None
             if started_at is None or now - started_at >= interval:
                 due.append((started_at or datetime.min.replace(tzinfo=now.tzinfo), unit))
-        return min(due, key=lambda value: value[0])[1] if due else None
+        return [unit for _, unit in sorted(due, key=lambda value: value[0])]
 
-    def _failure_paused(self, now: datetime) -> bool:
+    def _device_paused(self, device_id: str, now: datetime) -> bool:
         reset_after = self.database.state_get("failure_pause_reset_after", 0)
         with self.database.connect() as connection:
             rows = connection.execute(
-                "SELECT ok, started_at FROM search_runs WHERE ok IS NOT NULL AND id > ? AND COALESCE(error, '') != ? ORDER BY id DESC LIMIT ?",
-                (reset_after, STOP_REASON, FAILURE_PAUSE_AFTER),
+                "SELECT ok, started_at FROM search_runs WHERE device=? AND ok IS NOT NULL AND id > ? "
+                "AND COALESCE(error, '') != ? ORDER BY id DESC LIMIT ?",
+                (device_id, reset_after, STOP_REASON, FAILURE_PAUSE_AFTER),
             ).fetchall()
         if len(rows) < FAILURE_PAUSE_AFTER or any(row["ok"] for row in rows):
             return False
         return now - datetime.fromisoformat(rows[0]["started_at"]) < FAILURE_PAUSE
 
     async def retry_failed(self) -> dict[str, Any]:
-        """Reset the current failure streak and immediately retry an enabled model."""
-        if self.busy:
-            raise ValueError("正在搜索，请稍后再试")
-        async with self._lock:
-            state = self.schedule_state()
-            if not state["can_retry"]:
-                raise ValueError(f"当前无法重试：{state['reason']}")
-            units = search_units(self.database, load_rules(self.database))
-            with self.database.connect() as connection:
-                latest = connection.execute("SELECT id, model FROM search_runs ORDER BY id DESC LIMIT 1").fetchone()
-            unit = next((unit for unit in units if unit["model"] == latest["model"]), units[0])
-            self.database.state_set("failure_pause_reset_after", latest["id"])
-            with self.smart.run_settings():
-                return await self._run_model(unit["model"], None, "manual", None, False, False)
+        """Reset failure streaks and immediately retry on a paused device."""
+        if self._lock.locked():
+            raise ValueError("正在执行其他操作，请稍后再试")
+        state = self.schedule_state()
+        if not state["can_retry"]:
+            raise ValueError(f"当前无法重试：{state['reason']}")
+        device_id = next((device for device in state["paused_devices"] if device not in self._device_runs), None)
+        if device_id is None:
+            raise ValueError("暂停的设备正在搜索，请稍后再试")
+        units = [unit for unit in search_units(self.database, load_rules(self.database))
+                 if unit["model"] not in self._model_runs]
+        if not units:
+            raise ValueError("可搜索的机型都在搜索中，请稍后再试")
+        with self.database.connect() as connection:
+            latest = connection.execute("SELECT id, model FROM search_runs WHERE device=? ORDER BY id DESC LIMIT 1",
+                                        (device_id,)).fetchone()
+        unit = next((unit for unit in units if unit["model"] == latest["model"]), units[0])
+        self.database.state_set("failure_pause_reset_after", latest["id"])
+        return await self.run_model(unit["model"], None, "manual", device_id=device_id)
 
     def last_runs(self) -> dict[str, dict[str, Any]]:
         """每款机型最近一次搜索，容量结果保存在该次运行的 passes 中。"""
@@ -249,60 +299,92 @@ class MonitorService:
         injected_items: list[dict[str, Any]] | None = None,
         region_applied: bool = False,
         filter_applied: bool = False,
+        device_id: str | None = None,
     ) -> dict[str, Any]:
-        async with self._lock:
-            with self.smart.run_settings():
-                return await self._run_model(model, storage, trigger, injected_items, region_applied, filter_applied)
+        """立即搜索一个机型；未指定设备时使用一台空闲的已选设备。调试注入不占用设备。"""
+        if injected_items is None and device_id is None:
+            device_id = await self._pick_device()
+        self._claim(model, device_id)
+        return await self._run_claimed(model, storage, trigger, injected_items, region_applied, filter_applied, device_id)
 
-    async def _run_model(self, model, storage, trigger, injected_items, region_applied, filter_applied):
+    async def _pick_device(self) -> str | None:
+        selected = selected_devices(self.database)
+        idle = [device for device in selected if device not in self._device_runs]
+        if selected and not idle:
+            raise MonitorBusy("所有采集设备都在搜索，请稍后再试")
+        if len(idle) > 1:
+            found = {device.id: device for device in await asyncio.to_thread(discover_devices)}
+            idle.sort(key=lambda device: not (found.get(device) and found[device].connected))
+        return idle[0] if idle else None
+
+    def _claim(self, model: str, device_id: str | None) -> None:
+        if self._lock.locked():
+            raise MonitorBusy("正在执行其他操作，请稍后再试")
+        if model in self._model_runs:
+            raise MonitorBusy(f"iPhone {model} 正在搜索，请稍后再试")
+        if device_id is not None and device_id in self._device_runs:
+            raise MonitorBusy("这台设备正在搜索其他机型，请稍后再试")
+        self._model_runs.add(model)
+        if device_id is not None:
+            self._device_runs[device_id] = model
+
+    async def _run_claimed(self, model, storage, trigger, injected_items, region_applied, filter_applied, device_id):
         event = Event()
-        self._stop_event = event
+        self._stop_events.add(event)
         try:
-            with stop_scope(event):
-                return await self._execute_model(model, storage, trigger, injected_items, region_applied, filter_applied)
+            with self.smart.run_settings(), stop_scope(event):
+                return await self._execute_model(model, storage, trigger, injected_items,
+                                                 region_applied, filter_applied, device_id)
         except asyncio.CancelledError:
             event.set()
             raise
         finally:
-            self._stop_event = None
+            self._stop_events.discard(event)
+            self._model_runs.discard(model)
+            if device_id is not None:
+                self._device_runs.pop(device_id, None)
 
-    async def _execute_model(self, model, storage, trigger, injected_items, region_applied, filter_applied):
+    async def _execute_model(self, model, storage, trigger, injected_items, region_applied, filter_applied, device_id=None):
         rules = load_rules(self.database)
         keyword = search_keyword(model)
         with self.database.connect() as connection:
             run_id = connection.execute(
                 """
-                INSERT INTO search_runs(model, storage, keyword, region, trigger, started_at)
-                VALUES (?, ?, ?, ?, ?, ?)
+                INSERT INTO search_runs(model, storage, keyword, region, trigger, started_at, device)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
-                (model, storage, keyword, rules.region_city or None, trigger, utc_now()),
+                (model, storage, keyword, rules.region_city or None, trigger, utc_now(), device_id),
             ).lastrowid
         logger.info(
-            "监控任务开始 run_id=%s trigger=%s model=%s storage=%s keyword=%s region=%s",
-            run_id, trigger, model, storage or "全部容量", keyword, rules.region_city or "未指定",
+            "监控任务开始 run_id=%s trigger=%s model=%s storage=%s keyword=%s region=%s device=%s",
+            run_id, trigger, model, storage or "全部容量", keyword, rules.region_city or "未指定", device_id or "无",
         )
+        live = {"run_id": run_id, "model": model, "device": device_id, "stage": "准备搜索", "observed": 0, "matched": 0}
+        self._live[run_id] = live
+        live_token = _current_live.set(live)
         try:
             results: list[dict[str, Any]] = []
             processed: set[str] = set()
             pass_stats: dict[tuple[str, str | None], dict[str, int]] = {}
             live_passes: list[dict[str, Any]] = []
-            self.live = {"run_id": run_id, "model": model, "stage": "准备搜索", "observed": 0, "matched": 0}
 
             async def handle(items: list[dict[str, Any]], meta: dict[str, Any]) -> None:
                 """实时处理采集器交出的商品：写入运行记录、判价、命中就立即推送。"""
                 checkpoint()
                 if meta.get("stage"):
-                    self.live["stage"] = (
+                    live["stage"] = (
                         f"{meta['device_name']} · {meta['stage']}"
                         if meta.get("device_name") and meta.get("device") != MAC_DEVICE else meta["stage"]
                     )
+                if meta.get("device_name"):
+                    live["device_name"] = meta["device_name"]
                 if meta.get("pass_info") is not None:
                     live_passes.append({**meta["pass_info"], "device": meta.get("device", MAC_DEVICE),
                                         "device_name": meta.get("device_name")})
                     self._save_live_passes(run_id, live_passes)
                 if meta.get("cards"):
                     recorded = self._record_cards(run_id, meta["cards"], rules, meta, model)
-                    self.live["observed"] += recorded
+                    live["observed"] += recorded
                 fresh = [item for item in items if item.get("item_id") and item["item_id"] not in processed]
                 if not fresh:
                     return
@@ -316,8 +398,8 @@ class MonitorService:
                 stats = pass_stats.setdefault((meta.get("device", MAC_DEVICE), storage_value), {"matched": 0, "notified": 0})
                 stats["matched"] += part["matched"]
                 stats["notified"] += part["notified"]
-                self.live["observed"] += part["observed"]
-                self.live["matched"] += part["matched"]
+                live["observed"] += part["observed"]
+                live["matched"] += part["matched"]
                 results.append(part)
 
             if injected_items is None:
@@ -335,7 +417,8 @@ class MonitorService:
                     raise ValueError(f"{model} 没有启用的容量筛选项")
                 stream = ItemStream(handle)
                 try:
-                    collected = await self._collect_sources(keyword, model, storages, rules, stream)
+                    collected = await self._collect_sources(keyword, model, storages, rules, stream,
+                                                            [device_id] if device_id else [])
                 finally:
                     await stream.close()
             else:
@@ -402,8 +485,7 @@ class MonitorService:
             )
             return {"run_id": run_id, "model": model, "storage": storage, **result}
         except MonitorStopped:
-            result = {"observed": (self.live or {}).get("observed", 0),
-                      "matched": (self.live or {}).get("matched", 0),
+            result = {"observed": live["observed"], "matched": live["matched"],
                       "notified": sum(part["notified"] for part in results), "passes": live_passes,
                       "stopped": True}
             self._finish_run(run_id, False, result, STOP_REASON)
@@ -418,12 +500,14 @@ class MonitorService:
             logger.exception("监控任务失败 run_id=%s model=%s storage=%s error=%s", run_id, model, storage, exc)
             raise
         finally:
-            self.live = None
+            _current_live.reset(live_token)
+            self._live.pop(run_id, None)
 
     async def _collect_sources(
         self, keyword: str, model: str, storages: list[str], rules: Rules, stream: ItemStream | None = None,
+        devices: list[str] | None = None,
     ) -> CollectResult:
-        selected = selected_devices(self.database)
+        selected = selected_devices(self.database) if devices is None else devices
         channels = {key: device_channel(self.database, key) for key in selected}
         clients = [value["client_ip"] for value in channels.values() if value["channel"] == "proxy" and value["client_ip"]]
         with self.proxy.reserve(clients):
@@ -702,8 +786,8 @@ class MonitorService:
             if not broad.matched:
                 decision = broad
             else:
-                if self.live:
-                    self.live["stage"] = f"分析详情与扣费 · {item['item_id']}"
+                if (live := _current_live.get()) is not None:
+                    live["stage"] = f"分析详情与扣费 · {item['item_id']}"
                 logger.info("本地规则/AI复核开始 item_id=%s model=%s storage=%s", item["item_id"], broad.model, broad.storage)
                 record = await self.smart.assess(item, rules, broad.model, broad.storage, region_applied)
                 decision = self.smart_decision(record)
