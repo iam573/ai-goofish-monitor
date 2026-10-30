@@ -8,6 +8,7 @@ export function initSmart({api,escapeHtml,toast,state,gradeOrder,loadOverview,lo
   const labels={model:'机型',storage:'容量',whole_phone:'整机',full_price:'整机实价',battery_health:'电池健康度',screen_watermark:'屏幕水印',screen_broken:'碎屏',function_fault:'功能故障',locked:'锁机/监管/卡贴',repaired:'拆修',screen_replaced:'换屏',battery_replaced:'换电池',water_damage:'进水',back_glass_broken:'后盖破损',warranty:'保修',color:'颜色',variant:'版本'};
   const statuses={matched:'符合条件',pending:'待确认',rejected:'不符合',analysis_failed:'判价或复核失败'};
   labels.battery_cell_replaced='更换电芯';
+  labels.part_replaced='换过电池以外的配件或维修（原装件除外）';
   Object.assign(labels,{screen_original:'原装更换屏',screen_popup:'屏幕弹窗',battery_popup:'电池弹窗',battery_third_party:'第三方电池',battery_swollen:'电池鼓包',overseas:'海外版本',face_id_fault:'面容故障',rear_camera_replaced:'后摄更换',camera_watermark:'镜头水印',screen_aging:'屏幕老化',front_camera_spots:'前摄彩点',rear_camera_spots:'后摄彩点',front_camera_flare:'前镜头蓝光',rear_camera_flare:'后镜头蓝光',true_tone_missing:'缺少原彩',full_set_missing:'缺少全套配件'});
   let config=null,record=null;
   const gradeEditor=initKeywordEditor(document.querySelector('#valuation-keywords'),{escapeHtml,onChange:onDirty});
@@ -29,6 +30,7 @@ export function initSmart({api,escapeHtml,toast,state,gradeOrder,loadOverview,lo
     payload.blocked_variants=[...document.querySelectorAll('#valuation-variants input:checked')].map(el=>el.value);
     payload.seller_exclude_keywords=sellerEditor.read();
     for(const key of ['base_url','model'])payload[key]=input(key).value.trim();
+    payload.price_cap_grade=input('price_cap_grade').value;
     payload.accepted_grades=[...root.querySelectorAll('[data-accepted-grade]:checked')].map(el=>el.value);
     payload.blocked_conditions=[...document.querySelectorAll('#valuation-blocked input:checked')].map(el=>el.value);
     payload.grade_keywords=gradeEditor.read();
@@ -37,15 +39,16 @@ export function initSmart({api,escapeHtml,toast,state,gradeOrder,loadOverview,lo
   };
   const payload=()=>{const value=read();for(const key of ['key_configured','reviewed_samples','fact_fields','version'])delete value[key];if(input('api_key').value.trim())value.api_key=input('api_key').value.trim();return value;};
   const comparable=(key,value)=>JSON.stringify(['grade_keywords','condition_keywords'].includes(key)?Object.entries(value).sort(([a],[b])=>a.localeCompare(b)):value);
-  function isDirty(){if(!config)return false;const value=read();return Boolean(input('api_key').value.trim())||['enabled','shadow','ai_enabled','notify_pending','base_url','model','accepted_grades','blocked_conditions','grade_keywords','condition_keywords',...scopeFields].some(key=>comparable(key,value[key])!==comparable(key,config[key]));}
+  function isDirty(){if(!config)return false;const value=read();return Boolean(input('api_key').value.trim())||['enabled','shadow','ai_enabled','notify_pending','base_url','model','price_cap_grade','accepted_grades','blocked_conditions','grade_keywords','condition_keywords',...scopeFields].some(key=>comparable(key,value[key])!==comparable(key,config[key]));}
   async function loadConfig(){
     config=await api('/api/smart/config');state.smart=config;
     for(const key of booleanFields)input(key).checked=config[key]??true;
     for(const key of ['base_url','model'])input(key).value=config[key];
+    input('price_cap_grade').value=config.price_cap_grade??'';
     input('api_key').value='';input('api_key').placeholder=config.key_configured?'已配置，留空保留':'未接入模型时留空';
     gradeEditor.load(gradeOrder.map(grade=>({key:grade,label:grade,words:config.grade_keywords[grade],accepted:config.accepted_grades.includes(grade)})));
     deductionEditor.load(deductionRows(config.condition_keywords));
-    document.querySelector('#valuation-blocked').innerHTML=['screen_watermark','screen_broken','function_fault','locked','repaired'].map(key=>`<label class="check"><input type="checkbox" value="${key}" ${config.blocked_conditions.includes(key)?'checked':''}>${labels[key]}</label>`).join('');
+    document.querySelector('#valuation-blocked').innerHTML=['screen_watermark','screen_broken','function_fault','locked','part_replaced','repaired'].map(key=>`<label class="check"><input type="checkbox" value="${key}" ${config.blocked_conditions.includes(key)?'checked':''}>${labels[key]}</label>`).join('');
     const variants={'美版':'美版','日版':'日版','韩版':'韩版','欧版':'欧版','港澳版':'港澳版','台版':'台版','加版':'加版','海外版':'其他外版'};
     config.blocked_variants??=Object.keys(variants);
     config.seller_exclude_keywords??=['通讯','通信','手机专卖','手机店','二手机','二手手机','手机回收','高价回收','上门回收','卖手机','实体数码','严选数码','数码店','数码科技'];

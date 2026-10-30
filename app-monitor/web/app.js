@@ -458,7 +458,10 @@ async function updateRuleHints() {
     `<div class="formula-main">推送：<b>${escapeHtml(ratio ? `¥${money(Math.round(sample * ratio))}` : "¥0")}</b> ≤ 挂牌价 ≤ <b>${sourceName}${escapeHtml(values.quote_grade)}价 + ¥${money(over)}</b></div>
      <div class="hint">例：回收报价 ¥${money(sample)} → 挂牌价 ¥${money(sample + over)} 以内推送${ratio ? `，低于 ¥${money(Math.round(sample * ratio))} 视为引流或非整机` : ""}。</div>`;
 
-  if (smartEnabled) document.querySelector("#price-formula").innerHTML = `<div class="formula-main">关键词判成色 → 扣费后回收价 + ¥${money(over)}</div><div class="hint">候选用允许成色的最高价初筛，详情成色不明按小花报价参考；未说明项按正常处理，矛盾信息列为待确认。低价比例仅标记风险。${state.smart.shadow ? '验证模式：只记录，不发通知。' : ''}</div>`;
+  const cap = state.smart?.price_cap_grade;
+  if (smartEnabled) document.querySelector("#price-formula").innerHTML = cap
+    ? `<div class="formula-main">关键词判成色 → 最高按${escapeHtml(cap)}价扣费后 + ¥${money(over)}</div><div class="hint">描述成色好于${escapeHtml(cap)}或未写成色时按${escapeHtml(cap)}报价，更差的按实际档位；列表初筛同样以${escapeHtml(cap)}价为上限。未说明项按正常处理，矛盾信息列为待确认。低价比例仅标记风险。${state.smart.shadow ? '验证模式：只记录，不发通知。' : ''}</div>`
+    : `<div class="formula-main">关键词判成色 → 扣费后回收价 + ¥${money(over)}</div><div class="hint">候选用允许成色的最高价初筛，详情成色不明按小花报价参考；未说明项按正常处理，矛盾信息列为待确认。低价比例仅标记风险。${state.smart.shadow ? '验证模式：只记录，不发通知。' : ''}</div>`;
 
   // 搜索方式与耗时估算：每次搜索 = 打开搜索 + 区域筛选 + 逐个容量筛选并读「新发」
   const scrolls = Math.max(0, values.scroll_pages || 0);
@@ -491,7 +494,7 @@ function renderRuleSentence(values, { models, capacities, interval, round }) {
       用 ${token("devices", deviceSummary(), selectedDevices().length ? "" : "bad")}
       在 ${token("region_city", values.region_city || "全国")}
       搜索 ${token("targets", `${models} 款机型 · ${capacities} 个容量`, models ? "" : "bad")}，
-      挂牌价不超过 ${token("quote_grade", `${sourceName}${state.smart?.enabled ? "允许成色最高" : values.quote_grade}回收价`)} ${token("max_over_quote", `+ ¥${money(values.max_over_quote || 0)}`)}
+      挂牌价不超过 ${token("quote_grade", `${sourceName}${state.smart?.enabled ? (state.smart.price_cap_grade ? `最高按${state.smart.price_cap_grade}` : "允许成色最高") : values.quote_grade}回收价`)} ${token("max_over_quote", `+ ¥${money(values.max_over_quote || 0)}`)}
       ${state.smart?.enabled ? "进入详情按关键词判成色与扣费；" : `就推送（排除 ${token("exclude_keywords", `${words} 个关键词`)}）；`}
       ${token("search_start", `${values.search_start || "--:--"}–${values.search_end || "--:--"}`)}
       内每款机型约 ${token("model_interval_minutes", `${Math.max(interval, round || 0)} 分钟`)}搜一次。

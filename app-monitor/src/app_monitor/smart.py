@@ -42,8 +42,9 @@ QUOTE_FLAGS = {"screen_original": "原装更换屏", "screen_popup": "屏幕弹�
                "screen_aging": "屏幕老化", "front_camera_spots": "前摄彩点", "rear_camera_spots": "后摄彩点",
                "front_camera_flare": "前镜头蓝光", "rear_camera_flare": "后镜头蓝光",
                "true_tone_missing": "缺少原彩", "full_set_missing": "缺少全套配件"}
-FACT_FIELDS += tuple(QUOTE_FLAGS)
+FACT_FIELDS += tuple(QUOTE_FLAGS) + ("part_replaced",)
 FACT_LABELS.update(QUOTE_FLAGS)
+FACT_LABELS["part_replaced"] = "换过电池以外的配件或维修（原装件除外）"
 DEFAULT_GRADES = {
     "靓机": "99新、九九新、几乎全新、近全新、充新或无明显使用痕迹，可初判靓机；具体瑕疵和故障优先。无拆修单独不代表靓机。",
     "小花": "明确描述轻微划痕或轻微使用痕迹，没有明显磕碰掉漆或屏幕功能缺陷。",
@@ -82,7 +83,9 @@ class SmartConfig(BaseModel):
     base_url: str = ""
     model: str = Field(default="", max_length=150)
     accepted_grades: list[str] = Field(default_factory=lambda: ["靓机", "小花", "大花"])
-    blocked_conditions: list[Literal["screen_watermark", "screen_broken", "function_fault", "locked", "repaired"]] = Field(
+    # 描述成色好于该档或未写明时，都按该档报价判价；留空则按描述成色取价。
+    price_cap_grade: Literal["", "靓机", "小花", "大花", "外爆", "内爆可测"] = ""
+    blocked_conditions: list[Literal["screen_watermark", "screen_broken", "function_fault", "locked", "repaired", "part_replaced"]] = Field(
         default_factory=lambda: ["screen_watermark", "screen_broken", "function_fault", "locked"])
     grade_definitions: dict[str, str] = Field(default_factory=lambda: dict(DEFAULT_GRADES))
     grades_confirmed: bool = False
@@ -170,7 +173,7 @@ class Facts(BaseModel):
     def valid_findings(cls, values: dict[str, Finding]) -> dict[str, Finding]:
         if set(values) - set(FACT_FIELDS):
             raise ValueError("未知的商品事实字段")
-        flags = {"whole_phone", "full_price", "screen_watermark", "screen_broken", "function_fault", "locked", "repaired", "screen_replaced", "battery_replaced", "water_damage", "back_glass_broken"}
+        flags = {"whole_phone", "full_price", "screen_watermark", "screen_broken", "function_fault", "locked", "repaired", "screen_replaced", "battery_replaced", "water_damage", "back_glass_broken", "part_replaced"}
         flags.update(QUOTE_FLAGS)
         for key, finding in values.items():
             if key in flags and finding.value not in {None, "yes", "no"}:
@@ -370,6 +373,13 @@ def scope_decision(item: dict, config: SmartConfig, model=None, storage_hint=Non
     return None
 
 
+def capped_quote(quotes: list[dict], model: str, storage: str, config: SmartConfig) -> dict | None:
+    if not config.price_cap_grade:
+        return None
+    return next((q for q in quotes if q["model"] == model and q["storage"] == storage
+                 and q["grade"] == config.price_cap_grade), None)
+
+
 def candidate_decision(item: dict, rules: Rules, quotes: list[dict], config: SmartConfig,
                        region_applied=False, storage_hint=None, expected_model=None) -> MatchDecision:
     blocked_scope = scope_decision(item, config, expected_model, storage_hint)
@@ -402,6 +412,10 @@ def candidate_decision(item: dict, rules: Rules, quotes: list[dict], config: Sma
         key = (quote["model"], quote["storage"])
         if key not in maxima or float(quote["price"]) > float(maxima[key]["price"]):
             maxima[key] = quote
+    for key, best in list(maxima.items()):
+        cap = capped_quote(quotes, *key, config)
+        if cap is not None and float(cap["price"]) < float(best["price"]):
+            maxima[key] = cap
     # Semantic exclusions are handled in detail, so “无水印/无拆修” aren't false positives.
     broad = replace(rules, min_price_ratio=0, exclude_keywords="")
     result = evaluate(item, broad, list(maxima.values()), region_applied, storage_hint, expected_model)
@@ -462,8 +476,10 @@ def price_facts(item: dict, facts: Facts, quotes: list[dict], policies: list[dic
         finding = facts.findings.get(key)
         if finding and finding.value == "yes":
             return reject(f"存在不接受的问题：{FACT_LABELS[key]}（{finding.evidence}）", "excluded")
+    cap = capped_quote(quotes, model, storage, config)
     if not facts.grade:
-        unknown.append("成色无法确定")
+        if cap is None:
+            unknown.append("成色无法确定")
     elif facts.grade not in config.accepted_grades:
         return reject(f"不接受成色：{facts.grade}", "grade_not_accepted")
     if config.require_no_repair and (not facts.findings.get("repaired") or facts.findings["repaired"].value is None):
@@ -568,7 +584,10 @@ def price_facts(item: dict, facts: Facts, quotes: list[dict], policies: list[dic
         return reject(f"降档后成色不在接受范围：{grade}", "grade_not_accepted")
     quote = next((q for q in available if q["grade"] == grade), None)
     reference = quote
-    if grade is None:
+    if grade is None and cap is not None:
+        reference = quote = cap
+        result["reference_grade"] = cap["grade"]
+    elif grade is None:
         reference = next((q for q in allowed if q["grade"] == "小花"), None)
         if reference is None:
             return reject("成色未确定，且没有可用的小花报价，无法计价", "no_quote")
@@ -576,6 +595,9 @@ def price_facts(item: dict, facts: Facts, quotes: list[dict], policies: list[dic
     elif quote is None:
         unknown.append("未取得确定成色的报价，使用候选上限")
         reference = max(allowed, key=lambda q: float(q["price"]))
+    if cap is not None and float(cap["price"]) < float(reference["price"]):
+        reference = quote = cap
+        result["reference_grade"] = cap["grade"]
     base = float(reference["price"])
     result["base_price"] = base
     result["quote_entry_id"] = quote["id"] if quote else None
@@ -636,6 +658,8 @@ whole_phone/full_price仅在描述能支持整机和完整售价时给yes，订�
 同一字段矛盾时用null并在uncertainties解释。不要把照片水印当成屏幕水印。
 """
 SYSTEM_PROMPT += "\n还可提取以下明确事实（yes/no/null，必须附原文依据）：" + "、".join(f"{key}（{label}）" for key,label in QUOTE_FLAGS.items())
+SYSTEM_PROMPT += ("\npart_replaced：更换或维修过电池/电芯以外的部件（屏幕、外屏玻璃、后盖、摄像头、主板、扩容等）且没写明该部件是原装/官方/正品时为yes；"
+                  "只换过电池为no；“其他原装”不代表被换部件是原装。")
 
 
 class SmartService:

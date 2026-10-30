@@ -165,8 +165,11 @@ class NotificationService:
         lines = [f"挂牌价：¥{float(item['price']):g} · {escape(grade)}（按描述）" if grade
                  else f"挂牌价：¥{float(item['price']):g} · 成色待确认"]
         low, high = value.get("value_low"), value.get("value_high")
-        if low is not None and grade and value.get("status") != "pending":
+        priced_grade = value.get("reference_grade") or grade
+        if low is not None and priced_grade and value.get("status") != "pending":
             price = f"¥{low:g}" if high is None or low == high else f"¥{low:g}～{high:g}"
+            if priced_grade != grade:
+                price += f"（按{escape(priced_grade)}价）"
             difference = float(item['price']) - low
             comparison = (f"需议价 ¥{difference:g}" if difference > 0 else
                           f"低于{'保守' if high is not None and low != high else ''}估值 ¥{-difference:g}" if difference < 0 else "与估值持平")
@@ -185,7 +188,7 @@ class NotificationService:
             for row in value["deductions"]:
                 amount = f"¥{row['min']:g}" if row['min'] == row['max'] else f"¥{row['min']:g}～{row['max']:g}"
                 lines.append(f"· {escape(row['name'])}：−{amount}{'起' if row.get('open_ended') else ''}")
-        upper_only = not (low is not None and grade and value.get("status") != "pending")
+        upper_only = not (low is not None and priced_grade and value.get("status") != "pending")
         lines.append(f"本次扣费：{NotificationService._deduction_summary(value, upper_only=upper_only)}")
         return lines
 

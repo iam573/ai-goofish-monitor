@@ -221,7 +221,15 @@
                     <details id="valuation-grade-rules" open><summary>成色 <span class="hint">所有机型共用</span></summary>
                       <p class="hint">命中词决定成色，勾选可收货的档位。回车或逗号添加，点 × 删除；具体瑕疵优先于“99新”。</p>
                       <div id="valuation-keywords" class="keyword-grid"></div>
-                      <p class="hint">成色未明确时按小花参考，保留待确认。</p>
+                      <label>判价最高按
+                        <select name="valuation_price_cap_grade">
+                          <option value="">描述成色（不封顶）</option>
+                          <option value="靓机">靓机</option>
+                          <option value="小花">小花</option>
+                          <option value="大花">大花</option>
+                        </select>
+                      </label>
+                      <p class="hint">选择后，描述成色好于该档或未写成色时，都按该档报价计算；描述更差的仍按实际档位。不封顶时，成色未明确按小花参考并保留待确认。</p>
                     </details>
                     <details id="valuation-deductions"><summary>扣费 <span class="hint">所有机型共用</span></summary>
                       <p class="hint">命中词可直接增删，后台按商品机型报价自动扣费。否定描述不当作异常，疑似描述保留待确认。</p>

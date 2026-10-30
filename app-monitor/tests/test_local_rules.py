@@ -227,3 +227,76 @@ def test_title_fault_filter_respects_receiving_configuration():
     quotes=[dict(id=1,model='16 Plus',storage='128',grade='靓机',price=3300)]
     item=listing('99新',3260,'iPhone 16 Plus 128G 有锁')
     assert candidate_decision(item,Rules(),quotes,SmartConfig(blocked_conditions=[]),True,'128','16 Plus').matched
+
+
+PARTS_BLOCKED=SmartConfig(blocked_conditions=['screen_watermark','screen_broken','function_fault','locked','part_replaced'])
+
+
+@pytest.mark.parametrize('text,value',[
+    ('99新，屏幕已更换过国产屏','yes'),
+    ('99新，后盖换过，其他原装','yes'),
+    ('99新，唯一问题就是换过前置摄像头','yes'),
+    ('99新，换了高容量电池和华星柔性屏','yes'),
+    ('99新，全原装仅换全新高刷高清屏幕','yes'),
+    ('99新，仅压盖（不弹窗）电池90','yes'),
+    ('99新，用错充电器导致主板搬板维修过','yes'),
+    ('99新，只扩容，其他无拆修','yes'),
+    ('99新，不是原装屏','yes'),
+    ('99新，换过原装屏幕和相机','no'),
+    ('99新，苹果售后换过一次原装屏','no'),
+    ('99新，后盖换的拆机后盖','no'),
+    ('99新，电池和屏幕都修过 都是正品','no'),
+    ('99新，原装无拆机 换过屏幕','yes'),
+    ('99新，只更换全新电池，其他都是原装',None),
+    ('99新，没有因为其他问题拆修过，除了换电池',None),
+    ('99新，换过第三方电池，电池健康100',None),
+    ('99新，购买后无拆机维修','no'),
+    ('99新，非组装或者翻新机','no'),
+    ('99新，换过屏幕膜',None),
+    ('99新，介意的话可以换个国产屏',None),
+])
+def test_non_battery_part_replacement_is_excluded_unless_genuine(quotes,text,value):
+    item=listing(text)
+    facts=extract_local(item,PARTS_BLOCKED,quotes,Rules())
+    assert facts.findings['part_replaced'].value==value
+    facts.verify(evidence_text(item))
+    result=price_facts(item,facts,quotes,[],PARTS_BLOCKED,Rules(),'17','256')
+    assert (result['status']=='rejected')==(value=='yes')
+
+
+def test_part_replacement_is_ignored_unless_selected(quotes):
+    item=listing('99新，后盖换过')
+    facts=extract_local(item,SmartConfig(),quotes,Rules())
+    assert price_facts(item,facts,quotes,[],SmartConfig(),Rules(),'17','256')['status']=='matched'
+
+
+def test_part_replacement_in_title_is_filtered_before_opening_detail(quotes):
+    item=listing('',4500,'iPhone 17 256G 换过国产屏')
+    result=candidate_decision(item,Rules(),quotes,PARTS_BLOCKED,True,'256','17')
+    assert result.code=='excluded' and '电池以外的配件' in result.reason
+    genuine=listing('',4500,'iPhone 17 256G 换过原装屏')
+    assert candidate_decision(genuine,Rules(),quotes,PARTS_BLOCKED,True,'256','17').matched
+
+
+@pytest.mark.parametrize('text,grade,base,status',[
+    ('99新','靓机',4800,'matched'),
+    ('个人自用',None,4800,'matched'),
+    ('99新，但有明显划痕','大花',4000,'matched'),
+])
+def test_price_cap_grade_prices_better_or_unknown_grades_at_cap(quotes,text,grade,base,status):
+    config=SmartConfig(price_cap_grade='小花')
+    item=listing(text,price=base+200)
+    facts=extract_local(item,config,quotes,Rules())
+    result=price_facts(item,facts,quotes,[],config,Rules(max_over_quote=200),'17','256')
+    assert facts.grade==grade and result['base_price']==base and result['status']==status
+    assert result['threshold_high']==base+200
+    too_high=price_facts(listing(text,price=base+201),facts,quotes,[],config,Rules(max_over_quote=200),'17','256')
+    assert too_high['status']=='rejected' and too_high['rejection_code']=='price_high'
+
+
+def test_price_cap_grade_limits_listing_prefilter(quotes):
+    config=SmartConfig(price_cap_grade='小花')
+    assert candidate_decision(listing('',5000),Rules(max_over_quote=200),quotes,config,True,'256','17').matched
+    rejected=candidate_decision(listing('',5001),Rules(max_over_quote=200),quotes,config,True,'256','17')
+    assert rejected.code=='price_high'
+    assert candidate_decision(listing('',5001),Rules(max_over_quote=200),quotes,SmartConfig(),True,'256','17').matched

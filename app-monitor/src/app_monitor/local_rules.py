@@ -67,10 +67,90 @@ def _finding(values, label: str, unknowns: list[str]) -> Finding:
                    evidence=selected[0][1][:500] if selected else "")
 
 
+PARTS = (r"(?:外屏玻璃|外屏|内屏|显示屏|屏幕|屏|总成|后盖玻璃|后玻璃|后盖|后壳|外壳|中框|主板|尾插|听筒|扬声器|喇叭|"
+         r"前置摄像头|后置摄像头|摄像头|像头|镜头|相机|后摄|前摄|面容|排线|按键|马达|配件)")
+PART_QUALIFIER = r"(?:过|了|的|个|一个|一次|新的?|全新|原装|原厂|官方|正品|拆机|苹果|售后|国产|第三方|组装|华星|天马|高刷|高清|柔性|硬屏|oled|品牌|高容量?|超高容的?)*"
+GENUINE = re.compile(r"原装|原厂|官方|正品|官修|苹果售后|直营|授权|拆机|原拆")
+NOT_GENUINE = re.compile(r"非原装|不是原装|非原厂|非正品|接近原装|仿原装|类原装|第三方|三方|国产|组装|副厂|高仿|华星|天马|后压")
+OTHER_PARTS_ORIGINAL = re.compile(r"(?:其他|其它|其余|别的|剩下的?|全|纯)(?:都|全|全部|均)?(?:是)?(?:原装|原厂|正品|原)")
+REPLACED_PART_PATTERNS = (
+    # 换过国产屏 / 更换了电池和后盖 / 修过屏幕
+    rf"(?:更换|换|修)(?:过|了|好)?(?P<q>{PART_QUALIFIER}(?:(?:电池|电芯)[、和及与跟+＋/]{PART_QUALIFIER})?){PARTS}",
+    # 后盖换过 / 屏幕已更换 / 电池和屏幕都修过 / 屏幕没换过
+    rf"{PARTS}(?P<mid>(?:是|有|已经?|被|都|也|均|没有?|未|无|从未|不曾|原装)*)(?:更换|换|修)(?:过|了|新|掉)",
+    r"压(?:过|了)?(?:后盖|盖|屏|外屏)",
+    rf"{PARTS}(?:是|为|用的)?(?:国产|第三方|组装|副厂|高仿|华星|天马)",
+    rf"(?:不是|非|并非)(?:原装|原厂|正品)(?:的)?{PARTS}",
+    rf"{PARTS}[^，,。；;！!？?\n]{{0,8}}?(?:未知部件|非原装部件|无法验证)",
+)
+GENERIC_REPAIRS = (r"拆修过?", r"维修过?", r"修过", r"翻新", r"扩容", r"爆改", r"搬(?:板|ic)", r"飞线",
+                   r"(?:主板|基带)(?:有)?(?:问题|故障|维修|修过)")
+_SENTENCE = re.compile(r"[，,。；;！!？?\n]")
+_FULL_STOP = re.compile(r"[。；;！!？?\n]")
+_ADVICE = re.compile(r"可以|建议|需要|想|准备|打算")
+
+
+def replaced_parts(text: str, findings: dict | None = None, unknowns: list[str] | None = None) -> Finding:
+    """Any non-battery replacement or repair counts unless the part is stated to be genuine."""
+    values = []
+    for pattern in REPLACED_PART_PATTERNS:
+        for match in re.finditer(pattern, text, re.I):
+            if re.match(r"幕?(?:膜|保护|贴)", text[match.end():]):
+                continue  # 换过屏幕膜 is not a screen replacement.
+            left, right = _clause(text, match.start(), match.end())
+            context = left + match.group() + right
+            if _ADVICE.search(left):
+                continue  # Advice such as “可以换个国产屏” describes no actual repair.
+            inner = (match.groupdict().get("q") or "") + (match.groupdict().get("mid") or "")
+            denied_popup = re.search(r"(?:无|没有?|不)(?:提示|显示|弹出?|有)?(?:未知|非原装部件)", match.group())
+            if re.search(r"没|未|无|不曾", inner) or NEGATION.search(left) or denied_popup:
+                values.append((False, context, match.start(), match.end()))
+                continue
+            if UNCERTAIN.search(context):
+                values.append((None, context, match.start(), match.end()))
+                continue
+            before = OTHER_PARTS_ORIGINAL.sub("", left)
+            after = OTHER_PARTS_ORIGINAL.sub("", match.group() + right)[:len(match.group()) + 8]
+            genuine_before = re.search(r"(?:原装|原厂|官方|正品|官修|苹果|直营店?|授权店?)(?:售后|维修|店|的)?$", before)
+            genuine = bool(GENUINE.search(after) or genuine_before) and not NOT_GENUINE.search(before[-6:] + after)
+            values.append((not genuine, context, match.start(), match.end()))
+    for value, evidence, start, end in mentions(text, list(GENERIC_REPAIRS)):
+        if any(start < other_end and end > other_start for _, _, other_start, other_end in values):
+            continue
+        sentence_start = max([m.end() for m in _SENTENCE.finditer(text, 0, start)], default=0)
+        whole_start = max([m.end() for m in _FULL_STOP.finditer(text, 0, start)], default=0)
+        sentence = text[whole_start:(_FULL_STOP.search(text, end) or re.search(r"$", text)).start()]
+        if re.match(r"拆修|维修|修过", text[start:end]) and re.search(r"电池|电芯", sentence) \
+                and not re.search(PARTS, re.sub(r"(?:电池|电芯)", "", sentence)):
+            continue  # “没有因为其他问题拆修过，除了换电池” is a battery repair.
+        prefix = text[sentence_start:start]
+        if value is True and (re.search(r"(?:非|不是|并非)[^，,。；;！!？?\n]{0,6}$", prefix)
+                              or re.search(r"(?:无|没有?|未|从未|不曾)(?:任何|拆机|拆|改装|过|的)*$", prefix)):
+            value = False
+        values.append((value, evidence, start, end))
+    # Screen keywords (国产屏、弹屏…) also come from the editable deduction vocabulary.
+    findings = findings or {}
+    actual = lambda finding: not re.search(r"膜|保护", finding.evidence) and not _ADVICE.search(finding.evidence)
+    screen_original = findings.get("screen_original", Finding())
+    for key in ("screen_popup", "screen_replaced"):
+        finding = findings.get(key)
+        if (finding and finding.value == "yes" and screen_original.value != "yes" and actual(finding)
+                and not any(v[0] is not None for v in values)):
+            values.append((True, finding.evidence, 0, 0))
+    if screen_original.value == "no" and actual(screen_original):
+        values.append((True, screen_original.evidence, 0, 0))
+    return _finding(values, "电池以外的配件更换", unknowns if unknowns is not None else [])
+
+
 def blocked_title_condition(title: str, blocked: list[str], keywords=None) -> tuple[str, str] | None:
     """Skip only explicit, configured faults; negation/uncertainty still use detail review."""
     text = clean(title)
     for key in blocked:
+        if key == "part_replaced":
+            finding = replaced_parts(text)
+            if finding.value == "yes":
+                return key, finding.evidence
+            continue
         finding = _finding(mentions(text, condition_patterns(key, keywords), screen_watermark=key == "screen_watermark"), key, [])
         if finding.value == "yes":
             return key, finding.evidence
@@ -150,6 +230,8 @@ def extract_local(item: dict, config, quotes: list[dict], rules) -> Facts:
                                     evidence=next((v[1] for v in false_price if v[0] is True),f"页面挂牌价：¥{float(item['price']):g}")[:500])
     from .quote_rules import extra_findings
     extra_findings(all_text, findings, unknowns, config.condition_keywords)
+    findings["part_replaced"] = replaced_parts(
+        all_text, findings, unknowns if "part_replaced" in config.blocked_conditions else None)
     findings["warranty"] = Finding()
     matches = []
     for grade, words in config.grade_keywords.items():
@@ -199,7 +281,7 @@ def merge_review(local: Facts, review: Facts) -> Facts:
             if key == "battery_health":
                 if float(previous.value) > float(finding.value):
                     merged.findings[key] = finding
-            elif key in FAULTS:
+            elif key in FAULTS or key == "part_replaced":
                 merged.findings[key] = finding if finding.value == "yes" else previous
                 merged.uncertainties.append(f"本地与AI对{key}的判断存在分歧")
             else:
