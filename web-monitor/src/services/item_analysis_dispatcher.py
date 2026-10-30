@@ -31,6 +31,7 @@ class ItemAnalysisJob:
     zhima_credit_text: Optional[str]
     registration_duration_text: str
     exclude_keyword_rules: tuple[str, ...] = ()
+    local_image_paths: tuple[str, ...] = ()
 
 
 class ItemAnalysisDispatcher:
@@ -172,6 +173,8 @@ class ItemAnalysisDispatcher:
     async def _download_images(self, job: ItemAnalysisJob, record: dict) -> list[str]:
         if not job.analyze_images:
             return []
+        if job.local_image_paths:
+            return [path for path in job.local_image_paths if os.path.exists(path)]
         item_data = record.get("商品信息", {}) or {}
         image_urls = item_data.get("商品图片列表", [])
         if not image_urls:

@@ -96,14 +96,14 @@ class SqliteTaskRepository(TaskRepository):
                     ai_prompt_base_file, ai_prompt_criteria_file, account_state_file,
                     account_strategy, free_shipping, new_publish_option, region,
                     decision_mode, keyword_rules_json, exclude_keyword_rules_json,
-                    is_running
+                    is_running, search_source
                 ) VALUES (
                     :id, :task_name, :enabled, :keyword, :description, :analyze_images,
                     :max_pages, :personal_only, :min_price, :max_price, :cron,
                     :ai_prompt_base_file, :ai_prompt_criteria_file, :account_state_file,
                     :account_strategy, :free_shipping, :new_publish_option, :region,
                     :decision_mode, :keyword_rules_json, :exclude_keyword_rules_json,
-                    :is_running
+                    :is_running, :search_source
                 )
                 """,
                 payload,

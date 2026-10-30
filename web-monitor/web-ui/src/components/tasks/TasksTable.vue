@@ -25,7 +25,8 @@ import {
   Layers,
   MapPin,
   RefreshCcw,
-  Search
+  Search,
+  Smartphone
 } from 'lucide-vue-next'
 import { formatCountdown, formatNextRunAbsolute } from '@/lib/taskSchedule'
 
@@ -168,12 +169,18 @@ const emit = defineEmits<{
                 ¥{{ task.min_price || 0 }} - {{ task.max_price || 'MAX' }}
               </p>
               <div class="mt-2 flex flex-wrap gap-1.5">
-                <Badge variant="outline" class="border-slate-200/70 bg-slate-50 text-slate-500">
-                  {{ task.personal_only ? t('tasks.table.personalOnly') : t('common.all') }}
+                <Badge v-if="task.search_source === 'iphone'" variant="outline" class="border-sky-200 bg-sky-50 text-sky-700">
+                  <Smartphone class="mr-1 h-3 w-3" />
+                  {{ t('tasks.table.iphoneSource') }}
                 </Badge>
-                <Badge variant="outline" class="border-slate-200/70 bg-slate-50 text-slate-500">
-                  {{ task.free_shipping ? t('tasks.table.freeShipping') : t('common.all') }}
-                </Badge>
+                <template v-else>
+                  <Badge variant="outline" class="border-slate-200/70 bg-slate-50 text-slate-500">
+                    {{ task.personal_only ? t('tasks.table.personalOnly') : t('common.all') }}
+                  </Badge>
+                  <Badge variant="outline" class="border-slate-200/70 bg-slate-50 text-slate-500">
+                    {{ task.free_shipping ? t('tasks.table.freeShipping') : t('common.all') }}
+                  </Badge>
+                </template>
                 <Badge v-if="task.region" variant="outline" class="border-slate-200/70 bg-slate-50 text-slate-500">
                   <MapPin class="mr-1 h-3 w-3" />
                   {{ task.region }}
@@ -392,12 +399,18 @@ const emit = defineEmits<{
                   </span>
                 </div>
                 <div class="flex flex-wrap gap-1.5">
-                  <Badge variant="outline" class="text-[9px] h-4 border-slate-100 text-slate-400 px-1.5 font-bold bg-white/40">
-                    {{ task.personal_only ? t('tasks.table.personalOnly') : t('common.all') }}
+                  <Badge v-if="task.search_source === 'iphone'" variant="outline" class="text-[9px] h-4 border-sky-200 text-sky-700 px-1.5 font-bold bg-sky-50">
+                    <Smartphone class="mr-0.5 h-2.5 w-2.5" />
+                    {{ t('tasks.table.iphoneSource') }}
                   </Badge>
-                  <Badge variant="outline" class="text-[9px] h-4 border-slate-100 text-slate-400 px-1.5 font-bold bg-white/40">
-                    {{ task.free_shipping ? t('tasks.table.freeShipping') : t('common.all') }}
-                  </Badge>
+                  <template v-else>
+                    <Badge variant="outline" class="text-[9px] h-4 border-slate-100 text-slate-400 px-1.5 font-bold bg-white/40">
+                      {{ task.personal_only ? t('tasks.table.personalOnly') : t('common.all') }}
+                    </Badge>
+                    <Badge variant="outline" class="text-[9px] h-4 border-slate-100 text-slate-400 px-1.5 font-bold bg-white/40">
+                      {{ task.free_shipping ? t('tasks.table.freeShipping') : t('common.all') }}
+                    </Badge>
+                  </template>
                   <div v-if="task.region" class="flex items-center gap-0.5 text-[9px] font-bold text-slate-400 px-1.5 h-4 bg-slate-50/50 rounded border border-slate-100 truncate max-w-[80px]">
                     <MapPin class="w-2.5 h-2.5" /> {{ task.region }}
                   </div>

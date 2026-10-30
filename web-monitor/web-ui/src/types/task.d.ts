@@ -20,6 +20,7 @@ export interface Task {
   free_shipping?: boolean;
   new_publish_option?: string | null;
   region?: string | null;
+  search_source?: 'web' | 'iphone';
   decision_mode: 'ai' | 'keyword';
   keyword_rules: string[];
   exclude_keyword_rules: string[];
@@ -72,6 +73,7 @@ export interface TaskGenerateRequest {
   free_shipping?: boolean;
   new_publish_option?: string | null;
   region?: string | null;
+  search_source?: 'web' | 'iphone';
   decision_mode?: 'ai' | 'keyword';
   keyword_rules?: string[];
   exclude_keyword_rules?: string[];

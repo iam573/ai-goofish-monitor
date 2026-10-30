@@ -9,6 +9,7 @@ import re
 
 from src.config import STATE_FILE
 from src.infrastructure.persistence.sqlite_task_repository import SqliteTaskRepository
+from src.phone_scraper import SEARCH_SOURCE_IPHONE, scrape_xianyu_via_phone
 from src.scraper import scrape_xianyu
 
 
@@ -91,7 +92,21 @@ async def main():
                     return True
         return False
 
-    if not os.path.exists(STATE_FILE) and not has_bound_account(tasks_config) and not has_any_state_file():
+    requested_tasks = (
+        [task for task in tasks_config if task.get("task_name") == args.task_name]
+        if args.task_name
+        else [task for task in tasks_config if task.get("enabled", False)]
+    )
+    # iPhone 任务使用手机里已登录的闲鱼 App，不需要网页登录态。
+    needs_web_login = any(
+        task.get("search_source") != SEARCH_SOURCE_IPHONE for task in requested_tasks
+    )
+    if (
+        needs_web_login
+        and not os.path.exists(STATE_FILE)
+        and not has_bound_account(tasks_config)
+        and not has_any_state_file()
+    ):
         sys.exit(
             f"错误: 未找到登录状态文件。请在 state/ 中添加账号或配置 account_state_file。"
         )
@@ -197,7 +212,12 @@ async def main():
     tasks = []
     for task_conf in active_task_configs:
         print(f"-> 任务 '{task_conf['task_name']}' 已加入执行队列。")
-        tasks.append(asyncio.create_task(scrape_xianyu(task_config=task_conf, debug_limit=args.debug_limit)))
+        runner = (
+            scrape_xianyu_via_phone
+            if task_conf.get("search_source") == SEARCH_SOURCE_IPHONE
+            else scrape_xianyu
+        )
+        tasks.append(asyncio.create_task(runner(task_config=task_conf, debug_limit=args.debug_limit)))
 
     async def _shutdown_watcher():
         await stop_event.wait()

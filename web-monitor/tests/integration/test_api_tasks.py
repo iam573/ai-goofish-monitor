@@ -157,6 +157,33 @@ def test_generate_ai_task_returns_job_and_completes_async(api_client, api_contex
     assert api_context["scheduler_service"].reload_calls == 1
 
 
+def test_task_search_source_defaults_to_web_and_persists_iphone(api_client, sample_task_payload):
+    response = api_client.post("/api/tasks/", json=sample_task_payload)
+    assert response.json()["task"]["search_source"] == "web"
+
+    response = api_client.patch("/api/tasks/0", json={"search_source": "iphone"})
+    assert response.status_code == 200
+    assert api_client.get("/api/tasks").json()[0]["search_source"] == "iphone"
+
+    payload = dict(sample_task_payload, task_name="bad source", search_source="android")
+    assert api_client.post("/api/tasks/", json=payload).status_code == 422
+
+
+def test_legacy_tasks_table_gets_search_source_column(tmp_path):
+    import sqlite3
+
+    from src.infrastructure.persistence.sqlite_connection import init_schema
+
+    db_path = tmp_path / "legacy.sqlite3"
+    conn = sqlite3.connect(db_path)
+    conn.execute("CREATE TABLE tasks (id INTEGER PRIMARY KEY, task_name TEXT NOT NULL)")
+    conn.execute("INSERT INTO tasks (id, task_name) VALUES (0, 'old')")
+    init_schema(conn)
+    row = conn.execute("SELECT search_source FROM tasks WHERE id = 0").fetchone()
+    conn.close()
+    assert row == ("web",)
+
+
 def test_create_task_accepts_cron_alias(api_client, sample_task_payload):
     payload = dict(sample_task_payload)
     payload["cron"] = "@daily"

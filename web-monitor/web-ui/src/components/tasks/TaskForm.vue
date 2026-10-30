@@ -10,6 +10,7 @@ import { toast } from '@/components/ui/toast'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import TaskRegionSelector from '@/components/tasks/TaskRegionSelector.vue'
+import { getIPhoneStatus, type IPhoneStatus } from '@/api/iphone'
 
 type FormMode = 'create' | 'edit'
 type EmittedData = TaskGenerateRequest | Partial<Task>
@@ -35,6 +36,37 @@ const selectedAccountStateFile = ref(AUTO_ACCOUNT_VALUE)
 const keywordRulesInput = ref('')
 const excludeKeywordRulesInput = ref('')
 const cronMode = ref<'preset' | 'custom'>('preset')
+const iphoneStatus = ref<IPhoneStatus | null>(null)
+const iphoneStatusLoading = ref(false)
+const iphoneStatusError = ref('')
+const isIPhoneSource = computed(() => form.value.search_source === 'iphone')
+
+async function loadIPhoneStatus() {
+  iphoneStatusLoading.value = true
+  iphoneStatusError.value = ''
+  try {
+    iphoneStatus.value = await getIPhoneStatus()
+  } catch (error) {
+    iphoneStatus.value = null
+    iphoneStatusError.value = error instanceof Error ? error.message : String(error)
+  } finally {
+    iphoneStatusLoading.value = false
+  }
+}
+
+const connectedIPhones = computed(() => {
+  const selected = iphoneStatus.value?.selected_udids || []
+  return (iphoneStatus.value?.devices || []).filter(
+    (device) => device.connected && (!selected.length || selected.includes(device.udid))
+  )
+})
+
+function formatWdaExpiry(value: string) {
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return value
+  const pad = (part: number) => String(part).padStart(2, '0')
+  return `${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`
+}
 
 // 常用 cron 预设选项
 const cronPresets = computed(() => [
@@ -113,6 +145,7 @@ watch(() => [props.mode, props.initialData, props.defaultValues, props.defaultAc
       new_publish_option:
         defaultValues.new_publish_option || props.initialData.new_publish_option || '__none__',
       region: defaultValues.region || props.initialData.region || '',
+      search_source: defaultValues.search_source || props.initialData.search_source || 'web',
       decision_mode: defaultValues.decision_mode || props.initialData.decision_mode || 'ai',
     }
     keywordRulesInput.value = (defaultValues.keyword_rules || props.initialData.keyword_rules || []).join('\n')
@@ -140,6 +173,7 @@ watch(() => [props.mode, props.initialData, props.defaultValues, props.defaultAc
       free_shipping: true,
       new_publish_option: '__none__',
       region: '',
+      search_source: 'web',
       decision_mode: 'ai',
       ...defaultValues,
     }
@@ -169,6 +203,12 @@ watch(() => [props.mode, props.initialData, props.defaultValues, props.defaultAc
   selectedAccountStateFile.value =
     form.value.account_state_file || props.defaultAccount || AUTO_ACCOUNT_VALUE
 }, { immediate: true, deep: true })
+
+watch(isIPhoneSource, (value) => {
+  if (value && !iphoneStatus.value && !iphoneStatusLoading.value) {
+    loadIPhoneStatus()
+  }
+}, { immediate: true })
 
 watch(accountStrategy, (value) => {
   form.value.account_strategy = value
@@ -226,7 +266,8 @@ function handleSubmit() {
 
   // Filter out fields that shouldn't be sent in update requests
   const { id, is_running, next_run_at, ...submitData } = form.value as any
-  const currentAccountStrategy = accountStrategy.value || 'auto'
+  const searchSource = form.value.search_source === 'iphone' ? 'iphone' : 'web'
+  const currentAccountStrategy = searchSource === 'iphone' ? 'auto' : accountStrategy.value || 'auto'
   if (currentAccountStrategy === 'fixed') {
     const currentAccountStateFile = selectedAccountStateFile.value || AUTO_ACCOUNT_VALUE
     if (currentAccountStateFile === AUTO_ACCOUNT_VALUE) {
@@ -256,6 +297,15 @@ function handleSubmit() {
     submitData.new_publish_option = ''
   }
 
+  submitData.search_source = searchSource
+  if (searchSource === 'iphone') {
+    // App 端不支持这些网页筛选，保存为关闭，避免任务配置与实际行为不一致。
+    submitData.personal_only = false
+    submitData.free_shipping = false
+    submitData.new_publish_option = ''
+    submitData.region = ''
+  }
+
   submitData.decision_mode = decisionMode
   submitData.account_strategy = currentAccountStrategy
   submitData.analyze_images = submitData.analyze_images !== false
@@ -279,6 +329,74 @@ function handleSubmit() {
       <div class="grid gap-2 sm:grid-cols-4 sm:items-center sm:gap-4">
         <Label for="keyword" class="sm:text-right">{{ t('tasks.form.keyword') }}</Label>
         <Input id="keyword" v-model="form.keyword" class="sm:col-span-3" :placeholder="t('tasks.form.keywordPlaceholder')" required />
+      </div>
+      <div class="grid gap-2 sm:grid-cols-4 sm:items-start sm:gap-4">
+        <Label class="sm:pt-2 sm:text-right">{{ t('tasks.form.searchSource') }}</Label>
+        <div class="space-y-2 sm:col-span-3">
+          <Select v-model="form.search_source">
+            <SelectTrigger>
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="web">{{ t('tasks.form.searchSourceOptions.web') }}</SelectItem>
+              <SelectItem value="iphone">{{ t('tasks.form.searchSourceOptions.iphone') }}</SelectItem>
+            </SelectContent>
+          </Select>
+          <p class="text-xs text-gray-500">
+            {{ isIPhoneSource ? t('tasks.form.searchSourceHint.iphone') : t('tasks.form.searchSourceHint.web') }}
+          </p>
+          <div v-if="isIPhoneSource" class="rounded-md border border-slate-200 bg-slate-50 p-3 text-xs text-slate-600">
+            <div class="mb-2 flex items-center justify-between">
+              <span v-if="iphoneStatusLoading">{{ t('tasks.form.iphoneStatus.checking') }}</span>
+              <span v-else-if="iphoneStatusError" class="text-red-600">
+                {{ t('tasks.form.iphoneStatus.loadFailed') }}：{{ iphoneStatusError }}
+              </span>
+              <span v-else-if="iphoneStatus?.device_error" class="text-red-600">{{ iphoneStatus.device_error }}</span>
+              <span v-else />
+              <button type="button" class="text-blue-600 hover:underline" :disabled="iphoneStatusLoading" @click="loadIPhoneStatus">
+                {{ t('tasks.form.iphoneStatus.refresh') }}
+              </button>
+            </div>
+            <dl v-if="iphoneStatus && !iphoneStatusLoading" class="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1">
+              <dt class="font-medium">{{ t('tasks.form.iphoneStatus.devices') }}</dt>
+              <dd :class="connectedIPhones.length ? 'text-emerald-700' : 'text-red-600'">
+                <template v-if="connectedIPhones.length">
+                  {{ connectedIPhones.map((device) => `${device.name} (iOS ${device.os_version})`).join('、') }}
+                </template>
+                <template v-else>{{ t('tasks.form.iphoneStatus.noDevice') }}</template>
+              </dd>
+              <dt class="font-medium">{{ t('tasks.form.iphoneStatus.appium') }}</dt>
+              <dd :class="iphoneStatus.appium_ready || iphoneStatus.appium_autostart ? 'text-emerald-700' : 'text-red-600'">
+                {{
+                  iphoneStatus.appium_ready
+                    ? t('tasks.form.iphoneStatus.appiumReady')
+                    : iphoneStatus.appium_autostart
+                      ? t('tasks.form.iphoneStatus.appiumAutostart')
+                      : t('tasks.form.iphoneStatus.appiumMissing')
+                }}
+                <span class="text-slate-400">{{ iphoneStatus.appium_server_url }}</span>
+              </dd>
+              <dt class="font-medium">{{ t('tasks.form.iphoneStatus.wda') }}</dt>
+              <dd v-if="!iphoneStatus.wda_configured" class="text-red-600">{{ t('tasks.form.iphoneStatus.wdaMissing') }}</dd>
+              <dd v-else-if="iphoneStatus.wda_issue" :class="iphoneStatus.wda_auto_sign ? 'text-amber-600' : 'text-red-600'">
+                {{
+                  iphoneStatus.wda_auto_sign
+                    ? t('tasks.form.iphoneStatus.wdaWillResign', { reason: iphoneStatus.wda_issue })
+                    : t('tasks.form.iphoneStatus.wdaNeedsRebuild', { reason: iphoneStatus.wda_issue })
+                }}
+              </dd>
+              <dd v-else class="text-emerald-700">
+                <template v-if="iphoneStatus.wda_expires_at">
+                  {{ t('tasks.form.iphoneStatus.wdaSignedUntil', { date: formatWdaExpiry(iphoneStatus.wda_expires_at) }) }}
+                </template>
+                <template v-else>{{ t('tasks.form.iphoneStatus.wdaReady') }}</template>
+                <span class="text-slate-400">
+                  {{ iphoneStatus.wda_auto_sign ? t('tasks.form.iphoneStatus.wdaAutoSign') : t('tasks.form.iphoneStatus.wdaManualSign') }}
+                </span>
+              </dd>
+            </dl>
+          </div>
+        </div>
       </div>
       <div class="grid gap-2 sm:grid-cols-4 sm:items-center sm:gap-4">
         <Label class="sm:text-right">{{ t('tasks.form.decisionMode') }}</Label>
@@ -393,7 +511,7 @@ function handleSubmit() {
           </Tabs>
         </div>
       </div>
-      <div class="grid gap-2 sm:grid-cols-4 sm:items-center sm:gap-4">
+      <div v-if="!isIPhoneSource" class="grid gap-2 sm:grid-cols-4 sm:items-center sm:gap-4">
         <Label class="sm:text-right">{{ t('tasks.form.accountStrategyLabel') }}</Label>
         <div class="space-y-2 sm:col-span-3">
           <select
@@ -410,7 +528,7 @@ function handleSubmit() {
           </p>
         </div>
       </div>
-      <div v-if="accountStrategy === 'fixed'" class="grid gap-2 sm:grid-cols-4 sm:items-center sm:gap-4">
+      <div v-if="!isIPhoneSource && accountStrategy === 'fixed'" class="grid gap-2 sm:grid-cols-4 sm:items-center sm:gap-4">
         <Label class="sm:text-right">{{ t('tasks.form.fixedAccount') }}</Label>
         <div class="sm:col-span-3">
           <select
@@ -425,19 +543,19 @@ function handleSubmit() {
           </select>
         </div>
       </div>
-      <div class="grid gap-2 sm:grid-cols-4 sm:items-center sm:gap-4">
+      <div v-if="!isIPhoneSource" class="grid gap-2 sm:grid-cols-4 sm:items-center sm:gap-4">
         <Label for="personal-only" class="sm:text-right">{{ t('tasks.form.personalOnly') }}</Label>
         <div class="sm:col-span-3">
           <Switch id="personal-only" v-model="form.personal_only" />
         </div>
       </div>
-      <div class="grid gap-2 sm:grid-cols-4 sm:items-center sm:gap-4">
+      <div v-if="!isIPhoneSource" class="grid gap-2 sm:grid-cols-4 sm:items-center sm:gap-4">
         <Label for="free-shipping" class="sm:text-right">{{ t('tasks.form.freeShipping') }}</Label>
         <div class="sm:col-span-3">
           <Switch id="free-shipping" v-model="form.free_shipping" />
         </div>
       </div>
-      <div class="grid gap-2 sm:grid-cols-4 sm:items-center sm:gap-4">
+      <div v-if="!isIPhoneSource" class="grid gap-2 sm:grid-cols-4 sm:items-center sm:gap-4">
         <Label class="sm:text-right">{{ t('tasks.form.newPublish') }}</Label>
         <div class="sm:col-span-3">
           <Select v-model="form.new_publish_option as any">
@@ -455,7 +573,7 @@ function handleSubmit() {
           </Select>
         </div>
       </div>
-      <div class="grid gap-2 sm:grid-cols-4 sm:items-center sm:gap-4">
+      <div v-if="!isIPhoneSource" class="grid gap-2 sm:grid-cols-4 sm:items-center sm:gap-4">
         <Label class="sm:text-right">{{ t('tasks.form.region') }}</Label>
         <div class="space-y-1 sm:col-span-3">
           <TaskRegionSelector v-model="form.region as any" />

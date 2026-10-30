@@ -206,6 +206,18 @@ def load_processed_link_keys(keyword: str) -> set[str]:
     return {str(row["link_unique_key"]) for row in rows if row["link_unique_key"]}
 
 
+def load_processed_title_prices(keyword: str) -> list[tuple[str, float]]:
+    """已处理商品的标题与价格，用于 iPhone 列表在打开详情前预先去重。"""
+    bootstrap_sqlite_storage()
+    filename = build_result_filename(keyword)
+    with sqlite_connection() as conn:
+        rows = conn.execute(
+            "SELECT title, price FROM result_items WHERE result_filename = ? AND price IS NOT NULL",
+            (filename,),
+        ).fetchall()
+    return [(str(row["title"] or ""), float(row["price"])) for row in rows if row["title"]]
+
+
 async def list_result_filenames() -> list[str]:
     return await asyncio.to_thread(_list_result_filenames_sync)
 

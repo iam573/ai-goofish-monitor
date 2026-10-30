@@ -89,8 +89,8 @@ def _import_tasks_if_needed(conn, legacy_config_file: str | None) -> None:
                 ai_prompt_base_file, ai_prompt_criteria_file, account_state_file,
                 account_strategy, free_shipping, new_publish_option, region,
                 decision_mode, keyword_rules_json, exclude_keyword_rules_json,
-                is_running
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                is_running, search_source
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 index,
@@ -115,6 +115,7 @@ def _import_tasks_if_needed(conn, legacy_config_file: str | None) -> None:
                 json.dumps(keyword_rules, ensure_ascii=False),
                 json.dumps(exclude_keyword_rules, ensure_ascii=False),
                 _as_int(raw_task.get("is_running", False)),
+                "iphone" if raw_task.get("search_source") == "iphone" else "web",
             ),
         )
     _mark_bootstrap_completed(conn, TASKS_BOOTSTRAP_KEY)

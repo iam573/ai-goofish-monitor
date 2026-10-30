@@ -13,6 +13,7 @@ httpx[socks]
 Pillow
 pyzbar
 qrcode
+Appium-Python-Client>=5.2,<6
 pytest
 pytest-asyncio
 coverage

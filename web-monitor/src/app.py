@@ -2,6 +2,7 @@
 新架构的主应用入口
 整合所有路由和服务
 """
+import asyncio
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
@@ -17,12 +18,14 @@ from src.api.routes import (
     login_state,
     websocket,
     accounts,
+    iphone,
 )
 from src.api.dependencies import (
     set_process_service,
     set_scheduler_service,
     set_task_generation_service,
 )
+from src.services.iphone_proxy_service import shutdown_proxy_service, sync_proxy_service
 from src.services.task_service import TaskService
 from src.services.process_service import ProcessService
 from src.services.scheduler_service import SchedulerService
@@ -110,6 +113,7 @@ async def lifespan(app: FastAPI):
     # 加载定时任务
     await scheduler_service.reload_jobs(tasks_list)
     scheduler_service.start()
+    await asyncio.to_thread(sync_proxy_service)
 
     print("应用启动完成")
 
@@ -119,6 +123,7 @@ async def lifespan(app: FastAPI):
     print("正在关闭应用...")
     scheduler_service.stop()
     await process_service.stop_all()
+    await asyncio.to_thread(shutdown_proxy_service)
     print("应用已关闭")
 
 
@@ -140,6 +145,7 @@ app.include_router(results.router)
 app.include_router(login_state.router)
 app.include_router(websocket.router)
 app.include_router(accounts.router)
+app.include_router(iphone.router)
 
 # 挂载静态文件
 # 旧的静态文件目录（用于截图等）

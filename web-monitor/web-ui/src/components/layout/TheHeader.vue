@@ -3,6 +3,7 @@ import { computed, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { Button } from '@/components/ui/button'
 import DashboardTaskSearch from '@/components/layout/DashboardTaskSearch.vue'
+import IPhoneDevicePicker from '@/components/layout/IPhoneDevicePicker.vue'
 import LocaleToggle from '@/components/layout/LocaleToggle.vue'
 import { 
   Zap, 
@@ -78,6 +79,7 @@ function goPrompts() {
     <!-- Actions -->
     <div class="flex items-center gap-3">
       <div class="flex items-center gap-2">
+        <IPhoneDevicePicker />
         <LocaleToggle />
       </div>
 

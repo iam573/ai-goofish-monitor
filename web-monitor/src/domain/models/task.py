@@ -143,6 +143,7 @@ class Task(BaseModel):
     free_shipping: bool = True
     new_publish_option: Optional[str] = None
     region: Optional[str] = None
+    search_source: Literal["web", "iphone"] = "web"
     decision_mode: Literal["ai", "keyword"] = "ai"
     keyword_rules: List[str] = Field(default_factory=list)
     exclude_keyword_rules: List[str] = Field(default_factory=list)
@@ -199,6 +200,7 @@ class TaskCreate(BaseModel):
     free_shipping: bool = True
     new_publish_option: Optional[str] = None
     region: Optional[str] = None
+    search_source: Literal["web", "iphone"] = "web"
     decision_mode: Literal["ai", "keyword"] = "ai"
     keyword_rules: List[str] = Field(default_factory=list)
     exclude_keyword_rules: List[str] = Field(default_factory=list)
@@ -272,6 +274,7 @@ class TaskUpdate(BaseModel):
     free_shipping: Optional[bool] = None
     new_publish_option: Optional[str] = None
     region: Optional[str] = None
+    search_source: Optional[Literal["web", "iphone"]] = None
     decision_mode: Optional[Literal["ai", "keyword"]] = None
     keyword_rules: Optional[List[str]] = None
     exclude_keyword_rules: Optional[List[str]] = None
@@ -342,6 +345,7 @@ class TaskGenerateRequest(BaseModel):
     free_shipping: bool = True
     new_publish_option: Optional[str] = None
     region: Optional[str] = None
+    search_source: Literal["web", "iphone"] = "web"
     decision_mode: Literal["ai", "keyword"] = "ai"
     keyword_rules: List[str] = Field(default_factory=list)
     exclude_keyword_rules: List[str] = Field(default_factory=list)
