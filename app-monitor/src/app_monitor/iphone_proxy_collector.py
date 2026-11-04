@@ -98,7 +98,7 @@ class IPhoneProxyCollector(IPhoneCollector):
     def _connect(self, udid, os_version):
         from appium import webdriver
         from appium.options.ios import XCUITestOptions
-        if not self.settings.ios_wda_bundle_id:
+        if not (self.settings.preinstalled_wda_bundle(udid) or self.settings.ios_wda_bundle_id):
             raise RuntimeError("未配置 IOS_WDA_BUNDLE_ID")
         ensure_appium_server(self.settings)
         caps = {"platformName": "iOS", "appium:automationName": "XCUITest", "appium:udid": udid,
@@ -111,8 +111,8 @@ class IPhoneProxyCollector(IPhoneCollector):
                 "appium:settings": {"waitForIdleTimeout": 0.5, "animationCoolOffTimeout": 0.3}}
         if os_version:
             caps["appium:platformVersion"] = os_version
-        return self._open_session(udid, lambda: webdriver.Remote(
-            self.settings.appium_server_url, options=XCUITestOptions().load_capabilities(caps)))
+        return self._open_session(udid, caps, lambda options: webdriver.Remote(
+            self.settings.appium_server_url, options=XCUITestOptions().load_capabilities(options)))
 
     def _drag_list(self, driver):
         source = driver.page_source

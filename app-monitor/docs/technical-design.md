@@ -377,3 +377,17 @@ WdaMaintenance共享注入两种iPhone采集器。会话入口在设备锁内检
 
 
 监控控制使用POST /api/monitor/start和/stop，只更新enabled；stop同时向当前搜索发送独立停止事件。ContextVar将事件传播到async处理及to_thread采集；MonitorStopped绕过普通采集恢复，但保留finally清理。Appium命令执行前后、代理等待、WDA构建及通知渠道之间检查停止，构建取消时结束子进程组。停止请求立即返回stopping状态，待当前指令及会话清理退出后才允许重启；不通过关闭代理服务来中断采集。用户终止以固定错误原因持久化并派生stopped展示字段，排除连续失败及失败聚合统计，保留已读取数据。
+
+### 按设备使用外部签名的已安装 WDA
+
+IOS_WDA_PREINSTALLED_DEVICES 是 UDID 到 runner bundle ID 的 JSON 映射，实际值仅存本地忽略配置。映射中的设备跳过 WdaMaintenance.ensure 的本机签名构建，两个 iPhone 采集入口共用 connect_preinstalled_wda：后台启动指定 runner 后立即打开闲鱼，使 runner 完成进入后台的 XCTest 初始化，再以独立 Node 子进程将临时 loopback 端口转发到该手机的 WDA 端口，校验 /status 中的包名及 ready，再设置 webDriverAgentUrl 建立会话。退出或启动异常回收转发进程；父进程消失时通过 stdin EOF 回收，避免占用其他设备端口。此模式不续签、不安装新包、不回退到本机团队签名，外部包需要独立验证可启动并能读取控件。未映射设备仍按全局配置维护和启动 WDA。
+
+### 外部签名设备的 SSH 构建与本机安装
+
+映射设备同时配置 IOS_WDA_REMOTE_HOST、IOS_WDA_REMOTE_TEAM_ID 且启用自动维护时，WdaMaintenance 将维护委托给 RemoteWdaMaintenance，使用按设备与包名隔离的本地缓存。只在需要续签、缓存缺失或恢复时连接构建机，不依赖远端持续在线。SSH 密钥位于用户 ~/.ssh，实际主机、团队及设备值仅存忽略配置。
+
+本机上传固定依赖版本的 WDA 源码归档及标准库构建脚本；SSH 触发远端临时 GUI LaunchAgent，以桌面会话的钥匙串访问权限构建 generic iOS 真机包，不要求手机连接远端。构建后验证团队、目标设备、描述文件覆盖范围及实际包名，移除独立运行不需要的内嵌 XCTest 框架并沿用原签名身份重签，打包返回校验和。私钥和 Apple 账户状态不传回本机。
+
+本机校验下载校验和、签名、包名和描述文件，按证书与描述文件最早到期时间提前维护，通过原有构建锁、退避及原子替换机制更新缓存。安装成功后记录签名包指纹，相同包不重复安装，源码变化导致签名资源变化时重新安装；完成后沿用预安装 WDA 的启动与 Appium 连接路径。手机采集锁覆盖维护、安装和会话，其他设备的本地签名及调度不变。
+
+WDA 维护的 ensure 入口仅负责按设备路由，_ensure 统一负责签名检查、构建锁与退避，远端复用该流程而不修改设备映射。短期子进程通过 stop_control.run_process 共用取消和超时回收；已验证产物通过 replace_products 共用替换与回滚。截图和预安装 WDA 共用 preinstalled_wda.cjs 导出的 forwardDevicePort，分别保持各自请求和会话生命周期。安装指纹包含描述文件、签名资源及主可执行文件，以识别同一描述文件签名的不同构建。

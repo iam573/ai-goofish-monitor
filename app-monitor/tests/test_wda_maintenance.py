@@ -158,7 +158,7 @@ def test_both_collectors_use_shared_maintenance_session_hook(maintenance, monkey
     attempts = []
     monkeypatch.setattr(maintenance, "ensure", lambda udid, **kw: attempts.append(udid))
     driver = object()
-    assert collector._open_session("phone", lambda: driver) is driver
+    assert collector._open_session("phone", {}, lambda options: driver) is driver
     assert attempts == ["phone"]
 
 

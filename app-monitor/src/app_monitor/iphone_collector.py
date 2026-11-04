@@ -25,6 +25,7 @@ from PIL import Image
 from .appium_server import ensure_appium_server, wda_port_capabilities
 from .collector import CollectResult, DetailCheck, ItemCallback, emit_safely, guess_region
 from .config import ROOT, Settings
+from .preinstalled_wda import connect_preinstalled_wda
 from .instance_lock import exclusive_device
 from .stop_control import checkpoint, guard_driver
 from .matching import normalize_search_text
@@ -702,8 +703,9 @@ def _pasteboard(driver: Any, *, settings: Settings, content: str | None = None) 
     Clipboard contents must never be included in errors or logs.
     """
     checkpoint()
-    runner = settings.ios_wda_bundle_id.removesuffix(".xctrunner") + ".xctrunner"
-    if not settings.ios_wda_bundle_id:
+    bundle = settings.preinstalled_wda_bundle(str(getattr(driver, "capabilities", {}).get("udid", ""))) or settings.ios_wda_bundle_id
+    runner = bundle.removesuffix(".xctrunner") + ".xctrunner"
+    if not bundle:
         raise RuntimeError("手机剪贴板不可用：未配置 WDA bundle ID")
     try:
         idle_timeout = driver.get_settings().get("waitForIdleTimeout", 0.5)
@@ -751,10 +753,12 @@ class IPhoneCollector:
         self.settings = settings
         self.wda_maintenance = None
 
-    def _open_session(self, udid, factory):
+    def _open_session(self, udid, capabilities, factory):
         def guarded_factory():
             checkpoint()
-            return guard_driver(factory())
+            if self.settings.preinstalled_wda_bundle(udid):
+                return guard_driver(connect_preinstalled_wda(self.settings, udid, capabilities, factory))
+            return guard_driver(factory(capabilities))
 
         if self.wda_maintenance is not None:
             return self.wda_maintenance.connect(udid, guarded_factory)
@@ -808,7 +812,7 @@ class IPhoneCollector:
         from appium import webdriver
         from appium.options.ios import XCUITestOptions
 
-        if not self.settings.ios_wda_bundle_id:
+        if not (self.settings.preinstalled_wda_bundle(udid) or self.settings.ios_wda_bundle_id):
             raise RuntimeError("未配置 IOS_WDA_BUNDLE_ID；请填写已签名的 WebDriverAgent bundle ID")
         ensure_appium_server(self.settings)
         capabilities = {
@@ -836,9 +840,9 @@ class IPhoneCollector:
         try:
             try:
                 emit_safely(on_items, stage="检查手机连接，必要时自动恢复")
-                driver = self._open_session(udid, lambda: webdriver.Remote(
+                driver = self._open_session(udid, capabilities, lambda caps: webdriver.Remote(
                     self.settings.appium_server_url,
-                    options=XCUITestOptions().load_capabilities(capabilities),
+                    options=XCUITestOptions().load_capabilities(caps),
                 ))
             except Exception as exc:
                 raise RuntimeError(f"iPhone Appium 连接失败（检查服务、WDA 和 Inspector 会话）：{exc}") from exc

@@ -171,3 +171,13 @@ experiments/        早期 Appium/XCUITest 实验
 ```
 
 旧版本的手动任务表 `monitor_tasks` 和命中表 `matches` 会原样保留在数据库里，但不再使用；新的命中记录在 `deals` 表，搜索记录在 `search_runs` 表。
+
+### 外部签名的已安装 WDA
+
+本机 `.env` 可设置 `IOS_WDA_PREINSTALLED_DEVICES='{"设备UDID":"io.example.wda.xctrunner"}'`，按设备指定外部签名的 WDA。仅映射中的设备跳过本机 Xcode 构建和续签，通过系统工具后台启动、USB 独立端口转发和 `webDriverAgentUrl` 建立会话；会话退出后释放转发。其他手机继续使用全局 WDA 配置。
+
+此模式不自动续签。启动 runner 后会打开闲鱼，使 runner 进入后台完成 XCTest 初始化。新包需验证独立启动及控件读取，进程启动不代表控制接口可用；接口不可用时不会改用本机团队重签。修改配置后应在采集空闲时重启后台。
+
+为上述设备开启远端自动维护时，可增加 `IOS_WDA_REMOTE_HOST=SSH主机别名` 和 `IOS_WDA_REMOTE_TEAM_ID=开发团队ID`。本机提前 12 小时检查签名有效期；需要更新时上传固定版本 WDA 源码，由远端已登录桌面会话的一次性 LaunchAgent 构建、签名并打包，再通过 SSH 下载，校验校验和、包名、团队、设备和有效期，通过本机 USB 安装。签名私钥保留在远端，SSH 密钥使用用户的 `~/.ssh` 配置，不保存 SSH 或钥匙串密码。
+
+构建机需要已登录桌面、可用的 Xcode 账号和已授权的签名钥匙串；远端暂不可用时，有效且已缓存的 WDA 仍可继续使用。续签或修复失败沿用设备级退避与页面处理提示；未映射的旧系统手机仍使用本机原有流程。

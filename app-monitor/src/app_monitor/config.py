@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import json
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -45,6 +46,9 @@ class Settings:
     )
     appium_server_url: str = os.environ.get("APPIUM_SERVER_URL", "http://127.0.0.1:4723").rstrip("/")
     ios_wda_bundle_id: str = os.environ.get("IOS_WDA_BUNDLE_ID", "").strip()
+    ios_wda_remote_host: str = os.environ.get("IOS_WDA_REMOTE_HOST", "").strip()
+    ios_wda_remote_team_id: str = os.environ.get("IOS_WDA_REMOTE_TEAM_ID", "").strip()
+    ios_wda_preinstalled_devices: str = os.environ.get("IOS_WDA_PREINSTALLED_DEVICES", "{}").strip()
     ios_wda_derived_data_path: Path = _path_env("IOS_WDA_DERIVED_DATA_PATH", "/tmp/goofish-wda-probe")
     ios_wda_auto_renew: bool = os.environ.get("IOS_WDA_AUTO_RENEW", "true").lower() in {"true", "1", "yes"}
     ios_wda_team_id: str = os.environ.get("IOS_WDA_TEAM_ID", "").strip()
@@ -61,6 +65,16 @@ class Settings:
     webhook_content_type: str = os.environ.get("WEBHOOK_CONTENT_TYPE", "JSON").strip().upper()
     webhook_query_parameters: str = os.environ.get("WEBHOOK_QUERY_PARAMETERS", "").strip()
     webhook_body: str = os.environ.get("WEBHOOK_BODY", "").strip()
+
+    def preinstalled_wda_bundle(self, udid: str) -> str:
+        mapping = json.loads(self.ios_wda_preinstalled_devices)
+        if not isinstance(mapping, dict) or any(
+            not isinstance(key, str) or not isinstance(value, str) or not value.strip()
+            for key, value in mapping.items()
+        ):
+            raise ValueError("IOS_WDA_PREINSTALLED_DEVICES 必须为设备 UDID 到 WDA bundle ID 的 JSON 对象")
+        bundle = mapping.get(udid, "").strip()
+        return bundle.removesuffix(".xctrunner") + ".xctrunner" if bundle else ""
 
     @property
     def data_dir(self) -> Path:

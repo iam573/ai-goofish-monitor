@@ -393,3 +393,15 @@ def test_share_cleanup_also_handles_invisible_copy_image():
     driver.panel = True
     IPhoneCollector._close_share_sheet(driver)
     assert not driver.panel and not driver.copied
+
+
+def test_clipboard_uses_device_specific_external_runner():
+    from dataclasses import replace
+    import json
+    driver = ClipboardDriver()
+    driver.capabilities = {'udid': 'external-phone'}
+    driver.settings = replace(driver.settings, ios_wda_bundle_id='other.device.runner',
+                              ios_wda_preinstalled_devices=json.dumps({'external-phone': 'test.runner.xctrunner'}))
+    marker = _prepare_pasteboard(driver, settings=driver.settings)
+    assert marker
+    assert driver.foreground == driver.settings.bundle_id

@@ -48,3 +48,19 @@ async def test_stop_interrupts_proxy_wait_in_worker_thread(tmp_path):
         event.set()
         with pytest.raises(MonitorStopped):
             await asyncio.wait_for(task, 1)
+
+
+def test_process_timeout_reaps_child(monkeypatch):
+    import subprocess
+    import sys
+    from app_monitor.stop_control import run_process
+    original = subprocess.Popen
+    children = []
+    def start(*args, **kwargs):
+        process = original(*args, **kwargs)
+        children.append(process)
+        return process
+    monkeypatch.setattr(subprocess, 'Popen', start)
+    with pytest.raises(subprocess.TimeoutExpired):
+        run_process([sys.executable, '-c', 'import time; time.sleep(60)'], timeout=.1)
+    assert children and children[0].poll() is not None

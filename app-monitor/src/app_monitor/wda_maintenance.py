@@ -7,7 +7,6 @@ import os
 import plistlib
 import re
 import shutil
-import signal
 import subprocess
 import tempfile
 import time
@@ -16,7 +15,7 @@ from pathlib import Path
 
 from .config import ROOT
 from .instance_lock import _exclusive
-from .stop_control import checkpoint
+from .stop_control import checkpoint, run_process
 
 APP = Path("Build/Products/Debug-iphoneos/WebDriverAgentRunner-Runner.app")
 RENEW_BEFORE = 12 * 3600
@@ -89,6 +88,21 @@ def action_for_error(error: str) -> tuple[str, str]:
     return "wda_repair", "WDA 自动恢复未成功，请在 Xcode 的 Devices and Simulators 检查设备连接与 WDA 签名，然后点击立即重试。"
 
 
+def replace_products(derived: Path, candidate: Path, backup: Path) -> None:
+    """Publish a verified build, restoring the old package if replacement fails."""
+    checkpoint()
+    products = derived / 'Build/Products'
+    products.parent.mkdir(parents=True, exist_ok=True)
+    if products.exists():
+        products.rename(backup)
+    try:
+        candidate.rename(products)
+    except BaseException:
+        if backup.exists():
+            backup.rename(products)
+        raise
+
+
 class WdaMaintenance:
     def __init__(self, settings, database):
         self.settings, self.database = settings, database
@@ -126,6 +140,14 @@ class WdaMaintenance:
 
     def ensure(self, udid: str, *, force: bool = False) -> bool:
         checkpoint()
+        if self.settings.preinstalled_wda_bundle(udid):
+            if self.settings.ios_wda_remote_host and self.settings.ios_wda_auto_renew:
+                from .remote_wda import RemoteWdaMaintenance
+                return RemoteWdaMaintenance(self.settings, self.database, udid).ensure(udid, force=force)
+            return True  # Externally signed WDA must never be rebuilt with the local team.
+        return self._ensure(udid, force=force)
+
+    def _ensure(self, udid: str, *, force: bool = False) -> bool:
         if not self.settings.ios_wda_auto_renew:
             return True
         derived = self.settings.ios_wda_derived_data_path
@@ -209,28 +231,9 @@ class WdaMaintenance:
                        "-allowProvisioningDeviceRegistration", "build-for-testing",
                        f"DEVELOPMENT_TEAM={team}", "CODE_SIGN_STYLE=Automatic", "CODE_SIGN_IDENTITY=Apple Development"]
             checkpoint()
-            process = subprocess.Popen(command, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                       text=True, start_new_session=True)
-            try:
-                deadline = time.monotonic() + 600
-                while True:
-                    checkpoint()
-                    try:
-                        output, _ = process.communicate(timeout=.2)
-                        break
-                    except subprocess.TimeoutExpired:
-                        if time.monotonic() >= deadline:
-                            raise RuntimeError("WDA 构建超时，请检查 Xcode 和网络") from None
-            except BaseException:
-                if process.poll() is None:
-                    try:
-                        os.killpg(process.pid, signal.SIGKILL)
-                    except ProcessLookupError:
-                        pass
-                process.communicate()
-                raise
-            checkpoint()
-            if process.returncode:
+            completed = run_process(command, env=env, timeout=600)
+            output = completed.stdout + '\n' + completed.stderr
+            if completed.returncode:
                 # Raw output is used locally for classification only.
                 errors = [line for line in output.splitlines() if re.search(
                     r"(?i)(?:^|\s)(?:fatal )?error:|error domain=|session has expired|no accounts|errSecInternalComponent", line)]
@@ -243,18 +246,7 @@ class WdaMaintenance:
                 raise RuntimeError("新构建 WDA bundle ID 不匹配，未替换现有 WDA")
             subprocess.run(["codesign", "--verify", "--deep", "--strict", str(candidate / APP)],
                            capture_output=True, timeout=30, check=True)
-            products = derived / "Build/Products"
-            checkpoint()
-            products.parent.mkdir(parents=True, exist_ok=True)
-            backup = staging / "previous-products"
-            if products.exists():
-                products.rename(backup)
-            try:
-                (candidate / "Build/Products").rename(products)
-            except OSError:
-                if backup.exists():
-                    backup.rename(products)
-                raise
+            replace_products(derived, candidate / 'Build/Products', staging / 'previous-products')
 
     def connect(self, udid: str, factory):
         checkpoint()
